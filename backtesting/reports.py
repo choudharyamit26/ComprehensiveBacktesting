@@ -2,469 +2,540 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 import json
+import logging
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class PerformanceAnalyzer:
-    """
-    Comprehensive performance analysis and reporting for backtesting results.
-    """
+    """Comprehensive performance analysis and reporting for backtesting results."""
 
     def __init__(self, strategy_results, initial_cash=100000.0):
+        """Initialize the performance analyzer.
+
+        Args:
+            strategy_results: Backtrader strategy results (list or single instance).
+            initial_cash (float): Initial portfolio cash.
+        """
         self.results = strategy_results
         self.initial_cash = initial_cash
-        print("Initializing PerformanceAnalyzer with results:", self.results)
-        # Fix: Use proper None check for Backtrader objects
-        self.strategy = (
-            strategy_results[0]
-            if strategy_results and len(strategy_results) > 0
-            else None
-        )
+        # Accept both a list of results or a single strategy instance
+        if isinstance(strategy_results, list) and strategy_results:
+            self.strategy = (
+                strategy_results[0]
+                if strategy_results and len(strategy_results) > 0
+                else None
+            )
+        else:
+            self.strategy = strategy_results
+        logger.info("Initialized PerformanceAnalyzer")
 
     def generate_full_report(self):
-        """Generate a comprehensive performance report."""
+        """Generate a comprehensive performance report.
 
-        # Fix: Use is None instead of not self.strategy
+        Returns:
+            dict: Report with summary, trade analysis, risk metrics, and drawdown analysis.
+
+        Example:
+            >>> analyzer = PerformanceAnalyzer(results)
+            >>> report = analyzer.generate_full_report()
+        """
         if self.strategy is None:
-            return "No strategy results available"
-
-        report = {
-            "summary": self.get_performance_summary(),
-            "trade_analysis": self.get_trade_analysis(),
-            "risk_metrics": self.get_risk_metrics(),
-            "monthly_returns": self.get_monthly_returns(),
-            "drawdown_analysis": self.get_drawdown_analysis(),
-        }
-
-        return report
-
-    def get_performance_summary(self):
-        """Get basic performance metrics."""
+            logger.error("No strategy results available")
+            return {"error": "No strategy results available"}
 
         try:
-            # Fix: Add None check before accessing analyzers
-            if self.strategy is None:
-                return {"error": "No strategy available"}
+            report = {
+                "summary": self.get_performance_summary(),
+                "trade_analysis": self.get_trade_analysis(),
+                "risk_metrics": self.get_risk_metrics(),
+                "monthly_returns": self.get_monthly_returns(),
+                "drawdown_analysis": self.get_drawdown_analysis(),
+            }
+            logger.info("Generated full performance report")
+            return report
+        except Exception as e:
+            logger.error(
+                f"Error generating full report: {str(e)}. Check analyzer availability."
+            )
+            return {"error": f"Error generating report: {str(e)}"}
 
-            # Get analyzers with safe access
-            print(
-                "Analyzing performance returns summary...",
-                self.strategy.analyzers.returns.get_analysis(),
-            )
-            print(
-                "Analyzing performance sharpe summary...",
-                self.strategy.analyzers.sharpe.get_analysis(),
-            )
-            print(
-                "Analyzing performance drawdown summary...",
-                self.strategy.analyzers.drawdown.get_analysis(),
-            )
+    def get_performance_summary(self):
+        """Get basic performance metrics.
+
+        Returns:
+            dict: Summary metrics including returns, Sharpe ratio, Sortino ratio, and drawdown.
+        """
+        try:
+            if self.strategy is None:
+                raise ValueError("No strategy available")
 
             returns_analyzer = getattr(self.strategy.analyzers, "returns", None)
             sharpe_analyzer = getattr(self.strategy.analyzers, "sharpe", None)
+            sortino_analyzer = getattr(self.strategy.analyzers, "sortino", None)
             drawdown_analyzer = getattr(self.strategy.analyzers, "drawdown", None)
+            calmar_analyzer = getattr(self.strategy.analyzers, "calmar", None)
+            sqn_analyzer = getattr(self.strategy.analyzers, "sqn", None)
 
             if returns_analyzer is None:
-                return {"error": "Returns analyzer not available"}
+                raise ValueError("Returns analyzer not available")
 
-            # Calculate metrics with safe access
             returns_analysis = returns_analyzer.get_analysis()
             sharpe_analysis = sharpe_analyzer.get_analysis() if sharpe_analyzer else {}
+            sortino_analysis = (
+                sortino_analyzer.get_analysis() if sortino_analyzer else {}
+            )
             drawdown_analysis = (
                 drawdown_analyzer.get_analysis() if drawdown_analyzer else {}
             )
+            calmar_analysis = calmar_analyzer.get_analysis() if calmar_analyzer else {}
+            sqn_analysis = sqn_analyzer.get_analysis() if sqn_analyzer else {}
 
             total_return = returns_analysis.get("rtot", 0) or 0
             annual_return = returns_analysis.get("rnorm", 0) or 0
-            sharpe_ratio = (
-                sharpe_analysis.get("sharperatio", 0) if sharpe_analysis else 0
-            )
-            max_drawdown = (
-                drawdown_analysis.get("max", {}).get("drawdown", 0)
-                if drawdown_analysis
-                else 0
-            )
+            sharpe_ratio = sharpe_analysis.get("sharperatio", 0) or 0
+            sortino_ratio = sortino_analysis.get("sortinoratio", 0) or 0
+            max_drawdown = drawdown_analysis.get("max", {}).get("drawdown", 0) or 0
+            calmar_ratio = calmar_analysis.get("calmarratio", 0) or 0
+            sqn = sqn_analysis.get("sqn", 0) or 0
 
-            # Ensure no None values
-            total_return = (total_return or 0) * 100
-            annual_return = (annual_return or 0) * 100
-            sharpe_ratio = sharpe_ratio or 0
-            max_drawdown = max_drawdown or 0
-
-            # Final portfolio value
-            final_value = self.strategy.broker.getvalue()
             total_return_pct = (np.exp(total_return) - 1) * 100
             summary = {
                 "initial_cash": self.initial_cash,
-                "final_value": final_value,
+                "final_value": self.strategy.broker.getvalue(),
                 "total_return_pct": total_return_pct,
-                "annual_return_pct": annual_return,
+                "annual_return_pct": annual_return * 100,
                 "sharpe_ratio": sharpe_ratio,
+                "sortino_ratio": sortino_ratio,
                 "max_drawdown_pct": max_drawdown,
-                "profit_loss": final_value - self.initial_cash,
+                "calmar_ratio": calmar_ratio,
+                "sqn": sqn,
+                "profit_loss": self.strategy.broker.getvalue() - self.initial_cash,
             }
+            logger.info("Generated performance summary")
+            return summary
 
         except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            summary = {"error": f"Error calculating performance summary: {str(e)}"}
-
-        return summary
+            logger.error(
+                f"Error calculating performance summary: {str(e)}. Check analyzer setup."
+            )
+            return {"error": f"Error calculating performance summary: {str(e)}"}
 
     def get_trade_analysis(self):
-        """Analyze individual trades."""
+        """Analyze individual trades.
 
+        Returns:
+            dict: Trade metrics including win rate, average win/loss, and profit factor.
+        """
         try:
-            # Fix: Add None check
             if self.strategy is None:
-                return {"error": "No strategy available"}
+                raise ValueError("No strategy available")
 
             trades_analyzer = getattr(self.strategy.analyzers, "trades", None)
-
             if trades_analyzer is None:
-                return {"error": "Trade analyzer not available"}
+                raise ValueError("Trade analyzer not available")
 
             trade_analyzer = trades_analyzer.get_analysis()
-
-            total_trades = trade_analyzer.get("total", {}).get("total", 0)
+            total_trades = trade_analyzer.get("total", {}).get("total", 0) or 0
 
             if total_trades == 0:
+                logger.warning("No trades executed")
                 return {"total_trades": 0, "message": "No trades executed"}
+
             won_trades = trade_analyzer.get("won", {}).get("total", 0) or 0
             lost_trades = trade_analyzer.get("lost", {}).get("total", 0) or 0
+            win_rate = won_trades / total_trades * 100 if total_trades > 0 else 0
+            avg_win = (
+                trade_analyzer.get("won", {}).get("pnl", {}).get("average", 0) or 0
+            )
+            avg_loss = (
+                trade_analyzer.get("lost", {}).get("pnl", {}).get("average", 0) or 0
+            )
+            total_win_pnl = (
+                trade_analyzer.get("won", {}).get("pnl", {}).get("total", 0) or 0
+            )
+            total_loss_pnl = (
+                trade_analyzer.get("lost", {}).get("pnl", {}).get("total", 0) or 0
+            )
+            profit_factor = (
+                abs(total_win_pnl / total_loss_pnl)
+                if total_loss_pnl != 0
+                else float("inf")
+            )
 
             analysis = {
                 "total_trades": total_trades,
                 "winning_trades": won_trades,
                 "losing_trades": lost_trades,
-                "win_rate_pct": (
-                    (won_trades / total_trades) * 100 if total_trades > 0 else 0
-                ),
-                "avg_win": trade_analyzer.get("won", {})
-                .get("pnl", {})
-                .get("average", 0)
+                "win_rate_percent": win_rate,
+                "average_win": avg_win,
+                "average_loss": avg_loss,
+                "profit_factor": profit_factor,
+                "average_trade_duration": trade_analyzer.get("len", {}).get(
+                    "average", 0
+                )
                 or 0,
-                "avg_loss": trade_analyzer.get("lost", {})
-                .get("pnl", {})
-                .get("average", 0)
+                "max_winning_streak": trade_analyzer.get("streak", {})
+                .get("won", {})
+                .get("longest", 0)
                 or 0,
-                "largest_win": trade_analyzer.get("won", {})
-                .get("pnl", {})
-                .get("max", 0)
-                or 0,
-                "largest_loss": trade_analyzer.get("lost", {})
-                .get("pnl", {})
-                .get("max", 0)
-                or 0,
-                "total_pnl": trade_analyzer.get("pnl", {})
-                .get("net", {})
-                .get("total", 0)
+                "max_losing_streak": trade_analyzer.get("streak", {})
+                .get("lost", {})
+                .get("longest", 0)
                 or 0,
             }
-
-            # Calculate profit factor
-            total_wins = (
-                trade_analyzer.get("won", {}).get("pnl", {}).get("total", 0) or 0
-            )
-            total_losses = abs(
-                trade_analyzer.get("lost", {}).get("pnl", {}).get("total", 0) or 0
-            )
-            analysis["profit_factor"] = (
-                total_wins / total_losses if total_losses > 0 else float("inf")
-            )
+            logger.info("Generated trade analysis")
+            return analysis
 
         except Exception as e:
-            analysis = {"error": f"Error calculating trade analysis: {str(e)}"}
+            import traceback
 
-        return analysis
+            traceback.print_exc()
+            logger.error(
+                f"Error calculating trade analysis: {str(e)}. Check trade analyzer."
+            )
+            return {"error": f"Error calculating trade analysis: {str(e)}"}
 
     def get_risk_metrics(self):
-        """Calculate additional risk metrics."""
+        """Calculate risk-related metrics.
 
+        Returns:
+            dict: Risk metrics including volatility and VaR.
+        """
         try:
-            # Fix: Add None check
             if self.strategy is None:
-                return {"error": "No strategy available"}
+                raise ValueError("No strategy available")
 
-            # Get portfolio values over time
-            portfolio_values = []
-            data_len = len(self.strategy.data)
+            timereturn_analyzer = getattr(self.strategy.analyzers, "timereturn", None)
+            if timereturn_analyzer is None:
+                logger.warning("TimeReturn analyzer not available")
+                return {"message": "TimeReturn analyzer not available"}
 
-            if data_len < 2:
-                return {"error": "Insufficient data for risk calculations"}
+            returns = pd.Series(timereturn_analyzer.get_analysis())
+            if returns.empty:
+                logger.warning("No returns data available for risk metrics")
+                return {"message": "No returns data available"}
 
-            # Simple approximation - in reality you'd track daily values
-            initial_value = self.initial_cash
-            final_value = self.strategy.broker.getvalue()
+            annualized_volatility = returns.std() * np.sqrt(252) * 100
+            var_95 = np.percentile(returns, 5) * 100
+            var_99 = np.percentile(returns, 1) * 100
 
-            # Create a simple linear progression for demonstration
-            # In practice, you'd want to track actual daily portfolio values
-            for i in range(data_len):
-                progress = i / (data_len - 1) if data_len > 1 else 0
-                value = initial_value + (final_value - initial_value) * progress
-                portfolio_values.append(value)
-
-            # Calculate returns
-            returns = np.diff(portfolio_values) / portfolio_values[:-1]
-
-            # Risk metrics
-            volatility = np.std(returns) * np.sqrt(252) * 100  # Annualized
-            downside_returns = returns[returns < 0]
-            downside_volatility = (
-                np.std(downside_returns) * np.sqrt(252) * 100
-                if len(downside_returns) > 0
-                else 0
-            )
-
-            # Value at Risk (95% confidence)
-            var_95 = np.percentile(returns, 5) * 100 if len(returns) > 0 else 0
-
-            # Maximum consecutive losses
-            max_consec_losses = self._calculate_max_consecutive_losses(returns)
-
-            risk_metrics = {
-                "volatility_pct": volatility,
-                "downside_volatility_pct": downside_volatility,
-                "var_95_pct": var_95,
-                "max_consecutive_losses": max_consec_losses,
-                "calmar_ratio": self._calculate_calmar_ratio(),
+            metrics = {
+                "annualized_volatility_percent": annualized_volatility,
+                "var_95_percent": var_95,
+                "var_99_percent": var_99,
             }
+            logger.info("Generated risk metrics")
+            return metrics
 
         except Exception as e:
-            risk_metrics = {"error": f"Error calculating risk metrics: {str(e)}"}
-
-        return risk_metrics
+            logger.error(
+                f"Error calculating risk metrics: {str(e)}. Check TimeReturn analyzer."
+            )
+            return {"error": f"Error calculating risk metrics: {str(e)}"}
 
     def get_monthly_returns(self):
-        """Calculate monthly returns."""
+        """Calculate monthly returns.
 
+        Returns:
+            dict: Monthly return statistics.
+        """
         try:
-            # Fix: Add None check
             if self.strategy is None:
-                return {"error": "No strategy available"}
+                raise ValueError("No strategy available")
 
-            returns_analyzer = getattr(self.strategy.analyzers, "returns", None)
-            if returns_analyzer is None:
-                return {"error": "Returns analyzer not available"}
+            timereturn_analyzer = getattr(self.strategy.analyzers, "timereturn", None)
+            if timereturn_analyzer is None:
+                logger.warning("TimeReturn analyzer not available")
+                return {"message": "TimeReturn analyzer not available"}
 
-            returns_analysis = returns_analyzer.get_analysis()
+            returns = pd.Series(timereturn_analyzer.get_analysis())
+            if returns.empty:
+                logger.warning("No returns data available for monthly returns")
+                return {"message": "No returns data available"}
 
-            # For now, return basic info
-            monthly_data = {
-                "total_return": returns_analysis.get("rtot", 0) * 100,
-                "note": "Monthly breakdown requires daily portfolio tracking",
+            returns_df = pd.DataFrame({"returns": returns})
+            returns_df.index = pd.to_datetime(returns_df.index)
+            monthly_returns = returns_df.resample("ME").sum()
+            monthly_returns_pct = monthly_returns * 100
+
+            # Convert Timestamp keys to strings for JSON serialization
+            monthly_returns_dict = {
+                str(k): v for k, v in monthly_returns_pct["returns"].to_dict().items()
             }
 
-        except Exception as e:
-            monthly_data = {"error": f"Error calculating monthly returns: {str(e)}"}
+            analysis = {
+                "monthly_returns_pct": monthly_returns_dict,
+                "average_monthly_return_pct": monthly_returns_pct["returns"].mean(),
+                "monthly_return_std_pct": monthly_returns_pct["returns"].std(),
+                "positive_months": len(
+                    monthly_returns_pct[monthly_returns_pct["returns"] > 0]
+                ),
+                "negative_months": len(
+                    monthly_returns_pct[monthly_returns_pct["returns"] <= 0]
+                ),
+            }
+            logger.info("Generated monthly returns analysis")
+            return analysis
 
-        return monthly_data
+        except Exception as e:
+            logger.error(
+                f"Error calculating monthly returns: {str(e)}. Check TimeReturn analyzer."
+            )
+            return {"error": f"Error calculating monthly returns: {str(e)}"}
 
     def get_drawdown_analysis(self):
-        """Analyze drawdown periods."""
+        """Analyze drawdowns.
 
+        Returns:
+            dict: Drawdown metrics including max drawdown and average duration.
+        """
         try:
-            # Fix: Add None check
             if self.strategy is None:
-                return {"error": "No strategy available"}
+                raise ValueError("No strategy available")
 
             drawdown_analyzer = getattr(self.strategy.analyzers, "drawdown", None)
             if drawdown_analyzer is None:
-                return {"error": "Drawdown analyzer not available"}
+                raise ValueError("DrawDown analyzer not available")
 
             drawdown_analysis = drawdown_analyzer.get_analysis()
+            max_drawdown = drawdown_analysis.get("max", {}).get("drawdown", 0) or 0
+            max_drawdown_duration = drawdown_analysis.get("max", {}).get("len", 0) or 0
+            avg_drawdown = drawdown_analysis.get("drawdown", 0) or 0
+            avg_drawdown_duration = drawdown_analysis.get("len", 0) or 0
 
             analysis = {
-                "max_drawdown_pct": drawdown_analysis.get("max", {}).get("drawdown", 0),
-                "max_drawdown_duration": drawdown_analysis.get("max", {}).get("len", 0),
-                "avg_drawdown_pct": drawdown_analysis.get("drawdown", 0),
-                "avg_drawdown_duration": drawdown_analysis.get("len", 0),
+                "max_drawdown_pct": max_drawdown,
+                "max_drawdown_duration": max_drawdown_duration,
+                "average_drawdown_pct": avg_drawdown,
+                "average_drawdown_duration": avg_drawdown_duration,
             }
+            logger.info("Generated drawdown analysis")
+            return analysis
 
         except Exception as e:
-            analysis = {"error": f"Error calculating drawdown analysis: {str(e)}"}
+            logger.error(
+                f"Error calculating drawdown analysis: {str(e)}. Check DrawDown analyzer."
+            )
+            return {"error": f"Error calculating drawdown analysis: {str(e)}"}
 
-        return analysis
+    def save_report_to_file(self, filename):
+        """Save the performance report to a JSON file.
 
-    def _calculate_max_consecutive_losses(self, returns):
-        """Calculate maximum consecutive losing periods."""
+        Args:
+            filename (str): Path to save the report.
 
-        consecutive_losses = 0
-        max_consecutive = 0
-
-        for ret in returns:
-            if ret < 0:
-                consecutive_losses += 1
-                max_consecutive = max(max_consecutive, consecutive_losses)
-            else:
-                consecutive_losses = 0
-
-        return max_consecutive
-
-    def _calculate_calmar_ratio(self):
-        """Calculate Calmar ratio (Annual return / Max drawdown)."""
-
+        Returns:
+            bool: True if successful, False otherwise.
+        """
         try:
-            # Fix: Add None check
-            if self.strategy is None:
-                return 0
-
-            returns_analyzer = getattr(self.strategy.analyzers, "returns", None)
-            drawdown_analyzer = getattr(self.strategy.analyzers, "drawdown", None)
-
-            if returns_analyzer is None or drawdown_analyzer is None:
-                return 0
-
-            returns_analysis = returns_analyzer.get_analysis()
-            drawdown_analysis = drawdown_analyzer.get_analysis()
-
-            annual_return = returns_analysis.get("rnorm", 0) * 100
-            max_drawdown = drawdown_analysis.get("max", {}).get("drawdown", 0)
-
-            if max_drawdown > 0:
-                return annual_return / max_drawdown
-            else:
-                return float("inf") if annual_return > 0 else 0
-
-        except Exception:
-            return 0
+            report = self.generate_full_report()
+            with open(filename, "w") as f:
+                json.dump(report, f, indent=2, default=str)
+            logger.info(f"Report saved to {filename}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving report to {filename}: {str(e)}")
+            return False
 
     def print_report(self):
         """Print a formatted performance report."""
+        try:
+            report = self.generate_full_report()
+            if "error" in report:
+                print(f"Error generating report: {report['error']}")
+                return
 
-        report = self.generate_full_report()
-
-        # Handle case where report is just an error string
-        if isinstance(report, str):
             print("=" * 60)
             print("PERFORMANCE REPORT")
             print("=" * 60)
-            print(f"Error: {report}")
-            return
 
-        print("=" * 60)
-        print("PERFORMANCE REPORT")
-        print("=" * 60)
+            summary = report.get("summary", {})
+            if "error" not in summary:
+                print("\nSummary Metrics")
+                print("-" * 30)
+                print(f"Initial Cash: ${summary.get('initial_cash', 0):,.2f}")
+                print(f"Final Value: ${summary.get('final_value', 0):,.2f}")
+                print(f"Total Return: {summary.get('total_return_pct', 0):.2f}%")
+                print(f"Annual Return: {summary.get('annual_return_pct', 0):.2f}%")
+                print(f"Sharpe Ratio: {summary.get('sharpe_ratio', 0):.3f}")
+                print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0):.2f}%")
+                print(f"Calmar Ratio: {summary.get('calmar_ratio', 0):.3f}")
+                print(f"SQN: {summary.get('sqn', 0):.3f}")
 
-        # Performance Summary
-        print("\nPERFORMANCE SUMMARY")
-        print("-" * 30)
-        summary = report["summary"]
-        if "error" not in summary:
-            print(f"Initial Cash:        ${summary.get('initial_cash', 0):,.2f}")
-            print(f"Final Value:         ${summary.get('final_value', 0):,.2f}")
-            print(f"Total Return:        {summary.get('total_return_pct', 0):.2f}%")
-            print(f"Annual Return:       {summary.get('annual_return_pct', 0):.2f}%")
-            print(f"Sharpe Ratio:        {summary.get('sharpe_ratio', 0):.3f}")
-            print(f"Max Drawdown:        {summary.get('max_drawdown_pct', 0):.2f}%")
-            print(f"Profit/Loss:         ${summary.get('profit_loss', 0):,.2f}")
-        else:
-            print(f"Error: {summary['error']}")
+            trade_analysis = report.get("trade_analysis", {})
+            if (
+                "error" not in trade_analysis
+                and trade_analysis.get("total_trades", 0) > 0
+            ):
+                print("\nTrade Analysis")
+                print("-" * 30)
+                print(f"Total Trades: {trade_analysis.get('total_trades', 0)}")
+                print(f"Win Rate: {trade_analysis.get('win_rate_percent', 0):.2f}%")
+                print(f"Average Win: ${trade_analysis.get('average_win', 0):,.2f}")
+                print(f"Average Loss: ${trade_analysis.get('average_loss', 0):,.2f}")
+                print(f"Profit Factor: {trade_analysis.get('profit_factor', 0):.2f}")
+                print(
+                    f"Average Trade Duration: {trade_analysis.get('average_trade_duration', 0):.1f} days"
+                )
+                print(
+                    f"Max Winning Streak: {trade_analysis.get('max_winning_streak', 0)}"
+                )
+                print(
+                    f"Max Losing Streak: {trade_analysis.get('max_losing_streak', 0)}"
+                )
 
-        # Trade Analysis
-        print("\nTRADE ANALYSIS")
-        print("-" * 30)
-        trades = report["trade_analysis"]
-        if "error" not in trades:
-            if trades.get("total_trades", 0) == 0:
-                print(trades.get("message", "No trade data available"))
-            else:
-                print(f"Total Trades:        {trades.get('total_trades', 0)}")
-                print(f"Winning Trades:      {trades.get('winning_trades', 0)}")
-                print(f"Losing Trades:       {trades.get('losing_trades', 0)}")
-                print(f"Win Rate:            {trades.get('win_rate_pct', 0):.2f}%")
-                print(f"Average Win:         ${trades.get('avg_win', 0):.2f}")
-                print(f"Average Loss:        ${trades.get('avg_loss', 0):.2f}")
-                print(f"Largest Win:         ${trades.get('largest_win', 0):.2f}")
-                print(f"Largest Loss:        ${trades.get('largest_loss', 0):.2f}")
-                profit_factor = trades.get("profit_factor", 0)
-                if profit_factor == float("inf"):
-                    print(f"Profit Factor:       ∞")
-                else:
-                    print(f"Profit Factor:       {profit_factor:.2f}")
-        else:
-            print(f"Error: {trades['error']}")
+            risk_metrics = report.get("risk_metrics", {})
+            if "error" not in risk_metrics:
+                print("\nRisk Metrics")
+                print("-" * 30)
+                print(
+                    f"Annualized Volatility: {risk_metrics.get('annualized_volatility_percent', 0):.2f}%"
+                )
+                print(f"VaR (95%): {risk_metrics.get('var_95_percent', 0):.2f}%")
+                print(f"VaR (99%): {risk_metrics.get('var_99_percent', 0):.2f}%")
 
-        # Risk Metrics
-        print("\nRISK METRICS")
-        print("-" * 30)
-        risk = report["risk_metrics"]
-        if "error" not in risk:
-            print(f"Volatility:          {risk.get('volatility_pct', 0):.2f}%")
-            print(f"Downside Volatility: {risk.get('downside_volatility_pct', 0):.2f}%")
-            print(f"VaR (95%):           {risk.get('var_95_pct', 0):.2f}%")
-            print(f"Max Consec. Losses:  {risk.get('max_consecutive_losses', 0)}")
-            calmar_ratio = risk.get("calmar_ratio", 0)
-            if calmar_ratio == float("inf"):
-                print(f"Calmar Ratio:        ∞")
-            else:
-                print(f"Calmar Ratio:        {calmar_ratio:.3f}")
-        else:
-            print(f"Error: {risk['error']}")
+            monthly_returns = report.get("monthly_returns", {})
+            if "error" not in monthly_returns:
+                print("\nMonthly Returns")
+                print("-" * 30)
+                print(
+                    f"Average Monthly Return: {monthly_returns.get('average_monthly_return_pct', 0):.2f}%"
+                )
+                print(
+                    f"Monthly Return Std: {monthly_returns.get('monthly_return_std_pct', 0):.2f}%"
+                )
+                print(f"Positive Months: {monthly_returns.get('positive_months', 0)}")
+                print(f"Negative Months: {monthly_returns.get('negative_months', 0)}")
 
-        print("=" * 60)
+            drawdown_analysis = report.get("drawdown_analysis", {})
+            if "error" not in drawdown_analysis:
+                print("\nDrawdown Analysis")
+                print("-" * 30)
+                print(
+                    f"Max Drawdown: {drawdown_analysis.get('max_drawdown_pct', 0):.2f}%"
+                )
+                print(
+                    f"Max Drawdown Duration: {drawdown_analysis.get('max_drawdown_duration', 0)} days"
+                )
+                print(
+                    f"Average Drawdown: {drawdown_analysis.get('average_drawdown_pct', 0):.2f}%"
+                )
+                print(
+                    f"Average Drawdown Duration: {drawdown_analysis.get('average_drawdown_duration', 0)} days"
+                )
 
-    def save_report_to_file(self, filename=None):
-        """Save report to JSON file."""
-
-        if filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"backtest_report_{timestamp}.json"
-
-        report = self.generate_full_report()
-
-        try:
-            with open(filename, "w") as f:
-                json.dump(report, f, indent=2, default=str)
-            print(f"Report saved to {filename}")
         except Exception as e:
-            print(f"Error saving report: {str(e)}")
+            logger.error(f"Error printing report: {str(e)}")
+            print(f"Error printing report: {str(e)}")
+
+    def plot_performance(self, save_path=None):
+        """Plot performance metrics.
+
+        Args:
+            save_path (str, optional): Path to save the plot.
+        """
+        try:
+            if self.strategy is None:
+                raise ValueError("No strategy available")
+
+            timereturn_analyzer = getattr(self.strategy.analyzers, "timereturn", None)
+            drawdown_analyzer = getattr(self.strategy.analyzers, "drawdown", None)
+            if timereturn_analyzer is None or drawdown_analyzer is None:
+                raise ValueError("Required analyzers not available")
+
+            returns = pd.Series(timereturn_analyzer.get_analysis())
+            drawdowns = pd.Series(drawdown_analyzer.get_analysis().get("drawdown", []))
+
+            if returns.empty:
+                logger.warning("No returns data available for plotting")
+                print("No returns data available for plotting")
+                return
+
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+            fig.suptitle("Performance Analysis", fontsize=16)
+
+            returns_df = pd.DataFrame({"returns": returns})
+            returns_df.index = pd.to_datetime(returns_df.index)
+            cumulative_returns = (1 + returns).cumprod() - 1
+            ax1.plot(
+                returns_df.index,
+                cumulative_returns * 100,
+                label="Cumulative Return (%)",
+                color="blue",
+            )
+            ax1.set_ylabel("Cumulative Return (%)")
+            ax1.legend()
+            ax1.grid(True)
+
+            ax2.plot(returns_df.index, drawdowns, label="Drawdown (%)", color="red")
+            ax2.set_ylabel("Drawdown (%)")
+            ax2.set_xlabel("Date")
+            ax2.legend()
+            ax2.grid(True)
+
+            plt.tight_layout()
+            if save_path:
+                plt.savefig(save_path, dpi=300)
+                logger.info(f"Performance plot saved to {save_path}")
+            plt.show()
+
+        except Exception as e:
+            logger.error(f"Error plotting performance: {str(e)}. Check analyzer data.")
+            print(f"Error plotting performance: {str(e)}")
 
 
-def compare_strategies(results_dict):
-    """
-    Compare multiple strategy results.
+def compare_strategies(strategy_results_dict):
+    """Compare multiple strategy results.
 
-    Parameters:
-    results_dict (dict): Dictionary with strategy names as keys and results as values
+    Args:
+        strategy_results_dict (dict): Dictionary of strategy names to results.
 
     Returns:
-    pd.DataFrame: Comparison table
+        pd.DataFrame: Comparison of performance metrics.
     """
-
-    comparison_data = []
-
-    for strategy_name, results in results_dict.items():
-        try:
+    try:
+        comparison_data = []
+        for strategy_name, results in strategy_results_dict.items():
             analyzer = PerformanceAnalyzer(results)
-            summary = analyzer.get_performance_summary()
-
-            if "error" not in summary:
-                comparison_data.append(
-                    {
-                        "Strategy": strategy_name,
-                        "Total Return (%)": summary["total_return_pct"],
-                        "Annual Return (%)": summary["annual_return_pct"],
-                        "Sharpe Ratio": summary["sharpe_ratio"],
-                        "Max Drawdown (%)": summary["max_drawdown_pct"],
-                        "Final Value": summary["final_value"],
-                    }
+            report = analyzer.generate_full_report()
+            if "error" in report:
+                logger.warning(
+                    f"Skipping {strategy_name} due to error: {report['error']}"
                 )
-        except Exception as e:
-            print(f"Error analyzing {strategy_name}: {str(e)}")
-            continue
+                continue
 
-    if comparison_data:
+            summary = report.get("summary", {})
+            trade_analysis = report.get("trade_analysis", {})
+            if "error" in summary or "error" in trade_analysis:
+                logger.warning(f"Skipping {strategy_name} due to incomplete data")
+                continue
+
+            metrics = {
+                "Strategy": strategy_name,
+                "Total Return (%)": summary.get("total_return_pct", 0),
+                "Annual Return (%)": summary.get("annual_return_pct", 0),
+                "Sharpe Ratio": summary.get("sharpe_ratio", 0),
+                "Max Drawdown (%)": summary.get("max_drawdown_pct", 0),
+                "Calmar Ratio": summary.get("calmar_ratio", 0),
+                "SQN": summary.get("sqn", 0),
+                "Win Rate (%)": trade_analysis.get("win_rate_percent", 0),
+                "Profit Factor": trade_analysis.get("profit_factor", 0),
+                "Total Trades": trade_analysis.get("total_trades", 0),
+            }
+            comparison_data.append(metrics)
+
+        if not comparison_data:
+            logger.warning("No valid strategy results for comparison")
+            return pd.DataFrame()
+
         df = pd.DataFrame(comparison_data)
-        df = df.set_index("Strategy")
-        return df
-    else:
+        logger.info("Generated strategy comparison")
+        return df.set_index("Strategy")
+
+    except Exception as e:
+        logger.error(f"Error comparing strategies: {str(e)}. Check strategy results.")
         return pd.DataFrame()
-
-
-if __name__ == "__main__":
-    # Example usage would require actual backtest results
-    print("Reports module loaded successfully!")
-    print(
-        "Use PerformanceAnalyzer class with your backtest results to generate reports."
-    )
