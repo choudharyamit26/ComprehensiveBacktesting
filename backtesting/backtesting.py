@@ -1,7 +1,10 @@
+import datetime
+import asyncio
 import backtrader as bt
+import pandas as pd
 
 from backtesting.utils import run_backtest
-from .data import get_data, validate_data
+from .data import get_data_sync, validate_data, preview_data_sync
 from stratgies.registry import get_strategy
 from .parameter_optimization import optimize_strategy
 from .reports import PerformanceAnalyzer, compare_strategies
@@ -27,6 +30,9 @@ def run_basic_backtest(ticker, start_date, end_date):
         analyzer.print_report()
         return results, cerebro
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         logger.error(f"Basic backtest failed: {str(e)}")
         raise
 
@@ -97,20 +103,42 @@ def run_walkforward_analysis(ticker, start_date, end_date):
         validation_analyzer = ValidationAnalyzer(
             strategy_class=get_strategy("EMARSI"), ticker=ticker
         )
-        window_months = int(
-            input("Enter optimization window in months (default: 12): ").strip() or "12"
+
+        # Calculate maximum available days (60 days for intraday)
+        max_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
+        max_days = min(max_days, 60)  # Enforce 60-day limit
+
+        # Set defaults based on available data
+        default_window = min(30, max_days // 2)
+        default_out = min(15, max_days // 4)
+        default_step = min(15, max_days // 4)
+
+        # Get user inputs with new defaults
+        window_days = int(
+            input(
+                f"Enter optimization window in days (default: {default_window}): "
+            ).strip()
+            or str(default_window)
         )
-        step_months = int(
-            input("Enter step size in months (default: 3): ").strip() or "3"
+        out_days = int(
+            input(
+                f"Enter out-of-sample window in days (default: {default_out}): "
+            ).strip()
+            or str(default_out)
         )
+        step_days = int(
+            input(f"Enter step size in days (default: {default_step}): ").strip()
+            or str(default_step)
+        )
+
         results = validation_analyzer.walk_forward_analysis(
             start_date=start_date,
             end_date=end_date,
-            in_sample_months=window_months,
-            out_sample_months=6,  # Increased to 6 months
-            step_months=step_months,
+            in_sample_days=window_days,
+            out_sample_days=out_days,
+            step_days=step_days,
             n_trials=20,
-            min_trades=1,  # Reduced to 1
+            min_trades=1,
         )
         summary = results.get("summary_stats", {})
         print(f"\nWalk-Forward Analysis Summary:")
@@ -251,14 +279,24 @@ def run_full_demo(ticker, start_date, end_date):
         validation_analyzer = ValidationAnalyzer(
             strategy_class=get_strategy("EMARSI"), ticker=ticker
         )
+
+        # Calculate maximum available days
+        max_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
+        max_days = min(max_days, 60)
+
+        # Set defaults based on available data
+        in_sample = min(30, max_days // 2)
+        out_sample = min(15, max_days // 4)
+        step = min(15, max_days // 4)
+
         wf_results = validation_analyzer.walk_forward_analysis(
             start_date=start_date,
             end_date=end_date,
-            in_sample_months=12,
-            out_sample_months=6,  # Increased to 6 months
-            step_months=3,
+            in_sample_days=in_sample,
+            out_sample_days=out_sample,
+            step_days=step,
             n_trials=20,
-            min_trades=1,  # Reduced to 1
+            min_trades=1,
         )
         results["walk_forward"] = wf_results
     except Exception as e:
@@ -314,11 +352,13 @@ def main():
     print("6. Full demo (all analyses)")
 
     choice = input("\nEnter your choice (1-6): ").strip()
-    ticker = input("Enter ticker symbol (default: AAPL): ").strip() or "AAPL"
-    start_date = (
-        input("Enter start date (default: 2020-01-01): ").strip() or "2020-01-01"
-    )
-    end_date = input("Enter end date (default: 2025-06-01): ").strip() or "2025-06-01"
+    import datetime
+
+    ticker = input("Enter ticker symbol (default: SBIN.NS): ").strip() or "SBIN.NS"
+    interval = "5m"  # Default to intraday for Indian equities
+    end_date = datetime.date.today() - datetime.timedelta(days=2)
+    start_date = end_date - datetime.timedelta(days=58)
+    print(f"Using date range: {start_date} to {end_date} (last 60 days for intraday)")
 
     try:
         if choice == "1":
@@ -346,7 +386,7 @@ def main():
         print(f"\nError during analysis: {str(e)}")
         print("Trying basic fallback...")
         try:
-            test_data = get_data(ticker, start_date, end_date)
+            test_data = get_data_sync(ticker, start_date, end_date, interval="5m")
             if validate_data(test_data):
                 print("Data is valid. The issue might be with the strategy module.")
             else:
@@ -363,12 +403,15 @@ def quick_test():
     logger.info("Running quick test")
     print("=== QUICK TEST ===")
     ticker = input("Enter ticker (default: AAPL): ").strip() or "AAPL"
+
+    end_date = datetime.date.today() - datetime.timedelta(days=2)
+    start_date = end_date - datetime.timedelta(days=58)
     try:
         results, cerebro = run_backtest(
             strategy_class="EMARSI",
             ticker=ticker,
-            start_date="2024-01-01",
-            end_date="2025-06-01",
+            start_date=start_date,
+            end_date=end_date,
         )
         analyzer = PerformanceAnalyzer(results)
         analyzer.print_report()
@@ -378,10 +421,10 @@ def quick_test():
     except Exception as e:
         logger.error(f"Quick test failed: {str(e)}")
         try:
-            from .data import preview_data
-
             print("Testing data loading...")
-            df = preview_data(ticker, "2024-01-01", "2024-12-31", rows=3)
+            end_date = datetime.date.today() - datetime.timedelta(days=2)
+            start_date = end_date - datetime.timedelta(days=58)
+            df = preview_data_sync(ticker, start_date, end_date, rows=3)
             if df is not None:
                 is_valid = validate_data(df)
                 print(f"Data validation: {'PASSED' if is_valid else 'FAILED'}")
@@ -405,8 +448,10 @@ if __name__ == "__main__":
             logger.info("Running basic example")
             print("Running basic example...")
             cerebro = bt.Cerebro()
-            data_df = get_data("AAPL", "2022-01-01", "2025-06-01")
-            data = bt.feeds.PandasData(
+            end_date = datetime.date.today() - datetime.timedelta(days=2)
+            start_date = end_date - datetime.timedelta(days=58)
+            data_df = get_data_sync("AAPL", start_date, end_date, interval="5m")
+            data_5m = bt.feeds.PandasData(
                 dataname=data_df,
                 datetime=None,
                 open="Open",
@@ -430,7 +475,12 @@ if __name__ == "__main__":
             cerebro.addanalyzer(bt.analyzers.AnnualReturn, _name="annualreturn")
             cerebro.addanalyzer(bt.analyzers.Transactions, _name="transactions")
             cerebro.addanalyzer(bt.analyzers.PositionsValue, _name="positionsvalue")
-            cerebro.adddata(data)
+            # Add 5-minute data
+            cerebro.adddata(data_5m, name="5m")
+            # Add 15-minute resampled data
+            cerebro.resampledata(
+                data_5m, timeframe=bt.TimeFrame.Minutes, compression=15, name="15m"
+            )
             print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
             results = cerebro.run()
             print(f"Final Portfolio Value: ${cerebro.broker.getvalue():,.2f}")

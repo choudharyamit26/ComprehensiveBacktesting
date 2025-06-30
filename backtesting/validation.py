@@ -8,7 +8,7 @@ from typing import Dict, List
 import warnings
 import logging
 
-from .data import get_data
+from .data import get_data_sync
 from .reports import PerformanceAnalyzer
 from .parameter_optimization import optimize_strategy, SortinoRatio
 
@@ -48,13 +48,14 @@ class ValidationAnalyzer:
         start_date: str,
         end_date: str,
         analysis_type: str = "walkforward",
-        in_sample_months: int = 12,
-        out_sample_months: int = 6,  # Increased to 6 months
-        step_months: int = 1,
+        in_sample_days: int = 30,
+        out_sample_days: int = 15,
+        step_days: int = 15,
         n_trials: int = 20,
-        min_trades: int = 1,  # Reduced to 1
+        min_trades: int = 1,
         split_ratio: float = 0.7,
         optimize_in_sample: bool = True,
+        interval: str = "5m",
     ) -> Dict:
         """Run validation analysis (in-sample/out-of-sample or walk-forward).
 
@@ -62,9 +63,9 @@ class ValidationAnalyzer:
             start_date (str): Start date in 'YYYY-MM-DD' format.
             end_date (str): End date in 'YYYY-MM-DD' format.
             analysis_type (str): Type of analysis ('walkforward' or 'inout').
-            in_sample_months (int): Length of in-sample period in months (for walk-forward).
-            out_sample_months (int): Length of out-of-sample period in months (for walk-forward).
-            step_months (int): Step size between windows in months (for walk-forward).
+            in_sample_days (int): Length of in-sample period in days (for walk-forward).
+            out_sample_days (int): Length of out-of-sample period in days (for walk-forward).
+            step_days (int): Step size between windows in days (for walk-forward).
             n_trials (int): Number of optimization trials.
             min_trades (int): Minimum trades required for valid results (for walk-forward).
             split_ratio (float): Ratio for in-sample period (for in-sample/out-of-sample).
@@ -85,9 +86,9 @@ class ValidationAnalyzer:
                 results = self.walk_forward_analysis(
                     start_date=start_date,
                     end_date=end_date,
-                    in_sample_months=in_sample_months,
-                    out_sample_months=out_sample_months,
-                    step_months=step_months,
+                    in_sample_days=in_sample_days,
+                    out_sample_days=out_sample_days,
+                    step_days=step_days,
                     n_trials=n_trials,
                     min_trades=min_trades,
                 )
@@ -115,6 +116,7 @@ class ValidationAnalyzer:
         split_ratio: float = 0.7,
         optimize_in_sample: bool = True,
         n_trials: int = 50,
+        interval: str = "5m",
     ) -> Dict:
         """Perform in-sample and out-of-sample analysis.
 
@@ -180,11 +182,11 @@ class ValidationAnalyzer:
 
             print("\nTesting on in-sample data...")
             in_sample_results = self._run_backtest(
-                start_date, split_date_str, **best_params
+                start_date, split_date_str, interval=interval, **best_params
             )
             print("Testing on out-of-sample data...")
             out_sample_results = self._run_backtest(
-                split_date_str, end_date, **best_params
+                split_date_str, end_date, interval=interval, **best_params
             )
 
             in_sample_analyzer = PerformanceAnalyzer(in_sample_results)
@@ -529,20 +531,21 @@ class ValidationAnalyzer:
         self,
         start_date: str,
         end_date: str,
-        in_sample_months: int = 12,
-        out_sample_months: int = 6,  # Increased to 6 months
-        step_months: int = 1,
+        in_sample_days: int = 30,
+        out_sample_days: int = 15,
+        step_days: int = 15,
         n_trials: int = 20,
-        min_trades: int = 1,  # Reduced to 1
+        min_trades: int = 1,
+        interval: str = "5m",
     ) -> Dict:
-        """Perform walk-forward analysis.
+        """Perform walk-forward analysis with day-based windows.
 
         Args:
             start_date (str): Start date in 'YYYY-MM-DD' format.
             end_date (str): End date in 'YYYY-MM-DD' format.
-            in_sample_months (int): Length of in-sample period in months.
-            out_sample_months (int): Length of out-of-sample period in months.
-            step_months (int): Step size between windows in months.
+            in_sample_days (int): Length of in-sample period in days.
+            out_sample_days (int): Length of out-of-sample period in days.
+            step_days (int): Step size between windows in days.
             n_trials (int): Number of optimization trials per window.
             min_trades (int): Minimum trades-dot trades required for valid results.
 
@@ -554,21 +557,22 @@ class ValidationAnalyzer:
         print("WALK-FORWARD ANALYSIS")
         print("=" * 60)
         print(f"Parameters:")
-        print(f"  In-sample period: {in_sample_months} months")
-        print(f"  Out-of-sample period: {out_sample_months} months")
-        print(f"  Step size: {step_months} months")
+        print(f"  In-sample period: {in_sample_days} days")
+        print(f"  Out-of-sample period: {out_sample_days} days")
+        print(f"  Step size: {step_days} days")
         print(f"  Optimization trials per window: {n_trials}")
 
-        windows = self._generate_walk_forward_windows(
-            start_date, end_date, in_sample_months, out_sample_months, step_months
+        # Generate day-based windows
+        windows = self._generate_day_based_windows(
+            start_date, end_date, in_sample_days, out_sample_days, step_days
         )
         print(f"\nGenerated {len(windows)} walk-forward windows")
 
         results = {
             "parameters": {
-                "in_sample_months": in_sample_months,
-                "out_sample_months": out_sample_months,
-                "step_months": step_months,
+                "in_sample_days": in_sample_days,
+                "out_sample_days": out_sample_days,
+                "step_days": step_days,
                 "n_trials": n_trials,
                 "min_trades": min_trades,
             },
@@ -619,16 +623,16 @@ class ValidationAnalyzer:
                     print(f"Using default parameters: {best_params}")
 
                 # Check data sufficiency for in-sample and out-of-sample
-                in_sample_data = get_data(
+                in_sample_data = get_data_sync(
                     self.ticker, window["in_sample_start"], window["in_sample_end"]
                 )
-                out_sample_data = get_data(
+                out_sample_data = get_data_sync(
                     self.ticker, window["out_sample_start"], window["out_sample_end"]
                 )
                 min_data_points = (
                     self.strategy_class.get_min_data_points(best_params)
                     if hasattr(self.strategy_class, "get_min_data_points")
-                    else 100
+                    else 50
                 )
 
                 if (
@@ -649,11 +653,17 @@ class ValidationAnalyzer:
 
                 print("  Running in-sample backtest...")
                 in_sample_results = self._run_backtest(
-                    window["in_sample_start"], window["in_sample_end"], **best_params
+                    window["in_sample_start"],
+                    window["in_sample_end"],
+                    interval=interval,
+                    **best_params,
                 )
                 print("  Running out-of-sample backtest...")
                 out_sample_results = self._run_backtest(
-                    window["out_sample_start"], window["out_sample_end"], **best_params
+                    window["out_sample_start"],
+                    window["out_sample_end"],
+                    interval=interval,
+                    **best_params,
                 )
 
                 # Log the structure of results for debugging
@@ -834,7 +844,54 @@ class ValidationAnalyzer:
 
         return results
 
-    def _run_backtest(self, start_date: str, end_date: str, **strategy_params):
+    def _generate_day_based_windows(
+        self,
+        start_date: str,
+        end_date: str,
+        in_sample_days: int,
+        out_sample_days: int,
+        step_days: int,
+    ) -> List[Dict]:
+        """Generate day-based windows for walk-forward analysis with intraday constraints."""
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        windows = []
+        window_id = 1
+
+        current_start = start_dt
+        while current_start < end_dt:
+            # Calculate window boundaries
+            in_sample_end = current_start + timedelta(days=in_sample_days)
+            out_sample_end = in_sample_end + timedelta(days=out_sample_days)
+
+            # Skip if window exceeds 60-day intraday limit
+            total_window_days = (out_sample_end - current_start).days
+            if total_window_days > 60:
+                current_start += timedelta(days=step_days)
+                continue
+
+            # Ensure windows don't exceed data range
+            if out_sample_end > end_dt:
+                break
+
+            windows.append(
+                {
+                    "window_id": window_id,
+                    "in_sample_start": current_start.strftime("%Y-%m-%d"),
+                    "in_sample_end": in_sample_end.strftime("%Y-%m-%d"),
+                    "out_sample_start": in_sample_end.strftime("%Y-%m-%d"),
+                    "out_sample_end": out_sample_end.strftime("%Y-%m-%d"),
+                }
+            )
+
+            window_id += 1
+            current_start += timedelta(days=step_days)
+
+        return windows
+
+    def _run_backtest(
+        self, start_date: str, end_date: str, interval: str = "5m", **strategy_params
+    ):
         """Run a backtest with given parameters.
 
         Args:
@@ -852,7 +909,9 @@ class ValidationAnalyzer:
             f"Running backtest from {start_date} to {end_date} with params {strategy_params}"
         )
         try:
-            data_df = get_data(self.ticker, start_date, end_date)
+            data_df = get_data_sync(
+                self.ticker, start_date, end_date, interval=interval
+            )
             if data_df is None or data_df.empty:
                 raise ValueError(
                     f"No data available for {self.ticker} from {start_date} to {end_date}"
@@ -881,7 +940,12 @@ class ValidationAnalyzer:
 
             cerebro = bt.Cerebro()
             cerebro.addstrategy(self.strategy_class, **strategy_params)
-            cerebro.adddata(data)
+            # Add 5-minute data
+            cerebro.adddata(data, name="5m")
+            # Add 15-minute resampled data
+            cerebro.resampledata(
+                data, timeframe=bt.TimeFrame.Minutes, compression=15, name="15m"
+            )
             cerebro.broker.setcash(self.initial_cash)
             cerebro.broker.setcommission(commission=self.commission)
             cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
@@ -909,53 +973,6 @@ class ValidationAnalyzer:
         except Exception as e:
             logger.error(f"Backtest failed: {str(e)}")
             raise
-
-    def _generate_walk_forward_windows(
-        self,
-        start_date: str,
-        end_date: str,
-        in_sample_months: int,
-        out_sample_months: int,
-        step_months: int,
-    ) -> List[Dict]:
-        """Generate windows for walk-forward analysis.
-
-        Args:
-            start_date (str): Start date in 'YYYY-MM-DD' format.
-            end_date (str): End date in 'YYYY-MM-DD' format.
-            in_sample_months (int): Length of in-sample period in months.
-            out_sample_months (int): Length of out-of-sample period in months.
-            step_months (int): Step size between windows in months.
-
-        Returns:
-            List[Dict]: List of window dictionaries with in-sample and out-of-sample periods.
-        """
-        start_dt = pd.to_datetime(start_date)
-        end_dt = pd.to_datetime(end_date)
-        windows = []
-
-        current_start = start_dt
-        while (
-            current_start + relativedelta(months=in_sample_months + out_sample_months)
-            <= end_dt
-        ):
-            in_sample_end = current_start + relativedelta(months=in_sample_months)
-            out_sample_end = in_sample_end + relativedelta(months=out_sample_months)
-
-            if out_sample_end > end_dt:
-                break
-
-            windows.append(
-                {
-                    "in_sample_start": current_start.strftime("%Y-%m-%d"),
-                    "in_sample_end": in_sample_end.strftime("%Y-%m-%d"),
-                    "out_sample_start": in_sample_end.strftime("%Y-%m-%d"),
-                    "out_sample_end": out_sample_end.strftime("%Y-%m-%d"),
-                }
-            )
-            current_start += relativedelta(months=step_months)
-
-        return windows
 
     def _calculate_degradation(
         self, in_sample_perf: Dict, out_sample_perf: Dict

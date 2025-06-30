@@ -1,7 +1,7 @@
 from typing import Any, Dict
 import backtrader as bt
 import optuna
-from .data import get_data
+from .data import get_data_sync
 import logging
 import numpy as np
 import pandas as pd
@@ -62,6 +62,7 @@ class OptimizationObjective:
         end_date: str,
         initial_cash: float,
         commission: float,
+        interval: str = "5m",
     ):
         """Initialize optimization objective.
 
@@ -72,6 +73,7 @@ class OptimizationObjective:
             end_date (str): End date in 'YYYY-MM-DD' format.
             initial_cash (float): Initial portfolio cash.
             commission (float): Broker commission rate.
+            interval (str): Data interval (e.g., '5m', '15m').
         """
         if not isinstance(strategy_class, type):
             raise TypeError(
@@ -83,7 +85,8 @@ class OptimizationObjective:
         self.end_date = end_date
         self.initial_cash = initial_cash
         self.commission = commission
-        self.data = get_data(ticker, start_date, end_date)
+        self.interval = getattr(self, "interval", "5m")
+        self.data = get_data_sync(ticker, start_date, end_date, interval=self.interval)
         if self.data is None or self.data.empty:
             raise ValueError(
                 f"No data available for {ticker} from {start_date} to {end_date}"
@@ -93,34 +96,26 @@ class OptimizationObjective:
         )
 
     def __call__(self, trial):
-        """Objective function for Optuna optimization.
-
-        Args:
-            trial: Optuna trial object.
-
-        Returns:
-            float: Objective value (negative total return for maximization).
-        """
+        """Objective function for Optuna optimization with robust error handling."""
         try:
-            logger.debug(f"Running trial {trial.number} for {self.ticker}")
-            params = (
-                self.strategy_class.get_param_space(trial)
-                if hasattr(self.strategy_class, "get_param_space")
-                else {}
-            )
-            logger.debug(f"Trial parameters: {params}")
+            logger.info(f"Starting trial {trial.number} for {self.ticker}")
 
-            min_data_points = (
-                self.strategy_class.get_min_data_points(params)
-                if hasattr(self.strategy_class, "get_min_data_points")
-                else 100
-            )
-            if len(self.data) < min_data_points:
-                logger.warning(
-                    f"Insufficient data: {len(self.data)} rows available, {min_data_points} required"
-                )
-                return -999
+            # Get parameters from strategy class
+            if hasattr(self.strategy_class, "get_param_space"):
+                params = self.strategy_class.get_param_space(trial)
+            else:
+                logger.warning("Using default parameter space")
+                params = {
+                    "fast_ema_period": trial.suggest_int("fast_ema_period", 5, 20),
+                    "slow_ema_period": trial.suggest_int("slow_ema_period", 21, 50),
+                    "rsi_period": trial.suggest_int("rsi_period", 10, 20),
+                    "rsi_upper": trial.suggest_int("rsi_upper", 60, 75),
+                    "rsi_lower": trial.suggest_int("rsi_lower", 25, 40),
+                }
 
+            logger.info(f"Trial parameters: {params}")
+
+            # Run backtest with current parameters
             results, _ = run_backtest(
                 strategy_class=self.strategy_class,
                 ticker=self.ticker,
@@ -128,41 +123,95 @@ class OptimizationObjective:
                 end_date=self.end_date,
                 initial_cash=self.initial_cash,
                 commission=self.commission,
+                interval=self.interval,
                 **params,
             )
 
-            # Defensive check for results
-            if not isinstance(results, list) or not results:
-                logger.error(
-                    f"Invalid results from run_backtest: type {type(results)}, value {results}"
+            # Validate results structure
+            if not results or not isinstance(results, list) or len(results) == 0:
+                logger.error("Backtest returned empty results")
+                return -999
+
+            strategy = results[0]
+            if not isinstance(strategy, bt.Strategy):
+                logger.error("Backtest returned invalid strategy object")
+                return -999
+
+            # Extract performance metrics
+            try:
+                # Access analyzers with defensive checks
+                returns_analyzer = getattr(strategy.analyzers, "returns", None)
+                trades_analyzer = getattr(strategy.analyzers, "trades", None)
+                sharpe_analyzer = getattr(strategy.analyzers, "sharpe", None)
+                sortino_analyzer = getattr(strategy.analyzers, "sortino", None)
+
+                # Get total return
+                total_return = 0
+                if returns_analyzer:
+                    returns_analysis = returns_analyzer.get_analysis()
+                    total_return = returns_analysis.get("rtot", 0)
+
+                # Get trade metrics
+                total_trades = 0
+                if trades_analyzer:
+                    trade_analysis = trades_analyzer.get_analysis()
+                    total_trades = trade_analysis.get("total", {}).get("total", 0)
+
+                # Get risk-adjusted metrics
+                sharpe_ratio = 0
+                if sharpe_analyzer:
+                    sharpe_analysis = sharpe_analyzer.get_analysis()
+                    sharpe_ratio = sharpe_analysis.get("sharperatio", 0)
+                    if sharpe_ratio is None or not isinstance(
+                        sharpe_ratio, (int, float)
+                    ):
+                        sharpe_ratio = 0
+                sortino_ratio = 0
+                if sortino_analyzer:
+                    sortino_analysis = sortino_analyzer.get_analysis()
+                    sortino_ratio = sortino_analysis.get("sortinoratio", 0)
+                    if sortino_ratio is None or not isinstance(
+                        sortino_ratio, (int, float)
+                    ):
+                        sortino_ratio = 0
+                # Calculate composite objective
+                # objective_value = sharpe_ratio + (sortino_ratio * 0.5)
+                objective_value = (
+                    total_return * 10
+                )  # Prioritize returns over risk metrics
+
+                # Apply trade-based adjustments
+                if total_trades < 3:
+                    # Penalize but don't eliminate low-trade configs
+                    adjustment = 0.5 + (total_trades * 0.2)
+                    if not isinstance(objective_value, (int, float)):
+                        objective_value = -999
+                    else:
+                        objective_value *= adjustment
+                    logger.info(f"Low trade adjustment: {adjustment:.2f}x")
+
+                # Final validation
+                if not np.isfinite(objective_value):
+                    logger.warning("Non-finite objective value, returning -999")
+                    return -999
+
+                logger.info(
+                    f"Trial {trial.number} results: "
+                    f"Trades={total_trades}, "
+                    f"Return={total_return:.4f}, "
+                    f"Sharpe={sharpe_ratio:.4f}, "
+                    f"Sortino={sortino_ratio:.4f}, "
+                    f"Objective={objective_value:.4f}"
                 )
-                return -999
-            if not isinstance(results[0], bt.Strategy):
-                logger.error(
-                    f"Invalid strategy instance: type {type(results[0])}, value {results[0]}"
-                )
-                return -999
 
-            # Access trade analyzer
-            trade_analyzer = results[0].analyzers.trades.get_analysis()
-            total_trades = trade_analyzer.get("total", {}).get("total", 0)
-            total_return = trade_analyzer.get("pnl", {}).get("net", {}).get("total", 0)
+                return objective_value
 
-            if total_trades < 5:  # Minimum trade threshold
-                logger.warning(f"Insufficient trades: {total_trades}")
+            except Exception as e:
+                logger.error(f"Metric extraction failed: {str(e)}")
                 return -999
-
-            objective_value = (
-                total_return / self.initial_cash * 100
-            )  # Return as percentage
-            logger.debug(
-                f"Trial {trial.number} objective value: {objective_value:.2f}%"
-            )
-            return objective_value
 
         except Exception as e:
-            logger.error(f"Trial {trial.number} failed: {str(e)}")
-            traceback.print_exc()
+            logger.error(f"Trial {trial.number} failed completely: {str(e)}")
             return -999
 
 
@@ -174,6 +223,7 @@ def optimize_strategy(
     n_trials: int = 50,
     initial_cash: float = 100000.0,
     commission: float = 0.00,
+    interval: str = "5m",
 ) -> Dict[str, Any]:
     """Optimize strategy parameters using Optuna.
 
@@ -207,6 +257,7 @@ def optimize_strategy(
             end_date=end_date,
             initial_cash=initial_cash,
             commission=commission,
+            interval=interval,
         )
         study.optimize(objective, n_trials=n_trials)
 
@@ -226,6 +277,7 @@ def optimize_strategy(
             end_date=end_date,
             initial_cash=initial_cash,
             commission=commission,
+            interval=interval,
             **best_params,
         )
 

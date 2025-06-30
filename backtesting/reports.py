@@ -33,15 +33,18 @@ class PerformanceAnalyzer:
             self.strategy = strategy_results
         logger.info("Initialized PerformanceAnalyzer")
 
-    def generate_full_report(self):
+    def generate_full_report(self, resample_freq="ME"):
         """Generate a comprehensive performance report.
+
+        Args:
+            resample_freq (str): Pandas offset alias for resampling returns (e.g., 'ME', 'D', 'H', '15T').
 
         Returns:
             dict: Report with summary, trade analysis, risk metrics, and drawdown analysis.
 
         Example:
             >>> analyzer = PerformanceAnalyzer(results)
-            >>> report = analyzer.generate_full_report()
+            >>> report = analyzer.generate_full_report(resample_freq="D")
         """
         if self.strategy is None:
             logger.error("No strategy results available")
@@ -52,7 +55,9 @@ class PerformanceAnalyzer:
                 "summary": self.get_performance_summary(),
                 "trade_analysis": self.get_trade_analysis(),
                 "risk_metrics": self.get_risk_metrics(),
-                "monthly_returns": self.get_monthly_returns(),
+                "resampled_returns": self.get_resampled_returns(
+                    resample_freq=resample_freq
+                ),
                 "drawdown_analysis": self.get_drawdown_analysis(),
             }
             logger.info("Generated full performance report")
@@ -237,11 +242,14 @@ class PerformanceAnalyzer:
             )
             return {"error": f"Error calculating risk metrics: {str(e)}"}
 
-    def get_monthly_returns(self):
-        """Calculate monthly returns.
+    def get_resampled_returns(self, resample_freq="ME"):
+        """Calculate returns resampled by the given frequency.
+
+        Args:
+            resample_freq (str): Pandas offset alias for resampling (e.g., 'ME', 'D', 'H', '15T').
 
         Returns:
-            dict: Monthly return statistics.
+            dict: Resampled return statistics.
         """
         try:
             if self.strategy is None:
@@ -254,38 +262,39 @@ class PerformanceAnalyzer:
 
             returns = pd.Series(timereturn_analyzer.get_analysis())
             if returns.empty:
-                logger.warning("No returns data available for monthly returns")
+                logger.warning("No returns data available for resampled returns")
                 return {"message": "No returns data available"}
 
             returns_df = pd.DataFrame({"returns": returns})
             returns_df.index = pd.to_datetime(returns_df.index)
-            monthly_returns = returns_df.resample("ME").sum()
-            monthly_returns_pct = monthly_returns * 100
+            resampled_returns = returns_df.resample(resample_freq).sum()
+            resampled_returns_pct = resampled_returns * 100
 
             # Convert Timestamp keys to strings for JSON serialization
-            monthly_returns_dict = {
-                str(k): v for k, v in monthly_returns_pct["returns"].to_dict().items()
+            resampled_returns_dict = {
+                str(k): v for k, v in resampled_returns_pct["returns"].to_dict().items()
             }
 
             analysis = {
-                "monthly_returns_pct": monthly_returns_dict,
-                "average_monthly_return_pct": monthly_returns_pct["returns"].mean(),
-                "monthly_return_std_pct": monthly_returns_pct["returns"].std(),
-                "positive_months": len(
-                    monthly_returns_pct[monthly_returns_pct["returns"] > 0]
+                "resampled_returns_pct": resampled_returns_dict,
+                "average_resampled_return_pct": resampled_returns_pct["returns"].mean(),
+                "resampled_return_std_pct": resampled_returns_pct["returns"].std(),
+                "positive_periods": len(
+                    resampled_returns_pct[resampled_returns_pct["returns"] > 0]
                 ),
-                "negative_months": len(
-                    monthly_returns_pct[monthly_returns_pct["returns"] <= 0]
+                "negative_periods": len(
+                    resampled_returns_pct[resampled_returns_pct["returns"] <= 0]
                 ),
+                "resample_freq": resample_freq,
             }
-            logger.info("Generated monthly returns analysis")
+            logger.info(f"Generated resampled returns analysis (freq={resample_freq})")
             return analysis
 
         except Exception as e:
             logger.error(
-                f"Error calculating monthly returns: {str(e)}. Check TimeReturn analyzer."
+                f"Error calculating resampled returns: {str(e)}. Check TimeReturn analyzer."
             )
-            return {"error": f"Error calculating monthly returns: {str(e)}"}
+            return {"error": f"Error calculating resampled returns: {str(e)}"}
 
     def get_drawdown_analysis(self):
         """Analyze drawdowns.
@@ -341,10 +350,14 @@ class PerformanceAnalyzer:
             logger.error(f"Error saving report to {filename}: {str(e)}")
             return False
 
-    def print_report(self):
-        """Print a formatted performance report."""
+    def print_report(self, resample_freq="ME"):
+        """Print a formatted performance report.
+
+        Args:
+            resample_freq (str): Pandas offset alias for resampling returns (e.g., 'ME', 'D', 'H', '15T').
+        """
         try:
-            report = self.generate_full_report()
+            report = self.generate_full_report(resample_freq=resample_freq)
             if "error" in report:
                 print(f"Error generating report: {report['error']}")
                 return
@@ -398,18 +411,24 @@ class PerformanceAnalyzer:
                 print(f"VaR (95%): {risk_metrics.get('var_95_percent', 0):.2f}%")
                 print(f"VaR (99%): {risk_metrics.get('var_99_percent', 0):.2f}%")
 
-            monthly_returns = report.get("monthly_returns", {})
-            if "error" not in monthly_returns:
-                print("\nMonthly Returns")
+            resampled_returns = report.get("resampled_returns", {})
+            if "error" not in resampled_returns:
+                print(
+                    f"\nResampled Returns (freq={resampled_returns.get('resample_freq', resample_freq)})"
+                )
                 print("-" * 30)
                 print(
-                    f"Average Monthly Return: {monthly_returns.get('average_monthly_return_pct', 0):.2f}%"
+                    f"Average Resampled Return: {resampled_returns.get('average_resampled_return_pct', 0):.2f}%"
                 )
                 print(
-                    f"Monthly Return Std: {monthly_returns.get('monthly_return_std_pct', 0):.2f}%"
+                    f"Resampled Return Std: {resampled_returns.get('resampled_return_std_pct', 0):.2f}%"
                 )
-                print(f"Positive Months: {monthly_returns.get('positive_months', 0)}")
-                print(f"Negative Months: {monthly_returns.get('negative_months', 0)}")
+                print(
+                    f"Positive Periods: {resampled_returns.get('positive_periods', 0)}"
+                )
+                print(
+                    f"Negative Periods: {resampled_returns.get('negative_periods', 0)}"
+                )
 
             drawdown_analysis = report.get("drawdown_analysis", {})
             if "error" not in drawdown_analysis:

@@ -1,34 +1,59 @@
 import yfinance as yf
 import pandas as pd
+import asyncio
+import logging
+
+# Configure logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.hasHandlers():
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 
-def get_data(ticker, start_date, end_date):
+async def get_data(ticker, start_date, end_date, interval="5m"):
     """
-    Fetch historical stock data from Yahoo Finance.
+    Fetch historical stock data from Yahoo Finance asynchronously.
 
     Parameters:
     ticker (str): Stock ticker symbol.
     start_date (str): Start date in 'YYYY-MM-DD' format.
     end_date (str): End date in 'YYYY-MM-DD' format.
+    interval (str): Data interval (e.g., '1d', '5m'). Default is '5m'.
 
     Returns:
     pd.DataFrame: DataFrame containing the stock data with proper column names.
     """
     try:
-        # Download data from Yahoo Finance
-        df = yf.download(ticker, start=start_date, end=end_date, interval="1d")
+        # Handle yfinance 60-day limit for intraday data
+        intraday_intervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m"]
+        if interval in intraday_intervals:
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            max_days = 60
+            if (end_dt - start_dt).days > max_days:
+                print(
+                    f"Warning: yfinance only provides up to 60 days of intraday data. Adjusting start_date from {start_date} to {(end_dt - pd.Timedelta(days=max_days)).strftime('%Y-%m-%d')}."
+                )
+                start_date = (end_dt - pd.Timedelta(days=max_days)).strftime("%Y-%m-%d")
 
+        # Download data from Yahoo Finance asynchronously
+        # df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
+        ticker_obj = yf.Ticker(ticker)
+        df = await asyncio.to_thread(ticker_obj.history, period="60d", interval="5m")
         # Check if DataFrame is empty
         if df.empty:
             raise ValueError(
-                f"No data found for ticker {ticker} between {start_date} and {end_date}"
+                f"No data found for ticker {ticker} between {start_date} and {end_date} (interval={interval})"
             )
 
         # Reset index to make Date a column
         df.reset_index(inplace=True)
 
         # Handle the case where Date might be in the index
-        if "Date" not in df.columns and df.index.name == "Date":
+        if "Datetime" not in df.columns and df.index.name == "Datetime":
             df.reset_index(inplace=True)
 
         # Handle MultiIndex columns (common with yfinance)
@@ -67,19 +92,23 @@ def get_data(ticker, start_date, end_date):
             raise ValueError(f"Missing required columns: {missing_columns}")
 
         # Ensure Date column exists and is properly formatted
-        if "Date" not in df.columns:
-            if df.index.name == "Date" or "date" in str(df.index.name).lower():
+        if "Datetime" not in df.columns:
+            if df.index.name == "Datetime" or "datetime" in str(df.index.name).lower():
                 df.reset_index(inplace=True)
-                df.rename(columns={df.columns[0]: "Date"}, inplace=True)
+                df.rename(columns={df.columns[0]: "Datetime"}, inplace=True)
             else:
                 raise ValueError("No Date column found in the data")
 
         # Convert Date to datetime if it's not already
-        if not pd.api.types.is_datetime64_any_dtype(df["Date"]):
-            df["Date"] = pd.to_datetime(df["Date"])
+        if not pd.api.types.is_datetime64_any_dtype(df["Datetime"]):
+            df["Datetime"] = pd.to_datetime(df["Datetime"])
 
         # Set Date as index for Backtrader compatibility
-        df.set_index("Date", inplace=True)
+        df.set_index("Datetime", inplace=True)
+
+        # Convert index to IST (Asia/Kolkata)
+        if df.index.tz is None or str(df.index.tz) != "Asia/Kolkata":
+            df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
 
         # Sort by date to ensure chronological order
         df.sort_index(inplace=True)
@@ -108,74 +137,83 @@ def get_data(ticker, start_date, end_date):
         return df
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         print(f"Error fetching data for {ticker}: {str(e)}")
         raise
 
 
-def validate_data(df):
+def validate_data(df, strict=False):
     """
-    Validate the data format for backtesting.
+    Validate the data format for backtesting with tolerance options.
 
     Parameters:
-    df (pd.DataFrame): DataFrame to validate (should have Date as index)
-
-    Returns:
-    bool: True if data is valid, False otherwise
+    df (pd.DataFrame): DataFrame to validate
+    strict (bool): If True, use strict validation. If False, allow minor issues.
     """
     required_columns = ["Open", "High", "Low", "Close", "Volume"]
 
-    # Check if index is datetime
+    # Check index is datetime
     if not pd.api.types.is_datetime64_any_dtype(df.index):
-        print("Index is not datetime type")
-        return False
+        logger.warning("Index is not datetime type")
+        if strict:
+            return False
 
-    # Check if all required columns exist
+    # Check required columns
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
-        print(f"Missing columns: {missing_columns}")
-        return False
+        logger.warning(f"Missing columns: {missing_columns}")
+        if strict:
+            return False
 
     # Check for empty DataFrame
     if df.empty:
-        print("DataFrame is empty")
+        logger.warning("DataFrame is empty")
         return False
 
-    # Check for NaN values in OHLCV columns
-    ohlcv_columns = ["Open", "High", "Low", "Close", "Volume"]
-    nan_columns = []
-    for col in ohlcv_columns:
-        if df[col].isna().any():
-            nan_columns.append(col)
-
+    # Check for NaN values
+    nan_columns = (
+        df[required_columns].columns[df[required_columns].isna().any()].tolist()
+    )
     if nan_columns:
-        print(f"NaN values found in columns: {nan_columns}")
-        return False
+        logger.warning(f"NaN values in columns: {nan_columns}")
+        if strict:
+            return False
 
-    # Check if High >= Low for all rows
+    # Check High >= Low with tolerance
     invalid_high_low = df[df["High"] < df["Low"]]
     if not invalid_high_low.empty:
-        print(f"Invalid High/Low values found in {len(invalid_high_low)} rows")
-        return False
+        logger.warning(f"High < Low in {len(invalid_high_low)} rows")
+        if strict:
+            return False
 
-    # Check if Open and Close are within High/Low range
-    invalid_open = df[(df["Open"] > df["High"]) | (df["Open"] < df["Low"])]
-    invalid_close = df[(df["Close"] > df["High"]) | (df["Close"] < df["Low"])]
+    # Check OHLC consistency with tolerance
+    tolerance = 0.01  # 1% tolerance for price anomalies
+    invalid_open = df[
+        (df["Open"] > df["High"] * (1 + tolerance))
+        | (df["Open"] < df["Low"] * (1 - tolerance))
+    ]
+    invalid_close = df[
+        (df["Close"] > df["High"] * (1 + tolerance))
+        | (df["Close"] < df["Low"] * (1 - tolerance))
+    ]
 
     if not invalid_open.empty:
-        print(f"Invalid Open values found in {len(invalid_open)} rows")
+        logger.warning(f"Open price anomalies in {len(invalid_open)} rows")
     if not invalid_close.empty:
-        print(f"Invalid Close values found in {len(invalid_close)} rows")
+        logger.warning(f"Close price anomalies in {len(invalid_close)} rows")
 
-    if not invalid_open.empty or not invalid_close.empty:
+    if strict and (not invalid_open.empty or not invalid_close.empty):
         return False
 
-    print("Data validation passed")
+    logger.info("Data validation passed")
     return True
 
 
-def get_multiple_tickers_data(tickers, start_date, end_date):
+async def get_multiple_tickers_data(tickers, start_date, end_date):
     """
-    Fetch data for multiple tickers.
+    Fetch data for multiple tickers asynchronously.
 
     Parameters:
     tickers (list): List of ticker symbols
@@ -187,10 +225,18 @@ def get_multiple_tickers_data(tickers, start_date, end_date):
     """
     data_dict = {}
 
+    # Create tasks for concurrent execution
+    tasks = []
     for ticker in tickers:
+        print(f"Creating task for {ticker}...")
+        task = asyncio.create_task(get_data(ticker, start_date, end_date))
+        tasks.append((ticker, task))
+
+    # Wait for all tasks to complete
+    for ticker, task in tasks:
         try:
             print(f"Fetching data for {ticker}...")
-            data_dict[ticker] = get_data(ticker, start_date, end_date)
+            data_dict[ticker] = await task
         except Exception as e:
             print(f"Failed to fetch data for {ticker}: {str(e)}")
             continue
@@ -198,7 +244,22 @@ def get_multiple_tickers_data(tickers, start_date, end_date):
     return data_dict
 
 
-def preview_data(ticker, start_date, end_date, rows=5):
+def get_multiple_tickers_data_sync(tickers, start_date, end_date):
+    """
+    Fetch data for multiple tickers synchronously (wrapper for async function).
+
+    Parameters:
+    tickers (list): List of ticker symbols
+    start_date (str): Start date in 'YYYY-MM-DD' format
+    end_date (str): End date in 'YYYY-MM-DD' format
+
+    Returns:
+    dict: Dictionary with ticker as key and DataFrame as value
+    """
+    return asyncio.run(get_multiple_tickers_data(tickers, start_date, end_date))
+
+
+async def preview_data(ticker, start_date, end_date, rows=5):
     """
     Preview data for a ticker.
 
@@ -209,7 +270,7 @@ def preview_data(ticker, start_date, end_date, rows=5):
     rows (int): Number of rows to display
     """
     try:
-        df = get_data(ticker, start_date, end_date)
+        df = await get_data(ticker, start_date, end_date)
 
         print(f"\nData Preview for {ticker}:")
         print("-" * 50)
@@ -234,17 +295,30 @@ def preview_data(ticker, start_date, end_date, rows=5):
         return None
 
 
-if __name__ == "__main__":
-    # Test the data fetching function
-    test_ticker = "AAPL"
-    test_start = "2024-01-01"
-    test_end = "2024-12-31"
+def preview_data_sync(ticker, start_date, end_date, rows=5):
+    """
+    Preview data for a ticker synchronously (wrapper for async function).
 
-    print(f"Testing data fetch for {test_ticker}")
-    try:
-        df = preview_data(test_ticker, test_start, test_end)
-        if df is not None:
-            is_valid = validate_data(df)
-            print(f"Data validation result: {is_valid}")
-    except Exception as e:
-        print(f"Test failed: {str(e)}")
+    Parameters:
+    ticker (str): Stock ticker symbol
+    start_date (str): Start date in 'YYYY-MM-DD' format
+    end_date (str): End date in 'YYYY-MM-DD' format
+    rows (int): Number of rows to display
+    """
+    return asyncio.run(preview_data(ticker, start_date, end_date, rows))
+
+
+def get_data_sync(ticker, start_date, end_date, interval="5m"):
+    """
+    Fetch historical stock data from Yahoo Finance synchronously (wrapper for async function).
+
+    Parameters:
+    ticker (str): Stock ticker symbol.
+    start_date (str): Start date in 'YYYY-MM-DD' format.
+    end_date (str): End date in 'YYYY-MM-DD' format.
+    interval (str): Data interval (e.g., '1d', '5m'). Default is '5m'.
+
+    Returns:
+    pd.DataFrame: DataFrame containing the stock data with proper column names.
+    """
+    return asyncio.run(get_data(ticker, start_date, end_date, interval))
