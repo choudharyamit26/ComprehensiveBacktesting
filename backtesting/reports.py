@@ -92,11 +92,11 @@ class PerformanceAnalyzer:
 
             # Final portfolio value
             final_value = self.strategy.broker.getvalue()
-
+            total_return_pct = (np.exp(total_return) - 1) * 100
             summary = {
                 "initial_cash": self.initial_cash,
                 "final_value": final_value,
-                "total_return_pct": total_return,
+                "total_return_pct": total_return_pct,
                 "annual_return_pct": annual_return,
                 "sharpe_ratio": sharpe_ratio,
                 "max_drawdown_pct": max_drawdown,

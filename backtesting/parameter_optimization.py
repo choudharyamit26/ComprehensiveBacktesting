@@ -27,7 +27,7 @@ class OptimizationObjective:
             params = {
                 "fast_ema_period": trial.suggest_int("fast_ema_period", 5, 30),
                 "slow_ema_period": trial.suggest_int(
-                    "slow_ema_period", 31, 100
+                    "slow_ema_period", 31, 75
                 ),  # Reduced max
                 "rsi_period": trial.suggest_int("rsi_period", 10, 20),
                 "rsi_upper": trial.suggest_int("rsi_upper", 60, 75),  # More reasonable

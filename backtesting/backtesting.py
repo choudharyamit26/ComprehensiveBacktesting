@@ -1,6 +1,7 @@
 import backtrader as bt
 
 from stratgies.ema_rsi import EMARSI
+from stratgies.registry import get_strategy
 from .data import get_data
 from .parameter_optimization import optimize_strategy
 from .reports import PerformanceAnalyzer, compare_strategies
@@ -50,7 +51,7 @@ def run_backtest(
         volume="Volume",
         openinterest=None,
     )
-
+    strategy_class = get_strategy(strategy_class)
     # Add strategy with parameters
     cerebro.addstrategy(strategy_class, **strategy_params)
 
@@ -91,6 +92,7 @@ def run_backtest(
 def run_basic_backtest(ticker, start_date, end_date):
     """Run a basic backtest with default parameters."""
     print(f"\n=== BASIC BACKTEST: {ticker} ===")
+    # strategy_class = get_strategy(strategy_name)
 
     try:
         results, cerebro = run_backtest(
@@ -206,41 +208,58 @@ def run_walkforward_analysis(ticker, start_date, end_date):
     print(f"\n=== WALK-FORWARD ANALYSIS: {ticker} ===")
 
     try:
-        validation_analyzer = ValidationAnalyzer(
-            strategy_class=EMARSI,
-            ticker=ticker
-        )
+        validation_analyzer = ValidationAnalyzer(strategy_class=EMARSI, ticker=ticker)
 
         window_months = int(
-            input("Enter optimization window in months (default: 12): ").strip() or "12"
+            input("Enter optimization window in months (default: 12): ").strip() or "6"
         )
         step_months = int(
-            input("Enter step size in months (default: 3): ").strip() or "3"
+            input("Enter step size in months (default: 3): ").strip() or "1"
         )
 
         results = validation_analyzer.walk_forward_analysis(
-            optimization_window_months=window_months, step_months=step_months
+            start_date=start_date,
+            end_date=end_date,
+            in_sample_months=window_months,
+            out_sample_months=6,
+            step_months=step_months,
+            n_trials=20,
+            min_trades=1,
         )
 
-        print(f"\nWalk-Forward Analysis Results:")
-        print(f"Number of periods: {len(results['period_results'])}")
+        summary = results.get("summary_stats", {})
+        print(f"\nWalk-Forward Analysis Summary:")
         print(
-            f"Average out-of-sample Sharpe: {results['summary']['avg_oos_sharpe']:.3f}"
+            f"Valid windows: {summary.get('valid_windows', 0)}/{summary.get('total_windows', 0)}"
         )
         print(
-            f"Average out-of-sample return: {results['summary']['avg_oos_return']:.2f}%"
+            f"Average in-sample return: {summary.get('avg_in_sample_return', 0):.2f}%"
         )
-        print(f"Consistency score: {results['summary']['consistency_score']:.2f}")
-
+        print(
+            f"Average out-of-sample return: {summary.get('avg_out_sample_return', 0):.2f}%"
+        )
+        print(f"Out-of-sample win rate: {summary.get('win_rate_out_sample', 0):.1f}%")
+        print(f"Return correlation: {summary.get('correlation', 0):.3f}")
+        print(f"Average degradation: {summary.get('avg_degradation', 0):.2f}%")
+        print(f"Total windows analyzed: {summary.get('total_windows', 0)}")
+        plot_choice = input("\nPlot walk-forward results? (y/n): ").lower().strip()
+        if plot_choice == "y":
+            validation_analyzer.plot_walk_forward_results(results)
         return results
 
     except ImportError:
         print(
             "ValidationAnalyzer not available. Running parameter optimization instead."
         )
+        import traceback
+
+        traceback.print_exc()
         return run_parameter_optimization(ticker, start_date, end_date)
     except Exception as e:
         print(f"Walk-forward analysis failed: {str(e)}")
+        import traceback
+
+        traceback.print_exc()
         return run_parameter_optimization(ticker, start_date, end_date)
 
 
@@ -382,7 +401,39 @@ def run_full_demo(ticker, start_date, end_date):
     except Exception as e:
         print(f"Strategy comparison failed: {str(e)}")
 
-    # 5. Generate comprehensive report
+    # 5. Walk-forward analysis
+    print("\n" + "=" * 60)
+    try:
+        validation_analyzer = ValidationAnalyzer(strategy_class=EMARSI, ticker=ticker)
+        wf_results = validation_analyzer.walk_forward_analysis(
+            start_date=start_date,
+            end_date=end_date,
+            in_sample_months=12,
+            out_sample_months=3,
+            step_months=3,
+            n_trials=20,
+            min_trades=3,
+        )
+        results["walk_forward"] = wf_results
+        # Print walk-forward summary
+        summary = wf_results.get("summary_stats", {})
+        print("\nWalk-Forward Analysis Summary:")
+        print(
+            f"Valid windows: {summary.get('valid_windows', 0)}/{summary.get('total_windows', 0)}"
+        )
+        print(
+            f"Average in-sample return: {summary.get('avg_in_sample_return', 0):.2f}%"
+        )
+        print(
+            f"Average out-of-sample return: {summary.get('avg_out_sample_return', 0):.2f}%"
+        )
+        print(f"Out-of-sample win rate: {summary.get('win_rate_out_sample', 0):.1f}%")
+        print(f"Return correlation: {summary.get('correlation', 0):.3f}")
+        print(f"Average degradation: {summary.get('avg_degradation', 0):.2f}%")
+    except Exception as e:
+        print(f"Walk-forward analysis failed: {str(e)}")
+
+    # 6. Generate comprehensive report
     print("\n" + "=" * 60)
     print("Generating comprehensive reports...")
 
@@ -405,7 +456,7 @@ def run_full_demo(ticker, start_date, end_date):
     except Exception as e:
         print(f"Report generation failed: {str(e)}")
 
-    # 6. Plot option
+    # 7. Plot option
     try:
         plot_choice = input("\nPlot results? (y/n): ").lower().strip()
         if plot_choice == "y":
@@ -446,7 +497,7 @@ def main():
     # Common parameters
     ticker = input("Enter ticker symbol (default: AAPL): ").strip() or "AAPL"
     start_date = (
-        input("Enter start date (default: 2022-01-01): ").strip() or "2022-01-01"
+        input("Enter start date (default: 2020-01-01): ").strip() or "2020-01-01"
     )
     end_date = input("Enter end date (default: 2025-06-01): ").strip() or "2025-06-01"
 

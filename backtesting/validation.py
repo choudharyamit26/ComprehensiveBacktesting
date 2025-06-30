@@ -1,3 +1,4 @@
+import json
 import backtrader as bt
 import pandas as pd
 import numpy as np
@@ -6,7 +7,6 @@ from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
 from typing import Dict, List, Optional
 import warnings
-
 
 from .data import get_data
 from .reports import PerformanceAnalyzer
@@ -28,6 +28,90 @@ class ValidationAnalyzer:
         self.ticker = ticker
         self.initial_cash = initial_cash
         self.commission = commission
+
+        # Minimum data requirements for indicators (will be set dynamically)
+        self.min_data_points = 100  # Will be determined per strategy/params
+
+    def _get_required_min_data_points(self, **strategy_params):
+        try:
+            # Create dummy data with 1000 rows of non-zero values
+            dummy_data = pd.DataFrame(
+                {
+                    "Open": 100.0 + np.random.normal(0, 0.1, 1000),
+                    "High": 101.0 + np.random.normal(0, 0.1, 1000),
+                    "Low": 99.0 + np.random.normal(0, 0.1, 1000),
+                    "Close": 100.0 + np.random.normal(0, 0.1, 1000),
+                    "Volume": 10000.0 + np.random.normal(0, 100, 1000),
+                },
+                index=pd.date_range(start="2000-01-01", periods=1000, freq="D"),
+            )
+
+            data = bt.feeds.PandasData(dataname=dummy_data)
+            cerebro = bt.Cerebro()
+            cerebro.adddata(data)
+            cerebro.addstrategy(self.strategy_class, **strategy_params)
+
+            # Run with minimal preloading to avoid indicator calculations
+            strategies = cerebro.run(
+                preload=False, runonce=False, stdstats=False, maxcpus=1
+            )
+
+            if not strategies:
+                print("No strategies were run. Using fallback value.")
+                return 50
+
+            strat_instance = strategies[0]
+
+            # Collect all indicators
+            indicators = []
+            for attr_name in dir(strat_instance):
+                attr = getattr(strat_instance, attr_name)
+                if isinstance(attr, bt.Indicator):
+                    indicators.append(attr)
+
+            if not indicators:
+                print("No indicators found in the strategy. Using fallback value.")
+                return 50
+
+            max_period = 0
+            for ind in indicators:
+                try:
+                    # Get period from various possible locations
+                    period_val = None
+                    if hasattr(ind, "period"):
+                        period_val = ind.period
+                    elif hasattr(ind, "params") and hasattr(ind.params, "period"):
+                        period_val = ind.params.period
+                    elif hasattr(ind, "p") and hasattr(ind.p, "period"):
+                        period_val = ind.p.period
+
+                    if period_val is not None:
+                        period_val = int(period_val)
+                        max_period = max(max_period, period_val)
+                except Exception as e:
+                    print(f"Error accessing period for indicator {ind}: {e}")
+                    continue
+
+            if max_period == 0:
+                print("No valid periods found for indicators. Using fallback value.")
+                return 50
+
+            return max(50, max_period + 20)  # Buffer of 20, minimum 50
+
+        except Exception as e:
+            print(f"Dynamic period detection failed: {e}. Using fallback 50")
+            return 50
+
+    def _validate_data_length(self, start_date, end_date, **strategy_params):
+        min_data_points = self._get_required_min_data_points(**strategy_params)
+        data_df = get_data(self.ticker, start_date, end_date)
+        data_length = len(data_df)
+
+        if data_length < min_data_points:
+            print(f"  Required: {min_data_points} bars, Available: {data_length} bars")
+            print("  Solution: Increase period length or reduce indicator periods")
+            return False
+        return True
 
     def in_sample_out_sample_analysis(
         self,
@@ -69,6 +153,13 @@ class ValidationAnalyzer:
         print(
             f"Split Ratio: {split_ratio:.1%} in-sample, {1-split_ratio:.1%} out-of-sample"
         )
+
+        # Validate data lengths
+        if not self._validate_data_length(start_date, split_date_str):
+            raise ValueError("Insufficient data for in-sample period")
+
+        if not self._validate_data_length(split_date_str, end_date):
+            raise ValueError("Insufficient data for out-of-sample period")
 
         results = {
             "split_date": split_date_str,
@@ -135,6 +226,107 @@ class ValidationAnalyzer:
 
         return results
 
+    def generate_walk_forward_report(self, wf_results, filename=None):
+        """
+        Generate a comprehensive report for walk-forward analysis.
+
+        Parameters:
+        wf_results (Dict): Walk-forward analysis results dictionary
+        filename (str, optional): If provided, save the report to this file
+
+        Returns:
+        Dict: Structured report containing overview and per-window details
+        """
+        report = {
+            "overview": {
+                "total_windows": wf_results["summary_stats"].get("total_windows", 0),
+                "valid_windows": wf_results["summary_stats"].get("valid_windows", 0),
+                "avg_in_sample_return": wf_results["summary_stats"].get(
+                    "avg_in_sample_return", 0
+                ),
+                "avg_out_sample_return": wf_results["summary_stats"].get(
+                    "avg_out_sample_return", 0
+                ),
+                "out_sample_win_rate": wf_results["summary_stats"].get(
+                    "win_rate_out_sample", 0
+                ),
+                "return_correlation": wf_results["summary_stats"].get("correlation", 0),
+                "avg_degradation": wf_results["summary_stats"].get(
+                    "avg_degradation", 0
+                ),
+            },
+            "windows": [],
+        }
+
+        for window in wf_results["windows"]:
+            if window.get("valid", False):
+                window_report = {
+                    "window_id": window["window_id"],
+                    "in_sample_period": f"{window['periods']['in_sample_start']} to {window['periods']['in_sample_end']}",
+                    "out_sample_period": f"{window['periods']['out_sample_start']} to {window['periods']['out_sample_end']}",
+                    "best_params": window.get("best_params", {}),
+                    "in_sample_performance": window.get(
+                        "in_sample_performance", {}
+                    ).get("summary", {}),
+                    "out_sample_performance": window.get(
+                        "out_sample_performance", {}
+                    ).get("summary", {}),
+                    "degradation": window.get("degradation", {}),
+                }
+                report["windows"].append(window_report)
+
+        if filename:
+            try:
+                with open(filename, "w") as f:
+                    json.dump(report, f, indent=2, default=str)
+                print(f"Walk-forward report saved to {filename}")
+            except Exception as e:
+                print(f"Error saving report: {str(e)}")
+
+        return report
+
+    def print_walk_forward_report(self, report):
+        """
+        Print a formatted walk-forward analysis report to the console.
+
+        Parameters:
+        report (Dict): The report generated by generate_walk_forward_report
+        """
+        print("=" * 60)
+        print("WALK-FORWARD ANALYSIS REPORT")
+        print("=" * 60)
+
+        # Overview Section
+        overview = report["overview"]
+        print("\nOVERVIEW")
+        print("-" * 30)
+        print(f"Total windows: {overview['total_windows']}")
+        print(f"Valid windows: {overview['valid_windows']}")
+        print(f"Average in-sample return: {overview['avg_in_sample_return']:.2f}%")
+        print(f"Average out-sample return: {overview['avg_out_sample_return']:.2f}%")
+        print(f"Out-sample win rate: {overview['out_sample_win_rate']:.1f}%")
+        print(f"Return correlation: {overview['return_correlation']:.3f}")
+        print(f"Average degradation: {overview['avg_degradation']:.2f}%")
+
+        # Per-Window Details
+        print("\nPER WINDOW DETAILS")
+        print("-" * 30)
+        for window in report["windows"]:
+            print(f"Window {window['window_id']}:")
+            print(f"  In-sample period: {window['in_sample_period']}")
+            print(f"  Out-sample period: {window['out_sample_period']}")
+            print(f"  Best parameters: {window['best_params']}")
+            in_perf = window["in_sample_performance"]
+            out_perf = window["out_sample_performance"]
+            print(f"  In-sample return: {in_perf.get('total_return_pct', 0):.2f}%")
+            print(f"  Out-sample return: {out_perf.get('total_return_pct', 0):.2f}%")
+            print(
+                f"  Degradation: {window['degradation'].get('return_degradation', 0):.2f}%"
+            )
+            print()
+
+        print("=" * 60)
+
     def walk_forward_analysis(
         self,
         start_date: str,
@@ -185,6 +377,7 @@ class ValidationAnalyzer:
                 "step_months": step_months,
                 "n_trials": n_trials,
                 "min_trades": min_trades,
+                "min_data_points": self.min_data_points,
             },
             "windows": [],
             "summary_stats": {},
@@ -204,6 +397,20 @@ class ValidationAnalyzer:
             )
 
             try:
+                # Validate in-sample data length first (no params yet)
+                if not self._validate_data_length(
+                    window["in_sample_start"], window["in_sample_end"]
+                ):
+                    print("  Skipped: Insufficient in-sample data")
+                    window_result = {
+                        "window_id": i + 1,
+                        "periods": window,
+                        "error": "Insufficient in-sample data",
+                        "valid": False,
+                    }
+                    results["windows"].append(window_result)
+                    continue
+
                 # Optimize on in-sample data
                 print("  Optimizing parameters...")
                 optimization_results = optimize_strategy(
@@ -218,12 +425,28 @@ class ValidationAnalyzer:
 
                 best_params = optimization_results["best_params"]
 
+                # Validate out-of-sample data length with best_params
+                if not self._validate_data_length(
+                    window["out_sample_start"], window["out_sample_end"], **best_params
+                ):
+                    print("  Skipped: Insufficient out-of-sample data")
+                    window_result = {
+                        "window_id": i + 1,
+                        "periods": window,
+                        "error": "Insufficient out-of-sample data",
+                        "valid": False,
+                    }
+                    results["windows"].append(window_result)
+                    continue
+
                 # Test on in-sample data
+                print("  Running in-sample backtest...")
                 in_sample_results = self._run_backtest(
                     window["in_sample_start"], window["in_sample_end"], **best_params
                 )
 
                 # Test on out-of-sample data
+                print("  Running out-of-sample backtest...")
                 out_sample_results = self._run_backtest(
                     window["out_sample_start"], window["out_sample_end"], **best_params
                 )
@@ -236,12 +459,35 @@ class ValidationAnalyzer:
                 out_sample_perf = out_sample_analyzer.generate_full_report()
 
                 # Check if results are valid (enough trades)
-                in_sample_trades = in_sample_perf["trade_analysis"].get(
-                    "total_trades", 0
-                )
-                out_sample_trades = out_sample_perf["trade_analysis"].get(
-                    "total_trades", 0
-                )
+                # Defensive: check if performance reports are dicts
+                if not isinstance(in_sample_perf, dict):
+                    print(
+                        "  Warning: in_sample_perf is not a dict, treating as 0 trades."
+                    )
+                    in_sample_trades = 0
+                else:
+                    in_trade_analysis = in_sample_perf.get("trade_analysis", {})
+                    if not isinstance(in_trade_analysis, dict):
+                        print(
+                            "  Warning: in_sample trade_analysis is not a dict, treating as 0 trades."
+                        )
+                        in_sample_trades = 0
+                    else:
+                        in_sample_trades = in_trade_analysis.get("total_trades", 0)
+                if not isinstance(out_sample_perf, dict):
+                    print(
+                        "  Warning: out_sample_perf is not a dict, treating as 0 trades."
+                    )
+                    out_sample_trades = 0
+                else:
+                    out_trade_analysis = out_sample_perf.get("trade_analysis", {})
+                    if not isinstance(out_trade_analysis, dict):
+                        print(
+                            "  Warning: out_sample trade_analysis is not a dict, treating as 0 trades."
+                        )
+                        out_sample_trades = 0
+                    else:
+                        out_sample_trades = out_trade_analysis.get("total_trades", 0)
 
                 if in_sample_trades >= min_trades and out_sample_trades >= min_trades:
                     valid_windows += 1
@@ -283,7 +529,12 @@ class ValidationAnalyzer:
                 results["windows"].append(window_result)
 
             except Exception as e:
+                import traceback
+
+                traceback.print_exc()  # Print full traceback for debugging
                 print(f"  Error processing window: {str(e)}")
+                # Don't print full traceback for each window to avoid spam
+
                 window_result = {
                     "window_id": i + 1,
                     "periods": window,
@@ -306,18 +557,29 @@ class ValidationAnalyzer:
                     if len(all_in_sample_returns) > 1
                     else 0
                 ),
-                "avg_degradation": np.mean(
-                    [
-                        w["degradation"]["return_degradation"]
-                        for w in results["windows"]
-                        if w["valid"]
-                    ]
+                "avg_degradation": (
+                    np.mean(
+                        [
+                            w["degradation"]["return_degradation"]
+                            for w in results["windows"]
+                            if w["valid"] and "degradation" in w
+                        ]
+                    )
+                    if any(
+                        w["valid"] and "degradation" in w for w in results["windows"]
+                    )
+                    else 0
                 ),
-                "win_rate_out_sample": sum(1 for r in all_out_sample_returns if r > 0)
-                / len(all_out_sample_returns)
-                * 100,
+                "win_rate_out_sample": (
+                    sum(1 for r in all_out_sample_returns if r > 0)
+                    / len(all_out_sample_returns)
+                    * 100
+                    if all_out_sample_returns
+                    else 0
+                ),
             }
 
+            # Existing summary print (can be kept or replaced)
             print(f"\n" + "=" * 40)
             print("WALK-FORWARD SUMMARY")
             print("=" * 40)
@@ -336,14 +598,59 @@ class ValidationAnalyzer:
                 f"Average degradation: {results['summary_stats']['avg_degradation']:.2f}%"
             )
 
+            # Generate and print the detailed report
+            print("\nGenerating walk-forward report...")
+            report = self.generate_walk_forward_report(results)
+            self.print_walk_forward_report(report)
+
+            # Prompt user to save the report
+            save_report = (
+                input("Save walk-forward report to file? (y/n): ").lower().strip()
+            )
+            if save_report == "y":
+                filename = (
+                    input("Enter filename (default: ticker_wf_report.json): ").strip()
+                    or f"{self.ticker}_wf_report.json"
+                )
+                self.generate_walk_forward_report(results, filename=filename)
+        else:
+            print(f"\n" + "=" * 40)
+            print("WALK-FORWARD SUMMARY")
+            print("=" * 40)
+            print(f"No valid windows found out of {len(windows)} total windows")
+            print("This could be due to:")
+            print("- Insufficient data in the date ranges")
+            print("- Not enough trades generated by the strategy")
+            print("- Technical indicator calculation errors")
+            print("\nRecommendations:")
+            print("- Use longer date ranges")
+            print("- Reduce the minimum trade requirement")
+            print("- Check your strategy parameters")
+
         return results
 
     def _run_backtest(self, start_date: str, end_date: str, **strategy_params):
         """Run a backtest with given parameters."""
 
-        # Get data
+        # Get data with validation
+        min_data_points = self._get_required_min_data_points(**strategy_params)
         data_df = get_data(self.ticker, start_date, end_date)
-        data = bt.feeds.PandasData(dataname=data_df)
+        if len(data_df) < min_data_points:
+            raise ValueError(
+                f"Insufficient data: {len(data_df)} points (need {min_data_points})"
+            )
+
+        # Create Backtrader data feed with proper column mapping
+        data = bt.feeds.PandasData(
+            dataname=data_df,
+            datetime=None,  # Use index as datetime
+            open="Open",
+            high="High",
+            low="Low",
+            close="Close",
+            volume="Volume",
+            openinterest=None,
+        )
 
         # Create Cerebro engine
         cerebro = bt.Cerebro()
@@ -357,11 +664,22 @@ class ValidationAnalyzer:
         cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
         cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
         cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+        cerebro.addanalyzer(bt.analyzers.Calmar, _name="calmar")
+        cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
+        cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
 
-        # Run backtest
-        results = cerebro.run()
-
-        return results
+        # Run backtest with robust error handling for indicator/data length issues
+        try:
+            results = cerebro.run()
+            return results
+        except IndexError as e:
+            print(
+                f"  Error: {str(e)}\n  Likely cause: Not enough data for one or more indicators in this window.\n  Suggestion: Increase min_data_points or check your indicator periods."
+            )
+            return None
+        except Exception as e:
+            print(f"  Unexpected error during backtest: {str(e)}")
+            return None
 
     def _generate_walk_forward_windows(
         self,
@@ -435,14 +753,18 @@ class ValidationAnalyzer:
         """Print comparison between in-sample and out-of-sample results."""
 
         print("\n" + "=" * 50)
-        print("IN-SAMPLE vs OUT-OF-SAMPLE COMPARISON", results)
+        print("IN-SAMPLE vs OUT-OF-SAMPLE COMPARISON")
         print("=" * 50)
 
         in_perf = results["in_sample_performance"]["summary"]
         out_perf = results["out_sample_performance"]["summary"]
         degradation = results["performance_degradation"]
 
-        if "error" not in in_perf and "error" not in out_perf:
+        if (
+            "error" not in in_perf
+            and "error" not in out_perf
+            and "error" not in degradation
+        ):
             print(
                 f"{'Metric':<25} {'In-Sample':<15} {'Out-Sample':<15} {'Degradation':<15}"
             )
@@ -463,6 +785,10 @@ class ValidationAnalyzer:
             print(f"\nPerformance Ratios:")
             print(f"  Return Ratio (Out/In): {degradation['return_ratio']:.3f}")
             print(f"  Sharpe Ratio (Out/In): {degradation['sharpe_ratio']:.3f}")
+        else:
+            print(
+                "Error in performance comparison - unable to display detailed metrics"
+            )
 
     def plot_walk_forward_results(
         self, wf_results: Dict, save_path: Optional[str] = None
@@ -489,11 +815,19 @@ class ValidationAnalyzer:
             w["out_sample_performance"]["summary"]["total_return_pct"]
             for w in valid_windows
         ]
-        degradations = [w["degradation"]["return_degradation"] for w in valid_windows]
+        degradations = [
+            w["degradation"]["return_degradation"]
+            for w in valid_windows
+            if "degradation" in w
+        ]
 
         # Create subplot figure
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-        fig.suptitle("Walk-Forward Analysis Results", fontsize=16, fontweight="bold")
+        fig.suptitle(
+            f"Walk-Forward Analysis Results - {self.ticker}",
+            fontsize=16,
+            fontweight="bold",
+        )
 
         # Plot 1: In-sample vs Out-of-sample returns
         axes[0, 0].plot(
@@ -510,26 +844,39 @@ class ValidationAnalyzer:
         axes[0, 0].grid(True, alpha=0.3)
 
         # Plot 2: Performance degradation
-        axes[0, 1].bar(window_ids, degradations, color="orange", alpha=0.7)
-        axes[0, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
-        axes[0, 1].set_xlabel("Window ID")
-        axes[0, 1].set_ylabel("Degradation (%)")
-        axes[0, 1].set_title("Performance Degradation per Window")
-        axes[0, 1].grid(True, alpha=0.3)
+        if degradations:
+            axes[0, 1].bar(
+                window_ids[: len(degradations)], degradations, color="orange", alpha=0.7
+            )
+            axes[0, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
+            axes[0, 1].set_xlabel("Window ID")
+            axes[0, 1].set_ylabel("Degradation (%)")
+            axes[0, 1].set_title("Performance Degradation per Window")
+            axes[0, 1].grid(True, alpha=0.3)
+        else:
+            axes[0, 1].text(
+                0.5,
+                0.5,
+                "No degradation data available",
+                ha="center",
+                va="center",
+                transform=axes[0, 1].transAxes,
+            )
 
         # Plot 3: Scatter plot of in-sample vs out-of-sample
         axes[1, 0].scatter(in_sample_returns, out_sample_returns, alpha=0.7, s=60)
 
         # Add diagonal line (perfect correlation)
-        min_val = min(min(in_sample_returns), min(out_sample_returns))
-        max_val = max(max(in_sample_returns), max(out_sample_returns))
-        axes[1, 0].plot(
-            [min_val, max_val],
-            [min_val, max_val],
-            "k--",
-            alpha=0.5,
-            label="Perfect Correlation",
-        )
+        if in_sample_returns and out_sample_returns:
+            min_val = min(min(in_sample_returns), min(out_sample_returns))
+            max_val = max(max(in_sample_returns), max(out_sample_returns))
+            axes[1, 0].plot(
+                [min_val, max_val],
+                [min_val, max_val],
+                "k--",
+                alpha=0.5,
+                label="Perfect Correlation",
+            )
 
         axes[1, 0].set_xlabel("In-Sample Return (%)")
         axes[1, 0].set_ylabel("Out-of-Sample Return (%)")
@@ -538,15 +885,31 @@ class ValidationAnalyzer:
         axes[1, 0].grid(True, alpha=0.3)
 
         # Plot 4: Cumulative returns
-        cumulative_out_sample = np.cumprod(1 + np.array(out_sample_returns) / 100) - 1
-        axes[1, 1].plot(
-            window_ids, cumulative_out_sample * 100, "g-o", linewidth=2, markersize=4
-        )
-        axes[1, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
-        axes[1, 1].set_xlabel("Window ID")
-        axes[1, 1].set_ylabel("Cumulative Return (%)")
-        axes[1, 1].set_title("Cumulative Out-of-Sample Returns")
-        axes[1, 1].grid(True, alpha=0.3)
+        if out_sample_returns:
+            cumulative_out_sample = (
+                np.cumprod(1 + np.array(out_sample_returns) / 100) - 1
+            )
+            axes[1, 1].plot(
+                window_ids,
+                cumulative_out_sample * 100,
+                "g-o",
+                linewidth=2,
+                markersize=4,
+            )
+            axes[1, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
+            axes[1, 1].set_xlabel("Window ID")
+            axes[1, 1].set_ylabel("Cumulative Return (%)")
+            axes[1, 1].set_title("Cumulative Out-of-Sample Returns")
+            axes[1, 1].grid(True, alpha=0.3)
+        else:
+            axes[1, 1].text(
+                0.5,
+                0.5,
+                "No return data available",
+                ha="center",
+                va="center",
+                transform=axes[1, 1].transAxes,
+            )
 
         plt.tight_layout()
 
@@ -591,8 +954,8 @@ def run_validation_analysis(
     wf_results = validator.walk_forward_analysis(
         start_date=start_date,
         end_date=end_date,
-        in_sample_months=12,
-        out_sample_months=3,
+        in_sample_months=18,
+        out_sample_months=6,
         step_months=3,
         n_trials=20,
         min_trades=3,
@@ -612,22 +975,4 @@ def run_validation_analysis(
     }
 
 
-if __name__ == "__main__":
-    # Example usage
-    from stratgies.ema_rsi import EMARSI
-
-    print("Running validation analysis example...")
-
-    # Quick example
-    validator = ValidationAnalyzer(EMARSI, "AAPL")
-
-    # In-sample / Out-of-sample analysis
-    results = validator.in_sample_out_sample_analysis(
-        start_date="2022-01-01",
-        end_date="2025-06-01",
-        split_ratio=0.7,
-        optimize_in_sample=True,
-        n_trials=10,  # Small number for quick demo
-    )
-
-    print("\nValidation analysis completed!")
+print("\nValidation analysis completed!")
