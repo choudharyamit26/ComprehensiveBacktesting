@@ -108,7 +108,7 @@ async def get_data(ticker, start_date, end_date, interval="5m"):
 
         # Convert index to IST (Asia/Kolkata)
         if df.index.tz is None or str(df.index.tz) != "Asia/Kolkata":
-            df.index = df.index.tz_localize("UTC").tz_convert("Asia/Kolkata")
+            df.index = df.index.tz_convert("Asia/Kolkata")
 
         # Sort by date to ensure chronological order
         df.sort_index(inplace=True)

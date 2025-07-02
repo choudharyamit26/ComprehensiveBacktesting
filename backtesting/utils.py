@@ -3,7 +3,7 @@ import logging
 import pandas as pd
 
 from .data import get_data_sync, validate_data
-from stratgies.registry import get_strategy
+from strategies.registry import get_strategy
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,14 +63,16 @@ def run_backtest(
     cerebro.broker.setcommission(commission=commission)
 
     # CORRECTED: Add analyzer classes instead of instantiated objects
+    from backtesting.parameter_optimization import SortinoRatio
     analyzer_classes = [
-        (bt.analyzers.SharpeRatio, {"_name": "sharpe"}),
+        (bt.analyzers.SharpeRatio, {"_name": "sharpe", "timeframe": bt.TimeFrame.Minutes, "compression": 5}),
         (bt.analyzers.DrawDown, {"_name": "drawdown"}),
-        (bt.analyzers.Returns, {"_name": "returns"}),
+        (bt.analyzers.Returns, {"_name": "returns", "timeframe": bt.TimeFrame.Minutes, "compression": 5}),
         (bt.analyzers.TradeAnalyzer, {"_name": "trades"}),
-        (bt.analyzers.Calmar, {"_name": "calmar"}),
-        (bt.analyzers.TimeReturn, {"_name": "timereturn"}),
+        (bt.analyzers.Calmar, {"_name": "calmar", "timeframe": bt.TimeFrame.Minutes, "compression": 5}),
+        (bt.analyzers.TimeReturn, {"_name": "timereturn", "timeframe": bt.TimeFrame.Minutes, "compression": 5}),
         (bt.analyzers.SQN, {"_name": "sqn"}),
+        (SortinoRatio, {"_name": "sortino"}),
     ]
 
     for analyzer_class, params in analyzer_classes:

@@ -5,7 +5,7 @@ import pandas as pd
 
 from backtesting.utils import run_backtest
 from .data import get_data_sync, validate_data, preview_data_sync
-from stratgies.registry import get_strategy
+from strategies.registry import get_strategy
 from .parameter_optimization import optimize_strategy
 from .reports import PerformanceAnalyzer, compare_strategies
 from .validation import ValidationAnalyzer
@@ -37,13 +37,10 @@ def run_basic_backtest(ticker, start_date, end_date):
         raise
 
 
-def run_parameter_optimization(ticker, start_date, end_date):
+def run_parameter_optimization(ticker, start_date, end_date, n_trials=50):
     """Run parameter optimization analysis."""
     logger.info(f"Running parameter optimization for {ticker}")
     print(f"\n=== PARAMETER OPTIMIZATION: {ticker} ===")
-    n_trials = int(
-        input("Enter number of optimization trials (default: 50): ").strip() or "50"
-    )
     print(f"Running optimization with {n_trials} trials...")
     try:
         optimization_results = optimize_strategy(
@@ -95,7 +92,9 @@ def run_insample_outsample_analysis(ticker, start_date, end_date):
         return run_basic_comparison_analysis(ticker, start_date, end_date)
 
 
-def run_walkforward_analysis(ticker, start_date, end_date):
+def run_walkforward_analysis(
+    ticker, start_date, end_date, window_days=None, out_days=None, step_days=None, n_trials=20, min_trades=1
+):
     """Run walk-forward analysis."""
     logger.info(f"Running walk-forward analysis for {ticker}")
     print(f"\n=== WALK-FORWARD ANALYSIS: {ticker} ===")
@@ -113,23 +112,10 @@ def run_walkforward_analysis(ticker, start_date, end_date):
         default_out = min(15, max_days // 4)
         default_step = min(15, max_days // 4)
 
-        # Get user inputs with new defaults
-        window_days = int(
-            input(
-                f"Enter optimization window in days (default: {default_window}): "
-            ).strip()
-            or str(default_window)
-        )
-        out_days = int(
-            input(
-                f"Enter out-of-sample window in days (default: {default_out}): "
-            ).strip()
-            or str(default_out)
-        )
-        step_days = int(
-            input(f"Enter step size in days (default: {default_step}): ").strip()
-            or str(default_step)
-        )
+        # Use provided values or defaults
+        window_days = window_days if window_days is not None else default_window
+        out_days = out_days if out_days is not None else default_out
+        step_days = step_days if step_days is not None else default_step
 
         results = validation_analyzer.walk_forward_analysis(
             start_date=start_date,
@@ -137,8 +123,8 @@ def run_walkforward_analysis(ticker, start_date, end_date):
             in_sample_days=window_days,
             out_sample_days=out_days,
             step_days=step_days,
-            n_trials=20,
-            min_trades=1,
+            n_trials=n_trials,
+            min_trades=min_trades,
         )
         summary = results.get("summary_stats", {})
         print(f"\nWalk-Forward Analysis Summary:")
@@ -154,9 +140,8 @@ def run_walkforward_analysis(ticker, start_date, end_date):
         print(f"Out-of-sample win rate: {summary.get('win_rate_out_sample', 0):.1f}%")
         print(f"Return correlation: {summary.get('correlation', 0):.3f}")
         print(f"Average degradation: {summary.get('avg_degradation', 0):.2f}%")
-        plot_choice = input("\nPlot walk-forward results? (y/n): ").lower().strip()
-        if plot_choice == "y":
-            validation_analyzer.plot_walk_forward_results(results)
+
+        validation_analyzer.plot_walk_forward_results(results)
         return results
     except Exception as e:
         logger.error(f"Walk-forward analysis failed: {str(e)}")
@@ -236,7 +221,7 @@ def run_basic_comparison_analysis(ticker, start_date, end_date):
     return results_comparison
 
 
-def run_full_demo(ticker, start_date, end_date):
+def run_complete_backtest(ticker, start_date, end_date):
     """Run a complete demonstration of all analyses."""
     logger.info(f"Running full demo for {ticker}")
     print(f"\n=== FULL DEMO: {ticker} ===")
@@ -320,19 +305,17 @@ def run_full_demo(ticker, start_date, end_date):
         logger.error(f"Report generation failed: {str(e)}")
 
     try:
-        plot_choice = input("\nPlot results? (y/n): ").lower().strip()
-        if plot_choice == "y":
-            print("Plotting basic strategy results...")
-            basic_cerebro.plot(style="candlestick", barup="green", bardown="red")
-            if (
-                "optimization" in results
-                and results["optimization"]
-                and "cerebro" in results["optimization"]
-            ):
-                print("Plotting optimized strategy results...")
-                results["optimization"]["cerebro"].plot(
-                    style="candlestick", barup="green", bardown="red"
-                )
+
+        basic_cerebro.plot(style="candlestick", barup="green", bardown="red")
+        if (
+            "optimization" in results
+            and results["optimization"]
+            and "cerebro" in results["optimization"]
+        ):
+            print("Plotting optimized strategy results...")
+            results["optimization"]["cerebro"].plot(
+                style="candlestick", barup="green", bardown="red"
+            )
     except Exception as e:
         logger.error(f"Plotting failed: {str(e)}")
 
@@ -372,7 +355,7 @@ def main():
         elif choice == "5":
             run_comprehensive_validation(ticker, start_date, end_date)
         elif choice == "6":
-            run_full_demo(ticker, start_date, end_date)
+            run_complete_backtest(ticker, start_date, end_date)
         else:
             print("Invalid choice. Running basic backtest...")
             run_basic_backtest(ticker, start_date, end_date)
@@ -415,9 +398,8 @@ def quick_test():
         )
         analyzer = PerformanceAnalyzer(results)
         analyzer.print_report()
-        plot_choice = input("\nPlot results? (y/n): ").lower().strip()
-        if plot_choice == "y":
-            cerebro.plot(style="candlestick", barup="green", bardown="red")
+
+        cerebro.plot(style="candlestick", barup="green", bardown="red")
     except Exception as e:
         logger.error(f"Quick test failed: {str(e)}")
         try:
@@ -487,8 +469,7 @@ if __name__ == "__main__":
             analyzer = PerformanceAnalyzer(results)
             analyzer.print_report()
             plot_choice = input("\nPlot results? (y/n): ").lower().strip()
-            if plot_choice == "y":
-                cerebro.plot(style="candlestick", barup="green", bardown="red")
+            cerebro.plot(style="candlestick", barup="green", bardown="red")
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         print(f"\nUnexpected error: {str(e)}")

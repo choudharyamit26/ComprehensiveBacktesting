@@ -26,27 +26,26 @@ class SortinoRatio(bt.Analyzer):
     def stop(self):
         returns = pd.Series(self.rets)
         if returns.empty:
-            self.result = 0.0
+            self.result = None
+            self.analysis = {"sortinoratio": None}
             return
 
         # Calculate downside deviation (standard deviation of negative returns)
         negative_returns = returns[returns < 0]
-        downside_deviation = (
-            np.sqrt(np.mean(negative_returns**2)) * np.sqrt(self.params.factor)
-            if not negative_returns.empty
-            else 0.0
-        )
+        if negative_returns.empty:
+            downside_deviation = None
+        else:
+            downside_deviation = np.sqrt(np.mean(negative_returns**2)) * np.sqrt(self.params.factor)
 
         # Calculate annualized return
         total_return = self.strategy.analyzers.returns.get_analysis().get("rtot", 0.0)
         annualized_return = (np.exp(total_return) - 1) * self.params.factor
 
         # Sortino ratio: (annualized return - risk-free rate) / downside deviation
-        self.result = (
-            (annualized_return - self.params.riskfreerate) / downside_deviation
-            if downside_deviation != 0
-            else 0.0
-        )
+        if downside_deviation is None or downside_deviation == 0:
+            self.result = None
+        else:
+            self.result = (annualized_return - self.params.riskfreerate) / downside_deviation
         self.analysis = {"sortinoratio": self.result}
 
     def get_analysis(self):
@@ -224,6 +223,7 @@ def optimize_strategy(
     initial_cash: float = 100000.0,
     commission: float = 0.00,
     interval: str = "5m",
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Optimize strategy parameters using Optuna.
 

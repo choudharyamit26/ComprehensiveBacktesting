@@ -21,7 +21,7 @@ class ValidationAnalyzer:
     """Comprehensive validation analysis for trading strategies, including in-sample, out-of-sample, and walk-forward analysis."""
 
     def __init__(
-        self, strategy_class, ticker="AAPL", initial_cash=100000.0, commission=0.00
+        self, strategy_class, ticker, initial_cash=100000.0, commission=0.05, analyzers=None
     ):
         """Initialize the validation analyzer.
 
@@ -39,6 +39,7 @@ class ValidationAnalyzer:
         self.ticker = ticker
         self.initial_cash = initial_cash
         self.commission = commission
+        self.analyzers = analyzers if analyzers is not None else []
         logger.info(
             f"Initialized ValidationAnalyzer for {ticker} with strategy {strategy_class.__name__}"
         )
@@ -170,6 +171,7 @@ class ValidationAnalyzer:
                     n_trials=n_trials,
                     initial_cash=self.initial_cash,
                     commission=self.commission,
+                    interval=interval
                 )
                 best_params = optimization_results["best_params"]
                 print(f"Best parameters found: {best_params}")
@@ -249,9 +251,7 @@ class ValidationAnalyzer:
                     "in_sample_performance": window.get(
                         "in_sample_performance", {}
                     ).get("summary", {}),
-                    "out_sample_performance": window.get(
-                        "out_sample_performance", {}
-                    ).get("summary", {}),
+                    "out_sample_performance": window.get("out_sample_performance", {}).get("summary", {}),
                     "degradation": window.get("degradation", {}),
                 }
                 report["windows"].append(window_report)
@@ -315,12 +315,8 @@ class ValidationAnalyzer:
                 )  # Convert params to tuple for hashing
                 param_counts[params] = param_counts.get(params, 0) + 1
 
-                out_sample_perf = window.get("out_sample_performance", {}).get(
-                    "summary", {}
-                )
-                trade_analysis = window.get("out_sample_performance", {}).get(
-                    "trade_analysis", {}
-                )
+                out_sample_perf = window.get("out_sample_performance", {}).get("summary", {})
+                trade_analysis = window.get("out_sample_performance", {}).get("trade_analysis", {})
 
                 window_report = {
                     "window_id": window["window_id"],
@@ -547,7 +543,8 @@ class ValidationAnalyzer:
             out_sample_days (int): Length of out-of-sample period in days.
             step_days (int): Step size between windows in days.
             n_trials (int): Number of optimization trials per window.
-            min_trades (int): Minimum trades-dot trades required for valid results.
+            min_trades (int): Minimum trades required for valid results.
+            interval (str): Data interval (e.g., '5m' for 5-minute data).
 
         Returns:
             Dict: Walk-forward analysis results.
@@ -606,6 +603,7 @@ class ValidationAnalyzer:
                         n_trials=n_trials,
                         initial_cash=self.initial_cash,
                         commission=self.commission,
+                        interval=interval
                     )
                     best_params = optimization_results["best_params"]
                     print(f"Best parameters: {best_params}")
@@ -624,10 +622,10 @@ class ValidationAnalyzer:
 
                 # Check data sufficiency for in-sample and out-of-sample
                 in_sample_data = get_data_sync(
-                    self.ticker, window["in_sample_start"], window["in_sample_end"]
+                    self.ticker, window["in_sample_start"], window["in_sample_end"], interval=interval
                 )
                 out_sample_data = get_data_sync(
-                    self.ticker, window["out_sample_start"], window["out_sample_end"]
+                    self.ticker, window["out_sample_start"], window["out_sample_end"], interval=interval
                 )
                 min_data_points = (
                     self.strategy_class.get_min_data_points(best_params)
@@ -673,63 +671,96 @@ class ValidationAnalyzer:
                 logger.debug(
                     f"out_sample_results type: {type(out_sample_results)}, instance: {isinstance(out_sample_results, bt.Strategy)}"
                 )
-
-                in_sample_analyzer = PerformanceAnalyzer(in_sample_results)
-                out_sample_analyzer = PerformanceAnalyzer(out_sample_results)
-                in_sample_perf = in_sample_analyzer.generate_full_report()
-                out_sample_perf = out_sample_analyzer.generate_full_report()
-
-                in_trade_analysis = in_sample_perf.get("trade_analysis", {})
-                out_trade_analysis = out_sample_perf.get("trade_analysis", {})
-                in_sample_trades = (
-                    in_trade_analysis.get("total_trades", 0)
-                    if isinstance(in_trade_analysis, dict)
-                    else 0
+                logger.debug(
+                    f"in_sample_results analyzers: {[name for name in in_sample_results.analyzers.getnames()]}"
                 )
-                out_sample_trades = (
-                    out_trade_analysis.get("total_trades", 0)
-                    if isinstance(out_trade_analysis, dict)
-                    else 0
+                logger.debug(
+                    f"out_sample_results analyzers: {[name for name in out_sample_results.analyzers.getnames()]}"
                 )
 
-                window_result = {
-                    "window_id": i + 1,
-                    "periods": window,
-                    "best_params": best_params,
-                    "in_sample_performance": in_sample_perf,
-                    "out_sample_performance": out_sample_perf,
-                    "valid": in_sample_trades >= min_trades
-                    and out_sample_trades >= min_trades,
-                    "degradation": self._calculate_degradation(
-                        in_sample_perf, out_sample_perf
-                    ),
-                }
+                try:
+                    in_sample_analyzer = PerformanceAnalyzer(in_sample_results)
+                    out_sample_analyzer = PerformanceAnalyzer(out_sample_results)
+                    in_sample_perf = in_sample_analyzer.generate_full_report()
+                    out_sample_perf = out_sample_analyzer.generate_full_report()
 
-                if window_result["valid"]:
-                    valid_windows += 1
-                    in_sample_return = in_sample_perf["summary"].get(
-                        "total_return_pct", 0
+                    # Check for errors in performance reports
+                    if "error" in in_sample_perf or "error" in out_sample_perf:
+                        error_msg = (
+                            in_sample_perf.get("error", "Unknown error in in-sample") 
+                            if "error" in in_sample_perf 
+                            else out_sample_perf.get("error", "Unknown error in out-sample")
+                        )
+                        logger.warning(f"Performance analysis failed for window {i+1}: {error_msg}")
+                        window_result = {
+                            "window_id": i + 1,
+                            "periods": window,
+                            "error": error_msg,
+                            "valid": False,
+                        }
+                        results["windows"].append(window_result)
+                        continue
+
+                    in_trade_analysis = in_sample_perf.get("trade_analysis", {})
+                    out_trade_analysis = out_sample_perf.get("trade_analysis", {})
+                    in_sample_trades = (
+                        in_trade_analysis.get("total_trades", 0)
+                        if isinstance(in_trade_analysis, dict)
+                        else 0
                     )
-                    out_sample_return = out_sample_perf["summary"].get(
-                        "total_return_pct", 0
-                    )
-                    all_in_sample_returns.append(in_sample_return)
-                    all_out_sample_returns.append(out_sample_return)
-                    print(f"  In-sample return: {in_sample_return:.2f}%")
-                    print(f"  Out-sample return: {out_sample_return:.2f}%")
-                    print(
-                        f"  Trades: {in_sample_trades} (in) / {out_sample_trades} (out)"
-                    )
-                else:
-                    print(
-                        f"  Skipped: Insufficient trades ({in_sample_trades}/{out_sample_trades})"
+                    out_sample_trades = (
+                        out_trade_analysis.get("total_trades", 0)
+                        if isinstance(out_trade_analysis, dict)
+                        else 0
                     )
 
-                results["windows"].append(window_result)
+                    # Store both the summary report and the actual strategy instance for out-of-sample
+                    window_result = {
+                        "window_id": i + 1,
+                        "periods": window,
+                        "best_params": best_params,
+                        "in_sample_performance": in_sample_perf,
+                        "out_sample_performance": out_sample_perf,
+                        "out_sample_strategy": out_sample_results,
+                        "valid": in_sample_trades >= min_trades and out_sample_trades >= min_trades,
+                        "degradation": self._calculate_degradation(in_sample_perf, out_sample_perf),
+                    }
+
+                    if window_result["valid"]:
+                        valid_windows += 1
+                        in_sample_return = in_sample_perf["summary"].get(
+                            "total_return_pct", 0
+                        )
+                        out_sample_return = out_sample_perf["summary"].get(
+                            "total_return_pct", 0
+                        )
+                        all_in_sample_returns.append(in_sample_return)
+                        all_out_sample_returns.append(out_sample_return)
+                        print(f"  In-sample return: {in_sample_return:.2f}%")
+                        print(f"  Out-sample return: {out_sample_return:.2f}%")
+                        print(
+                            f"  Trades: {in_sample_trades} (in) / {out_sample_trades} (out)"
+                        )
+                    else:
+                        print(
+                            f"  Skipped: Insufficient trades ({in_sample_trades}/{out_sample_trades})"
+                        )
+
+                    results["windows"].append(window_result)
+
+                except ValueError as e:
+                    logger.warning(f"Performance analysis failed for window {i+1}: {str(e)}")
+                    window_result = {
+                        "window_id": i + 1,
+                        "periods": window,
+                        "error": f"Performance analysis failed: {str(e)}",
+                        "valid": False,
+                    }
+                    results["windows"].append(window_result)
+                    continue
 
             except Exception as e:
                 import traceback
-
                 traceback.print_exc()
                 logger.error(f"Error processing window {i+1}: {str(e)}")
                 window_result = {
@@ -806,28 +837,10 @@ class ValidationAnalyzer:
             self.print_walk_forward_report(report)
 
             print("\nGenerating best parameters report...")
-            best_params_report = self.generate_best_params_report(results)
+            self.generate_best_params_report(results)
 
-            save_report = (
-                input("Save walk-forward and best parameters reports to files? (y/n): ")
-                .lower()
-                .strip()
-            )
-            if save_report == "y":
-                wf_filename = (
-                    input(
-                        "Enter walk-forward report filename (default: ticker_wf_report.json): "
-                    ).strip()
-                    or f"{self.ticker}_wf_report.json"
-                )
-                bp_filename = (
-                    input(
-                        "Enter best parameters report filename (default: ticker_bp_report.json): "
-                    ).strip()
-                    or f"{self.ticker}_bp_report.json"
-                )
-                self.generate_walk_forward_report(results, filename=wf_filename)
-                self.generate_best_params_report(results, filename=bp_filename)
+            self.generate_walk_forward_report(results, filename=f"{self.ticker}_wf_report.json")
+            self.generate_best_params_report(results, filename=f"{self.ticker}_bp_report.json")
         else:
             print(f"\n" + "=" * 40)
             print("WALK-FORWARD SUMMARY")
@@ -948,12 +961,21 @@ class ValidationAnalyzer:
             )
             cerebro.broker.setcash(self.initial_cash)
             cerebro.broker.setcommission(commission=self.commission)
-            cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
-            cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-            cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
-            cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe")
-            cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
-            cerebro.addanalyzer(SortinoRatio, _name="sortino")
+            # Add analyzers from self.analyzers if provided, else use defaults
+            if self.analyzers:
+                for analyzer, kwargs in self.analyzers:
+                    cerebro.addanalyzer(analyzer, **kwargs)
+            else:
+                cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+                cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
+                cerebro.addanalyzer(bt.analyzers.Returns, _name="returns", timeframe=bt.TimeFrame.Minutes, compression=5)
+                cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe", timeframe=bt.TimeFrame.Minutes, compression=5)
+                cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn", timeframe=bt.TimeFrame.Minutes, compression=5)
+                cerebro.addanalyzer(SortinoRatio, _name="sortino")
+                try:
+                    cerebro.addanalyzer(bt.analyzers.Calmar, _name="calmar", timeframe=bt.TimeFrame.Minutes, compression=5)
+                except Exception:
+                    pass
 
             print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
             results = cerebro.run()
@@ -991,6 +1013,24 @@ class ValidationAnalyzer:
             out_return = out_sample_perf["summary"].get("total_return_pct", 0)
             in_sharpe = in_sample_perf["summary"].get("sharpe_ratio", 0)
             out_sharpe = out_sample_perf["summary"].get("sharpe_ratio", 0)
+
+            # Ensure values are floats for calculation
+            try:
+                in_return = float(in_return)
+            except Exception:
+                in_return = 0.0
+            try:
+                out_return = float(out_return)
+            except Exception:
+                out_return = 0.0
+            try:
+                in_sharpe = float(in_sharpe)
+            except Exception:
+                in_sharpe = 0.0
+            try:
+                out_sharpe = float(out_sharpe)
+            except Exception:
+                out_sharpe = 0.0
 
             return {
                 "return_degradation": in_return - out_return,
