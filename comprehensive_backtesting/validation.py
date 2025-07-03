@@ -3,9 +3,11 @@ import backtrader as bt
 import pandas as pd
 import numpy as np
 from datetime import timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 import warnings
 import logging
+import matplotlib.pyplot as plt
+from io import BytesIO
 
 from .data import get_data_sync
 from .reports import PerformanceAnalyzer
@@ -21,31 +23,34 @@ class ValidationAnalyzer:
 
     def __init__(
         self,
-        strategy_class,
-        ticker,
-        initial_cash=100000.0,
-        commission=0.05,
-        analyzers=None,
+        strategy_name: str,  # Changed from strategy_class to strategy_name
+        ticker: str,
+        initial_cash: float = 100000.0,
+        commission: float = 0.05,
+        analyzers: Optional[List] = None,
     ):
         """Initialize the validation analyzer.
 
         Args:
-            strategy_class: Backtrader strategy class.
+            strategy_name (str): Name of the registered strategy
             ticker (str): Stock ticker symbol.
             initial_cash (float): Initial portfolio cash.
             commission (float): Broker commission rate.
         """
-        if not isinstance(strategy_class, type):
-            raise TypeError(
-                f"strategy_class must be a class, got {type(strategy_class)}"
-            )
-        self.strategy_class = strategy_class
+        from .registry import get_strategy  # Import here to avoid circular dependencies
+
+        # Get strategy class from registry
+        self.strategy_class = get_strategy(strategy_name)
+        if not self.strategy_class:
+            raise ValueError(f"Strategy '{strategy_name}' not found in registry")
+
+        self.strategy_name = strategy_name
         self.ticker = ticker
         self.initial_cash = initial_cash
         self.commission = commission
         self.analyzers = analyzers if analyzers is not None else []
         logger.info(
-            f"Initialized ValidationAnalyzer for {ticker} with strategy {strategy_class.__name__}"
+            f"Initialized ValidationAnalyzer for {ticker} with strategy {strategy_name}"
         )
 
     def _safe_float(self, value, default=0.0):
@@ -174,7 +179,7 @@ class ValidationAnalyzer:
                 )
                 print(f"Strategy class type: {type(self.strategy_class)}")
                 optimization_results = optimize_strategy(
-                    strategy_class=self.strategy_class,
+                    strategy_class=self.strategy_name,
                     ticker=self.ticker,
                     start_date=start_date,
                     end_date=split_date_str,
@@ -539,6 +544,95 @@ class ValidationAnalyzer:
 
         print("=" * 60)
 
+    def plot_walk_forward_results(self, wf_results: Dict):
+        """Generate walk-forward analysis plots suitable for Streamlit."""
+        if not wf_results["windows"]:
+            print("No walk-forward results to plot")
+            return None
+
+        # Extract data for plotting
+        valid_windows = [w for w in wf_results["windows"] if w.get("valid", False)]
+
+        if not valid_windows:
+            print("No valid windows to plot")
+            return None
+
+        window_ids = [w["window_id"] for w in valid_windows]
+        in_sample_returns = [
+            w["in_sample_performance"]["summary"].get("total_return_pct", 0)
+            for w in valid_windows
+        ]
+        out_sample_returns = [
+            w["out_sample_performance"]["summary"].get("total_return_pct", 0)
+            for w in valid_windows
+        ]
+        degradations = [
+            w["degradation"].get("return_degradation", 0) for w in valid_windows
+        ]
+
+        # Create figure with 2x2 grid
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle("Walk-Forward Analysis Results", fontsize=16, fontweight="bold")
+
+        # Plot 1: In-sample vs Out-of-sample returns
+        axes[0, 0].plot(
+            window_ids, in_sample_returns, "b-o", label="In-Sample", linewidth=2
+        )
+        axes[0, 0].plot(
+            window_ids, out_sample_returns, "r-s", label="Out-of-Sample", linewidth=2
+        )
+        axes[0, 0].axhline(y=0, color="k", linestyle="--", alpha=0.5)
+        axes[0, 0].set_xlabel("Window ID")
+        axes[0, 0].set_ylabel("Return (%)")
+        axes[0, 0].set_title("In-Sample vs Out-of-Sample Returns")
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+
+        # Plot 2: Performance degradation
+        axes[0, 1].bar(window_ids, degradations, color="orange", alpha=0.7)
+        axes[0, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
+        axes[0, 1].set_xlabel("Window ID")
+        axes[0, 1].set_ylabel("Degradation (%)")
+        axes[0, 1].set_title("Performance Degradation per Window")
+        axes[0, 1].grid(True, alpha=0.3)
+
+        # Plot 3: Scatter plot of in-sample vs out-of-sample
+        axes[1, 0].scatter(in_sample_returns, out_sample_returns, alpha=0.7, s=60)
+        min_val = min(min(in_sample_returns), min(out_sample_returns)) - 5
+        max_val = max(max(in_sample_returns), max(out_sample_returns)) + 5
+        axes[1, 0].plot(
+            [min_val, max_val],
+            [min_val, max_val],
+            "k--",
+            alpha=0.5,
+            label="Perfect Correlation",
+        )
+        axes[1, 0].set_xlabel("In-Sample Return (%)")
+        axes[1, 0].set_ylabel("Out-of-Sample Return (%)")
+        axes[1, 0].set_title("In-Sample vs Out-of-Sample Correlation")
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+
+        # Plot 4: Cumulative returns
+        cumulative_out_sample = np.cumprod(1 + np.array(out_sample_returns) / 100) - 1
+        axes[1, 1].plot(
+            window_ids, cumulative_out_sample * 100, "g-o", linewidth=2, markersize=4
+        )
+        axes[1, 1].axhline(y=0, color="k", linestyle="--", alpha=0.5)
+        axes[1, 1].set_xlabel("Window ID")
+        axes[1, 1].set_ylabel("Cumulative Return (%)")
+        axes[1, 1].set_title("Cumulative Out-of-Sample Returns")
+        axes[1, 1].grid(True, alpha=0.3)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust for suptitle
+
+        # Save plot to bytes for Streamlit
+        buf = BytesIO()
+        plt.savefig(buf, format="png", dpi=150)
+        plt.close(fig)
+        buf.seek(0)
+        return buf
+
     def walk_forward_analysis(
         self,
         start_date: str,
@@ -549,28 +643,14 @@ class ValidationAnalyzer:
         n_trials: int = 20,
         min_trades: int = 1,
         interval: str = "5m",
-        strategy_class=None,
     ) -> Dict:
-        """Perform walk-forward analysis with day-based windows.
-
-        Args:
-            start_date (str): Start date in 'YYYY-MM-DD' format.
-            end_date (str): End date in 'YYYY-MM-DD' format.
-            in_sample_days (int): Length of in-sample period in days.
-            out_sample_days (int): Length of out-of-sample period in days.
-            step_days (int): Step size between windows in days.
-            n_trials (int): Number of optimization trials per window.
-            min_trades (int): Minimum trades required for valid results.
-            interval (str): Data interval (e.g., '5m' for 5-minute data).
-
-        Returns:
-            Dict: Walk-forward analysis results.
-        """
+        """Perform walk-forward analysis with day-based windows."""
         logger.info(f"Starting walk-forward analysis for {self.ticker}")
         print("=" * 60)
         print("WALK-FORWARD ANALYSIS")
         print("=" * 60)
         print(f"Parameters:")
+        print(f"  Strategy: {self.strategy_name}")
         print(f"  In-sample period: {in_sample_days} days")
         print(f"  Out-of-sample period: {out_sample_days} days")
         print(f"  Step size: {step_days} days")
@@ -584,6 +664,7 @@ class ValidationAnalyzer:
 
         results = {
             "parameters": {
+                "strategy": self.strategy_name,
                 "in_sample_days": in_sample_days,
                 "out_sample_days": out_sample_days,
                 "step_days": step_days,
@@ -609,11 +690,11 @@ class ValidationAnalyzer:
             )
 
             try:
-                print(f"Strategy class type: {type(self.strategy_class)}")
                 print("  Optimizing parameters...")
                 try:
+                    # Use strategy name instead of class
                     optimization_results = optimize_strategy(
-                        strategy_class=self.strategy_class,
+                        strategy_class=self.strategy_name,
                         ticker=self.ticker,
                         start_date=window["in_sample_start"],
                         end_date=window["in_sample_end"],
@@ -694,12 +775,17 @@ class ValidationAnalyzer:
                 logger.debug(
                     f"out_sample_results type: {type(out_sample_results)}, instance: {isinstance(out_sample_results, bt.Strategy)}"
                 )
-                logger.debug(
-                    f"in_sample_results analyzers: {[name for name in in_sample_results.analyzers.getnames()]}"
-                )
-                logger.debug(
-                    f"out_sample_results analyzers: {[name for name in out_sample_results.analyzers.getnames()]}"
-                )
+
+                # Extract analyzer names if available
+                try:
+                    logger.debug(
+                        f"in_sample_results analyzers: {[name for name in in_sample_results.analyzers.getnames()]}"
+                    )
+                    logger.debug(
+                        f"out_sample_results analyzers: {[name for name in out_sample_results.analyzers.getnames()]}"
+                    )
+                except Exception:
+                    pass
 
                 try:
                     in_sample_analyzer = PerformanceAnalyzer(in_sample_results)
@@ -872,6 +958,11 @@ class ValidationAnalyzer:
             print("\nGenerating best parameters report...")
             self.generate_best_params_report(results)
 
+            # Generate plot
+            plot_data = self.plot_walk_forward_results(results)
+            if plot_data:
+                results["plot"] = plot_data
+
             self.generate_walk_forward_report(
                 results, filename=f"{self.ticker}_wf_report.json"
             )
@@ -892,6 +983,53 @@ class ValidationAnalyzer:
             print("- Reduce the minimum trade requirement")
             print("- Check your strategy parameters")
 
+        # NEW: Prepare results for Streamlit UI
+        # Simplify the structure for easier rendering in Streamlit
+        for window in results["windows"]:
+            if "out_sample_performance" in window:
+                # Flatten summary metrics
+                window["summary"] = window["out_sample_performance"].get("summary", {})
+                window["trade_analysis"] = window["out_sample_performance"].get(
+                    "trade_analysis", {}
+                )
+                window["risk_metrics"] = window["out_sample_performance"].get(
+                    "risk_metrics", {}
+                )
+
+                # Remove full performance report to reduce size
+                window.pop("in_sample_performance", None)
+                window.pop("out_sample_performance", None)
+
+                # Convert dates to strings for JSON serialization
+                for date_key in [
+                    "in_sample_start",
+                    "in_sample_end",
+                    "out_sample_start",
+                    "out_sample_end",
+                ]:
+                    if date_key in window.get("periods", {}):
+                        window["periods"][date_key] = str(window["periods"][date_key])
+
+        # Add cumulative equity curve data
+        cumulative_equity = 100
+        equity_curve = []
+        dates = []
+
+        for window in results["windows"]:
+            if window.get("valid", False) and "timereturn" in window.get(
+                "out_sample_performance", {}
+            ):
+                equity_data = window["out_sample_performance"]["timereturn"]
+                sorted_dates = sorted(equity_data.keys())
+                for date in sorted_dates:
+                    return_pct = equity_data[date]
+                    cumulative_equity *= 1 + return_pct / 100
+                    dates.append(date)
+                    equity_curve.append(cumulative_equity)
+
+        if equity_curve:
+            results["cumulative_equity"] = {"dates": dates, "values": equity_curve}
+
         return results
 
     def _generate_day_based_windows(
@@ -902,7 +1040,7 @@ class ValidationAnalyzer:
         out_sample_days: int,
         step_days: int,
     ) -> List[Dict]:
-        """Generate day-based windows for walk-forward analysis with intraday constraints."""
+        """Generate day-based windows for walk-forward analysis."""
         start_dt = pd.to_datetime(start_date)
         end_dt = pd.to_datetime(end_date)
         windows = []
@@ -913,12 +1051,6 @@ class ValidationAnalyzer:
             # Calculate window boundaries
             in_sample_end = current_start + timedelta(days=in_sample_days)
             out_sample_end = in_sample_end + timedelta(days=out_sample_days)
-
-            # Skip if window exceeds 60-day intraday limit
-            total_window_days = (out_sample_end - current_start).days
-            if total_window_days > 60:
-                current_start += timedelta(days=step_days)
-                continue
 
             # Ensure windows don't exceed data range
             if out_sample_end > end_dt:

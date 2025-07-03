@@ -1,6 +1,8 @@
 from typing import Any, Dict
 import backtrader as bt
 import optuna
+
+from comprehensive_backtesting.registry import get_strategy
 from .data import get_data_sync
 import logging
 import numpy as np
@@ -95,7 +97,7 @@ class OptimizationObjective:
                 f"No data available for {ticker} from {start_date} to {end_date}"
             )
         logger.info(
-            f"Initialized optimization for {ticker} from {start_date} to {end_date} with strategy {strategy_class.__name__}"
+            f"Initialized optimization for {ticker} from {start_date} to {end_date} with strategy {strategy_class}"
         )
 
     def __call__(self, trial):
@@ -214,6 +216,9 @@ class OptimizationObjective:
                 return -999
 
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             logger.error(f"Trial {trial.number} failed completely: {str(e)}")
             return -999
 
@@ -243,11 +248,9 @@ def optimize_strategy(
     Returns:
         Dict: Optimization results including best parameters and value.
     """
-    logger.info(
-        f"Starting parameter optimization for {ticker} with {strategy_class.__name__}"
-    )
+    logger.info(f"Starting parameter optimization for {ticker} with {strategy_class}")
     print(
-        f"Optimizing strategy {strategy_class.__name__} for {ticker} from {start_date} to {end_date}"
+        f"Optimizing strategy {strategy_class} for {ticker} from {start_date} to {end_date}"
     )
     print(f"Number of trials: {n_trials}")
     print(f"Strategy class type: {type(strategy_class)}")
@@ -255,7 +258,7 @@ def optimize_strategy(
     try:
         study = optuna.create_study(direction="maximize")
         objective = OptimizationObjective(
-            strategy_class=strategy_class,
+            strategy_class=get_strategy(strategy_class),
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,

@@ -15,7 +15,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def run_basic_backtest(strategy_class, ticker, start_date, end_date):
+def run_basic_backtest(
+    strategy_class, ticker, start_date, end_date, interval="5m", analyzers=None
+):
     """Run a basic backtest with default parameters."""
     logger.info(f"Running basic backtest for {ticker}")
     print(f"\n=== BASIC BACKTEST: {ticker} ===")
@@ -25,6 +27,8 @@ def run_basic_backtest(strategy_class, ticker, start_date, end_date):
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
+            interval=interval,
+            analyzer=analyzers,
         )
         analyzer = PerformanceAnalyzer(results)
         analyzer.print_report()
@@ -38,7 +42,13 @@ def run_basic_backtest(strategy_class, ticker, start_date, end_date):
 
 
 def run_parameter_optimization(
-    strategy_class, ticker, start_date, end_date, n_trials=50
+    strategy_class,
+    ticker,
+    start_date,
+    end_date,
+    interval="5m",
+    n_trials=10,
+    analyzers=None,
 ):
     """Run parameter optimization analysis."""
     logger.info(f"Running parameter optimization for {ticker}")
@@ -46,11 +56,13 @@ def run_parameter_optimization(
     print(f"Running optimization with {n_trials} trials...")
     try:
         optimization_results = optimize_strategy(
-            strategy_class=get_strategy(strategy_class),
+            strategy_class=strategy_class,
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
             n_trials=n_trials,
+            interval=interval,
+            analyzers=analyzers,
         )
         print("\nOptimized Strategy Performance:")
         analyzer_optimized = PerformanceAnalyzer(optimization_results["results"])
@@ -61,13 +73,13 @@ def run_parameter_optimization(
         raise
 
 
-def run_insample_outsample_analysis(ticker, start_date, end_date):
+def run_insample_outsample_analysis(strategy_name, ticker, start_date, end_date):
     """Run in-sample/out-of-sample validation analysis."""
     logger.info(f"Running in-sample/out-of-sample analysis for {ticker}")
     print(f"\n=== IN-SAMPLE / OUT-OF-SAMPLE ANALYSIS: {ticker} ===")
     try:
         validation_analyzer = ValidationAnalyzer(
-            strategy_class=get_strategy("EMARSI"), ticker=ticker
+            strategy_name=strategy_name, ticker=ticker
         )
         results = validation_analyzer.in_sample_out_sample_analysis(
             start_date=start_date, end_date=end_date
@@ -94,7 +106,9 @@ def run_insample_outsample_analysis(ticker, start_date, end_date):
 
         traceback.print_exc()
         logger.error(f"In-sample/out-of-sample analysis failed: {str(e)}")
-        return run_basic_comparison_analysis(ticker, start_date, end_date)
+        return run_basic_comparison_analysis(
+            strategy_name, ticker, start_date, end_date
+        )
 
 
 def run_walkforward_analysis(
@@ -106,7 +120,7 @@ def run_walkforward_analysis(
     step_days=None,
     n_trials=20,
     min_trades=1,
-    strategy_class="EMARSI",
+    strategy_name="EMARSI",
     interval="5m",  # Default to 5-minute interval for Indian equities
 ):
     """Run walk-forward analysis."""
@@ -114,7 +128,7 @@ def run_walkforward_analysis(
     print(f"\n=== WALK-FORWARD ANALYSIS: {ticker} ===")
     try:
         validation_analyzer = ValidationAnalyzer(
-            strategy_class=get_strategy("EMARSI"), ticker=ticker
+            strategy_name=strategy_name, ticker=ticker
         )
 
         # Calculate maximum available days (60 days for intraday)
@@ -139,7 +153,6 @@ def run_walkforward_analysis(
             step_days=step_days,
             n_trials=n_trials,
             min_trades=min_trades,
-            strategy_class=strategy_class,
             interval=interval,
         )
         summary = results.get("summary_stats", {})
@@ -162,17 +175,17 @@ def run_walkforward_analysis(
     except Exception as e:
         logger.error(f"Walk-forward analysis failed: {str(e)}")
         return run_parameter_optimization(
-            strategy_class, ticker, start_date, end_date, n_trials=50
+            strategy_name, ticker, start_date, end_date, n_trials=10
         )
 
 
-def run_comprehensive_validation(ticker, start_date, end_date):
+def run_comprehensive_validation(strategy_class, ticker, start_date, end_date):
     """Run comprehensive validation analysis."""
     logger.info(f"Running comprehensive validation for {ticker}")
     print(f"\n=== COMPREHENSIVE VALIDATION ANALYSIS: {ticker} ===")
     try:
         results = ValidationAnalyzer.run_validation_analysis(
-            strategy_class=get_strategy("EMARSI"),
+            strategy_name=strategy_class,
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
@@ -181,10 +194,10 @@ def run_comprehensive_validation(ticker, start_date, end_date):
         return results
     except Exception as e:
         logger.error(f"Comprehensive validation failed: {str(e)}")
-        return run_basic_backtest(ticker, start_date, end_date)
+        return run_basic_backtest(strategy_class, ticker, start_date, end_date)
 
 
-def run_basic_comparison_analysis(ticker, start_date, end_date):
+def run_basic_comparison_analysis(strategy_name, ticker, start_date, end_date):
     """Run basic strategy comparison."""
     logger.info(f"Running strategy comparison for {ticker}")
     print(f"\n=== STRATEGY COMPARISON ANALYSIS: {ticker} ===")
@@ -217,7 +230,7 @@ def run_basic_comparison_analysis(ticker, start_date, end_date):
         print(f"\nRunning {name} strategy...")
         try:
             results, _ = run_backtest(
-                strategy_class=get_strategy("EMARSI"),  # Use get_strategy
+                strategy_class=strategy_name,  # Use get_strategy
                 ticker=ticker,
                 start_date=start_date,
                 end_date=end_date,
@@ -243,23 +256,28 @@ def run_complete_backtest(
     ticker, start_date, end_date, strategy_class, analyzers, interval
 ):
     """Run a complete demonstration of all analyses."""
-    logger.info(f"Running full demo for {ticker}")
-    print(f"\n=== FULL DEMO: {ticker} ===")
+    logger.info(f"Running complete backtest for {ticker}")
+    print(f"\n=== COMPLETE BACKTEST: {ticker} ===")
     results = {}
 
     print("\n" + "=" * 60)
     try:
-        basic_results, basic_cerebro = run_basic_backtest(ticker, start_date, end_date)
+        basic_results, basic_cerebro = run_basic_backtest(
+            strategy_class, ticker, start_date, end_date
+        )
         results["basic"] = basic_results
         results["basic_cerebro"] = basic_cerebro
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         logger.error(f"Basic backtest failed: {str(e)}")
         return results
 
     print("\n" + "=" * 60)
     try:
         opt_results = run_parameter_optimization(
-            strategy_class, ticker, start_date, end_date, n_trials=50
+            strategy_class, ticker, start_date, end_date, n_trials=10
         )
         results["optimization"] = opt_results
     except Exception as e:
@@ -268,7 +286,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         validation_results = run_insample_outsample_analysis(
-            ticker, start_date, end_date
+            strategy_class, ticker, start_date, end_date
         )
         results["validation"] = validation_results
     except Exception as e:
@@ -276,7 +294,9 @@ def run_complete_backtest(
 
     print("\n" + "=" * 60)
     try:
-        comparison_results = run_basic_comparison_analysis(ticker, start_date, end_date)
+        comparison_results = run_basic_comparison_analysis(
+            strategy_class, ticker, start_date, end_date
+        )
         results["comparison"] = comparison_results
     except Exception as e:
         logger.error(f"Strategy comparison failed: {str(e)}")
@@ -284,7 +304,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         validation_analyzer = ValidationAnalyzer(
-            strategy_class=get_strategy(strategy_class), ticker=ticker
+            strategy_name=strategy_class, ticker=ticker
         )
 
         # Calculate maximum available days
@@ -304,7 +324,6 @@ def run_complete_backtest(
             step_days=step,
             n_trials=20,
             min_trades=1,
-            strategy_class=get_strategy(strategy_class),
         )
         results["walk_forward"] = wf_results
     except Exception as e:
@@ -356,7 +375,7 @@ def run_complete_backtest(
 #     end_date = datetime.date.today() - datetime.timedelta(days=2)
 #     start_date = end_date - datetime.timedelta(days=58)
 #     run_basic_backtest(ticker, start_date, end_date)
-#     run_parameter_optimization(strategy_class="EMARSI", ticker=ticker, start_date=start_date, end_date=end_date, n_trials=50)
+#     run_parameter_optimization(strategy_class="EMARSI", ticker=ticker, start_date=start_date, end_date=end_date, n_trials=10)
 #     run_insample_outsample_analysis(ticker, start_date, end_date)
 #     run_walkforward_analysis(ticker, start_date, end_date)
 #     run_comprehensive_validation(ticker, start_date, end_date)

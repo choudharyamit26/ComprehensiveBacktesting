@@ -155,7 +155,7 @@ def display_best_parameters(study_results):
 def plot_contour(study):
     """Generate a contour plot for Optuna optimization results."""
     try:
-        if not study.trials:
+        if not study or not study.trials:
             logger.warning("No trials available for contour plot")
             return None
 
@@ -375,36 +375,30 @@ def analyze_best_trades(results):
 def detect_strategy_indicators(strategy):
     """Dynamically detect indicators used by a strategy."""
     indicators = {}
-    print("============ Detecting indicators =============", strategy)
     try:
-        # Get all attributes of the strategy that are indicators
         for attr_name in dir(strategy):
-            if not attr_name.startswith("_"):  # Skip private attributes
-                attr = getattr(strategy, attr_name)
+            if attr_name.startswith("_"):
+                continue
 
-                # Check if it's a Backtrader indicator
-                if hasattr(attr, "__class__") and hasattr(attr.__class__, "__module__"):
-                    module_name = attr.__class__.__module__
-                    class_name = attr.__class__.__name__
+            attr = getattr(strategy, attr_name)
 
-                    # Check if it's a backtrader indicator
-                    if (
-                        "backtrader" in module_name
-                        and "indicator" in module_name.lower()
-                    ):
-                        indicators[attr_name] = {
-                            "indicator": attr,
-                            "type": class_name,
-                            "name": attr_name,
-                        }
+            # Improved indicator detection
+            if isinstance(attr, bt.Indicator):
+                indicators[attr_name] = {
+                    "indicator": attr,
+                    "type": attr.__class__.__name__,
+                    "name": attr_name,
+                }
 
-                        # Try to get parameters
-                        if hasattr(attr, "params"):
-                            indicators[attr_name]["params"] = {
-                                param: getattr(attr.params, param)
-                                for param in dir(attr.params)
-                                if not param.startswith("_")
-                            }
+                # Extract parameters
+                if hasattr(attr, "params"):
+                    params = {}
+                    for pname in attr.params._getkeys():
+                        try:
+                            params[pname] = getattr(attr.params, pname)
+                        except AttributeError:
+                            continue
+                    indicators[attr_name]["params"] = params
 
         logger.info(f"Detected indicators: {list(indicators.keys())}")
         return indicators
@@ -649,7 +643,6 @@ def create_candlestick_chart_with_trades(
         )
         # Explicitly set x-axis type to date
         fig.update_xaxes(type="date")
-
         # Add price-based indicators to the price chart
         for indicator_name, indicator_data in calculated_indicators.items():
             if indicator_data["subplot"] == "price":
@@ -952,29 +945,173 @@ def create_candlestick_chart_with_trades(
         return None
 
 
+def extract_indicator_values_from_strategy(
+    strategy_result: bt.Strategy, target_datetime: datetime
+):
+    """Extract indicator values from strategy at a specific datetime."""
+    indicator_values = {}
+
+    try:
+        # Convert target datetime to backtrader's internal format
+        target_dt_num = bt.date2num(target_datetime)
+
+        # Get the data feed from the strategy
+        data_feed = strategy_result.data0 if hasattr(strategy_result, "data0") else None
+        if data_feed is None:
+            return indicator_values
+
+        # Find the closest bar index to the target datetime
+        closest_bar_idx = None
+        min_diff = float("inf")
+
+        # Search through all bars to find the closest match
+        for i in range(len(data_feed)):
+            try:
+                bar_dt_num = data_feed.datetime[i]
+                diff = abs(bar_dt_num - target_dt_num)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_bar_idx = i
+            except IndexError:
+                continue
+
+        if closest_bar_idx is None:
+            return indicator_values
+
+        logger.debug(
+            f"Target datetime: {target_datetime}, closest bar index: {closest_bar_idx}"
+        )
+
+        # Extract indicator values at the closest bar
+        for attr_name in dir(strategy_result):
+            if attr_name.startswith("_") or attr_name in [
+                "data",
+                "data0",
+                "data1",
+                "broker",
+            ]:
+                continue
+
+            try:
+                attr = getattr(strategy_result, attr_name)
+
+                # Check if it's an indicator by looking for lines attribute
+                if (
+                    hasattr(attr, "lines")
+                    and hasattr(attr, "_clock")
+                    and hasattr(attr, "_owner")
+                    and callable(getattr(attr, "__call__", None))
+                ):
+
+                    indicator_name = attr_name
+
+                    # Get the indicator value at the closest bar
+                    try:
+                        # BackTrader indicators use negative indexing from current position
+                        # 0 is current bar, -1 is previous bar, etc.
+                        # We need to calculate how many bars back from the current position
+
+                        # Get the total length of the indicator
+                        indicator_length = len(attr)
+
+                        # Calculate the offset from the current position
+                        # If closest_bar_idx is 0, we want the most recent value (index 0)
+                        # If closest_bar_idx is 1, we want the previous value (index -1)
+                        bars_back = indicator_length - 1 - closest_bar_idx
+
+                        # Access the indicator value
+                        if bars_back >= 0 and bars_back < indicator_length:
+                            if bars_back == 0:
+                                value = attr[0]  # Current value
+                            else:
+                                value = attr[-bars_back]  # Historical value
+
+                            if value is not None and not (
+                                isinstance(value, float) and np.isnan(value)
+                            ):
+                                indicator_values[indicator_name] = float(value)
+                                logger.debug(
+                                    f"Extracted {indicator_name}: {value} at bars_back={bars_back}"
+                                )
+
+                    except (IndexError, ValueError, AttributeError) as e:
+                        logger.debug(f"Error accessing indicator {indicator_name}: {e}")
+                        continue
+
+            except Exception as e:
+                logger.debug(f"Error accessing attribute {attr_name}: {e}")
+                continue
+
+    except Exception as e:
+        logger.warning(f"Error extracting indicator values: {e}")
+
+    return indicator_values
+
+
+def get_indicator_value_at_datetime(indicator, target_datetime: datetime, data_feed):
+    """Get indicator value at a specific datetime."""
+    target_dt_num = bt.date2num(target_datetime)
+
+    # Find the bar closest to the target datetime
+    closest_idx = None
+    min_diff = float("inf")
+
+    # Search for the closest bar
+    for i in range(len(data_feed)):
+        bar_dt_num = data_feed.datetime[i]
+        diff = abs(bar_dt_num - target_dt_num)
+        if diff < min_diff:
+            min_diff = diff
+            closest_idx = i
+
+    if closest_idx is not None:
+        # Calculate bars back from current position
+        indicator_length = len(indicator)
+        bars_back = indicator_length - 1 - closest_idx
+
+        # Access the indicator value using BackTrader's indexing
+        if bars_back >= 0 and bars_back < indicator_length:
+            if bars_back == 0:
+                value = indicator[0]  # Current value
+            else:
+                value = indicator[-bars_back]  # Historical value
+
+            if value is not None and not (isinstance(value, float) and np.isnan(value)):
+                return float(value)
+
+
 def extract_trades(
     strategy_result: bt.Strategy, data: pd.DataFrame = None
 ) -> pd.DataFrame:
-    """Extract trades from BackTrader strategy result with regime and indicator values."""
+    """Extract trades from BackTrader strategy result with indicator values."""
     try:
         trades = []
 
-        # Detect indicators used by the strategy
-        detected_indicators = detect_strategy_indicators(strategy_result)
-        calculated_indicators = (
-            calculate_indicator_values(data, detected_indicators)
-            if data is not None
-            else {}
-        )
-        print(f"Detected indicators: {list(detected_indicators.keys())}")
-        print(f"Calculated indicators: {list(calculated_indicators.keys())}")
-        # Ensure data index is a DatetimeIndex and in UTC
+        # Ensure data index is a DatetimeIndex and in UTC if provided
         if data is not None and not isinstance(data.index, pd.DatetimeIndex):
             data.index = pd.to_datetime(data.index)
         if data is not None and data.index.tz is None:
             data_index = data.index.tz_localize("UTC")
         elif data is not None:
             data_index = data.index.tz_convert("UTC")
+        else:
+            data_index = None
+
+        # Get all indicators from the strategy for reference
+        strategy_indicators = {}
+        for attr_name in dir(strategy_result):
+            if not attr_name.startswith("_"):
+                try:
+                    attr = getattr(strategy_result, attr_name)
+                    if hasattr(attr, "__class__") and "backtrader.indicators" in str(
+                        type(attr)
+                    ):
+                        strategy_indicators[attr_name] = attr
+                        logger.debug(
+                            f"Found indicator: {attr_name} - {attr.__class__.__name__}"
+                        )
+                except Exception as e:
+                    continue
 
         # Method 1: Extract from completed orders (most reliable)
         if hasattr(strategy_result, "broker") and hasattr(
@@ -1016,19 +1153,6 @@ def extract_trades(
                         "regime": "unknown",
                     }
 
-                    # Add indicator values for exit time
-                    if data is not None and calculated_indicators:
-                        closest_idx = data_index.get_indexer(
-                            [exec_dt], method="nearest"
-                        )[0]
-                        for ind_name, ind_data in calculated_indicators.items():
-                            ind_value = (
-                                ind_data["values"].iloc[closest_idx]
-                                if closest_idx < len(ind_data["values"])
-                                else None
-                            )
-                            trade_info[f"{ind_data['name']}_exit"] = ind_value
-
                     if exec_size > 0:  # Buy order (Long entry or Short exit)
                         if open_short_positions:  # Closing short position
                             short_entry = open_short_positions.pop(0)
@@ -1048,23 +1172,24 @@ def extract_trades(
                                 }
                             )
 
-                            # Add indicator values for entry time
-                            if data is not None and calculated_indicators:
-                                entry_dt = short_entry["datetime"]
-                                if entry_dt.tzinfo is None:
-                                    entry_dt = entry_dt.replace(tzinfo=pytz.UTC)
-                                else:
-                                    entry_dt = entry_dt.astimezone(pytz.UTC)
-                                closest_idx = data_index.get_indexer(
-                                    [entry_dt], method="nearest"
-                                )[0]
-                                for ind_name, ind_data in calculated_indicators.items():
-                                    ind_value = (
-                                        ind_data["values"].iloc[closest_idx]
-                                        if closest_idx < len(ind_data["values"])
-                                        else None
+                            # ADDED: Extract indicator values for entry and exit times
+                            if trade_info["entry_time"]:
+                                entry_indicators = (
+                                    extract_indicator_values_from_strategy(
+                                        strategy_result, trade_info["entry_time"]
                                     )
-                                    trade_info[f"{ind_data['name']}_entry"] = ind_value
+                                )
+                                for ind_name, ind_value in entry_indicators.items():
+                                    trade_info[f"{ind_name}_entry"] = ind_value
+
+                            if trade_info["exit_time"]:
+                                exit_indicators = (
+                                    extract_indicator_values_from_strategy(
+                                        strategy_result, trade_info["exit_time"]
+                                    )
+                                )
+                                for ind_name, ind_value in exit_indicators.items():
+                                    trade_info[f"{ind_name}_exit"] = ind_value
 
                             trades.append(trade_info)
                         else:  # Opening long position
@@ -1096,23 +1221,24 @@ def extract_trades(
                                 }
                             )
 
-                            # Add indicator values for entry time
-                            if data is not None and calculated_indicators:
-                                entry_dt = long_entry["datetime"]
-                                if entry_dt.tzinfo is None:
-                                    entry_dt = entry_dt.replace(tzinfo=pytz.UTC)
-                                else:
-                                    entry_dt = entry_dt.astimezone(pytz.UTC)
-                                closest_idx = data_index.get_indexer(
-                                    [entry_dt], method="nearest"
-                                )[0]
-                                for ind_name, ind_data in calculated_indicators.items():
-                                    ind_value = (
-                                        ind_data["values"].iloc[closest_idx]
-                                        if closest_idx < len(ind_data["values"])
-                                        else None
+                            # ADDED: Extract indicator values for entry and exit times
+                            if trade_info["entry_time"]:
+                                entry_indicators = (
+                                    extract_indicator_values_from_strategy(
+                                        strategy_result, trade_info["entry_time"]
                                     )
-                                    trade_info[f"{ind_data['name']}_entry"] = ind_value
+                                )
+                                for ind_name, ind_value in entry_indicators.items():
+                                    trade_info[f"{ind_name}_entry"] = ind_value
+
+                            if trade_info["exit_time"]:
+                                exit_indicators = (
+                                    extract_indicator_values_from_strategy(
+                                        strategy_result, trade_info["exit_time"]
+                                    )
+                                )
+                                for ind_name, ind_value in exit_indicators.items():
+                                    trade_info[f"{ind_name}_exit"] = ind_value
 
                             trades.append(trade_info)
                         else:  # Opening short position
@@ -1127,6 +1253,10 @@ def extract_trades(
 
         # Method 2: Fallback - try to access _trades directly from strategy
         if not trades and hasattr(strategy_result, "_trades"):
+            logger.info(
+                f"Found {len(strategy_result._trades)} trades in strategy._trades"
+            )
+
             for trade_obj in strategy_result._trades:
                 if hasattr(trade_obj, "isclosed") and trade_obj.isclosed:
                     try:
@@ -1172,118 +1302,61 @@ def extract_trades(
                             "direction": (
                                 "Long" if getattr(trade_obj, "size", 0) > 0 else "Short"
                             ),
-                            "regime": "unknown",
                         }
 
-                        # Add indicator values for entry and exit
-                        if data is not None and calculated_indicators:
-                            for dt_key, suffix in [
-                                (entry_dt, "_entry"),
-                                (exit_dt, "_exit"),
-                            ]:
-                                if dt_key:
-                                    closest_idx = data_index.get_indexer(
-                                        [dt_key], method="nearest"
-                                    )[0]
-                                    for (
-                                        ind_name,
-                                        ind_data,
-                                    ) in calculated_indicators.items():
-                                        ind_value = (
-                                            ind_data["values"].iloc[closest_idx]
-                                            if closest_idx < len(ind_data["values"])
-                                            else None
-                                        )
-                                        trade_info[f"{ind_data['name']}{suffix}"] = (
-                                            ind_value
-                                        )
+                        # ADDED: Extract indicator values for entry and exit
+                        if entry_dt:
+                            entry_indicators = extract_indicator_values_from_strategy(
+                                strategy_result, entry_dt
+                            )
+                            for ind_name, ind_value in entry_indicators.items():
+                                trade_info[f"{ind_name}_entry"] = ind_value
+
+                        if exit_dt:
+                            exit_indicators = extract_indicator_values_from_strategy(
+                                strategy_result, exit_dt
+                            )
+                            for ind_name, ind_value in exit_indicators.items():
+                                trade_info[f"{ind_name}_exit"] = ind_value
 
                         trades.append(trade_info)
                     except Exception as e:
                         logger.warning(f"Error processing trade: {e}")
                         continue
 
-        # Method 3: Use TradeAnalyzer if available
+        # Method 3: Alternative approach using strategy's trade analyzer if available
         if not trades and hasattr(strategy_result, "analyzers"):
             try:
-                trade_analyzer = getattr(
-                    strategy_result.analyzers, "tradeanalyzer", None
-                )
-                if trade_analyzer and hasattr(trade_analyzer, "get_analysis"):
-                    analysis = trade_analyzer.get_analysis()
-                    closed_trades = analysis.get("closed", []) or analysis.get(
-                        "trades", []
-                    )
-                    for i, trade in enumerate(closed_trades):
-                        try:
-                            entry_dt = pd.to_datetime(
-                                trade["datein"], unit="s"
-                            ).tz_localize("UTC")
-                            exit_dt = pd.to_datetime(
-                                trade["dateout"], unit="s"
-                            ).tz_localize("UTC")
-                            trade_info = {
-                                "entry_time": entry_dt,
-                                "exit_time": exit_dt,
-                                "entry_price": trade.get("pricein", 0),
-                                "exit_price": trade.get("priceout", 0),
-                                "size": abs(trade.get("size", 1)),
-                                "pnl": trade.get("pnl", 0),
-                                "pnl_net": trade.get(
-                                    "pnl", 0
-                                ),  # TradeAnalyzer may not include commission
-                                "commission": 0,
-                                "status": "Won" if trade.get("pnl", 0) > 0 else "Lost",
-                                "direction": (
-                                    "Long" if trade.get("size", 1) > 0 else "Short"
-                                ),
-                                "regime": "unknown",
-                            }
-
-                            # Add indicator values for entry and exit
-                            if data is not None and calculated_indicators:
-                                for dt_key, suffix in [
-                                    (entry_dt, "_entry"),
-                                    (exit_dt, "_exit"),
-                                ]:
-                                    if dt_key:
-                                        closest_idx = data_index.get_indexer(
-                                            [dt_key], method="nearest"
-                                        )[0]
-                                        for (
-                                            ind_name,
-                                            ind_data,
-                                        ) in calculated_indicators.items():
-                                            ind_value = (
-                                                ind_data["values"].iloc[closest_idx]
-                                                if closest_idx < len(ind_data["values"])
-                                                else None
-                                            )
-                                            trade_info[
-                                                f"{ind_data['name']}{suffix}"
-                                            ] = ind_value
-
-                            trades.append(trade_info)
-                        except Exception as e:
-                            logger.warning(f"Error processing TradeAnalyzer trade: {e}")
-                            continue
+                # Look for trade analyzer results
+                for analyzer_name in dir(strategy_result.analyzers):
+                    if not analyzer_name.startswith("_"):
+                        analyzer = getattr(strategy_result.analyzers, analyzer_name)
+                        if hasattr(analyzer, "get_analysis"):
+                            analysis = analyzer.get_analysis()
+                            logger.debug(f"Found analyzer {analyzer_name}: {analysis}")
             except Exception as e:
-                logger.warning(f"TradeAnalyzer extraction failed: {e}")
+                logger.debug(f"Error accessing analyzers: {e}")
 
         # Add regime information with robust timezone handling
         if data is not None and "vol_regime" in data.columns and trades:
             for trade in trades:
                 try:
                     entry_time = trade["entry_time"]
+                    if entry_time is None:
+                        trade["regime"] = "unknown"
+                        continue
+
                     if not isinstance(entry_time, pd.Timestamp):
                         entry_time = pd.Timestamp(entry_time)
                     if entry_time.tzinfo is None:
                         entry_time = entry_time.tz_localize("UTC")
                     else:
                         entry_time = entry_time.tz_convert("UTC")
+
                     time_diff = data_index - entry_time
                     abs_time_diff = np.abs(time_diff.total_seconds())
                     min_diff_seconds = abs_time_diff.min()
+
                     if min_diff_seconds <= 60:  # Within 1 minute
                         closest_idx = abs_time_diff.argmin()
                         trade["regime"] = data.iloc[closest_idx]["vol_regime"]
@@ -1298,6 +1371,20 @@ def extract_trades(
             logger.info(
                 f"Extracted {len(trades_df)} trades with columns: {trades_df.columns.tolist()}"
             )
+
+            # Log indicator columns found
+            indicator_columns = [
+                col
+                for col in trades_df.columns
+                if col.endswith("_entry") or col.endswith("_exit")
+            ]
+            if indicator_columns:
+                logger.info(f"Indicator columns: {indicator_columns}")
+            else:
+                logger.warning("No indicator columns found in trades")
+        else:
+            logger.warning("No trades extracted")
+
         return trades_df
 
     except Exception as e:
@@ -1317,6 +1404,77 @@ def extract_trades(
                 "regime",
             ]
         )
+
+
+def create_summary_table(report):
+    """Convert JSON report into a structured table for display with consistent data types."""
+    try:
+        # Extract summary and trade analysis
+        summary = report.get("summary", {})
+        trade_analysis = report.get("trade_analysis", {})
+        risk_metrics = report.get("risk_metrics", {})
+
+        # Prepare table data
+        table_data = []
+
+        # Add summary metrics
+        for key, value in summary.items():
+            # Handle date formatting
+            if key in ["start_date", "end_date"]:
+                value = str(value)  # Convert dates to string
+            # Handle numeric values consistently
+            elif isinstance(value, (int, float)):
+                value = f"{value:.4f}" if abs(value) < 0.01 else f"{value:.2f}"
+            table_data.append(
+                {
+                    "Category": "Summary",
+                    "Metric": key.replace("_", " ").title(),
+                    "Value": value,
+                }
+            )
+
+        # Add trade analysis metrics
+        for key, value in trade_analysis.items():
+            # Skip nested dicts and lists
+            if isinstance(value, (dict, list)):
+                continue
+            # Format numeric values consistently
+            if isinstance(value, (int, float)):
+                value = f"{value:.4f}" if abs(value) < 0.01 else f"{value:.2f}"
+            table_data.append(
+                {
+                    "Category": "Trade Analysis",
+                    "Metric": key.replace("_", " ").title(),
+                    "Value": value,
+                }
+            )
+
+        # Add risk metrics
+        for key, value in risk_metrics.items():
+            # Format numeric values consistently
+            if isinstance(value, (int, float)):
+                value = f"{value:.4f}" if abs(value) < 0.01 else f"{value:.2f}"
+            table_data.append(
+                {
+                    "Category": "Risk Metrics",
+                    "Metric": key.replace("_", " ").title(),
+                    "Value": value,
+                }
+            )
+
+        # Create DataFrame and ensure consistent string types
+        df = pd.DataFrame(table_data)
+        if "Value" in df.columns:
+            df["Value"] = df["Value"].astype(str)  # Convert all values to string
+
+        return df
+
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        logger.error(f"Error creating summary table: {e}")
+        return pd.DataFrame()
 
 
 def create_trades_table(results, data=None):
@@ -1384,21 +1542,50 @@ def create_trades_table(results, data=None):
                     value = trade[col]
                     # Add both the indicator name and its value to the table
                     if pd.notnull(value):
-                        trade_info[
-                            f"{indicator_name} ({col.split('_')[-1].capitalize()})"
-                        ] = (
+                        # Format indicator name and context
+                        context = "Entry" if col.endswith("_entry") else "Exit"
+                        display_name = f"{indicator_name} ({context})"
+                        trade_info[display_name] = (
                             f"{value:.2f}"
                             if isinstance(value, (int, float))
                             else str(value)
                         )
-                    else:
-                        trade_info[
-                            f"{indicator_name} ({col.split('_')[-1].capitalize()})"
-                        ] = "N/A"
 
             formatted_trades.append(trade_info)
 
-        return pd.DataFrame(formatted_trades), None
+        # Create DataFrame and sort columns
+        df = pd.DataFrame(formatted_trades)
+
+        # Order columns: Trade details first, then entry indicators, then exit indicators
+        base_columns = [
+            "Trade #",
+            "Entry Date",
+            "Entry Time",
+            "Entry Price",
+            "Exit Date",
+            "Exit Time",
+            "Exit Price",
+            "Size",
+            "Direction",
+            "P&L",
+            "Return %",
+            "Duration (Hours)",
+            "Duration (Days)",
+            "Status",
+            "Regime",
+        ]
+
+        # Separate indicator columns
+        indicator_columns = [col for col in df.columns if col not in base_columns]
+
+        # Sort indicators: entry first, then exit
+        entry_indicators = sorted([col for col in indicator_columns if "Entry" in col])
+        exit_indicators = sorted([col for col in indicator_columns if "Exit" in col])
+
+        # Combine all columns in desired order
+        ordered_columns = base_columns + entry_indicators + exit_indicators
+
+        return df[ordered_columns], None
 
     except Exception as e:
         logger.error(f"Error creating trades table: {e}", exc_info=True)
@@ -1787,38 +1974,6 @@ def create_strategy_comparison_table(basic_report, opt_report):
         return pd.DataFrame()
 
 
-def plot_optimization_results(results):
-    """Generate optimization results visualization."""
-    print("Generating optimization results visualization...", results, dir(results))
-    try:
-        # Ensure we have valid study results
-        if not results or "study" not in results:
-            return {"error": "No optimization study available"}
-
-        study = results["study"]
-        if not hasattr(study, "trials") or not study.trials:
-            return {"error": "No optimization trials available"}
-
-        # Generate contour plot
-        fig = optuna.visualization.plot_contour(study)
-        plotly_fig = go.Figure()
-        for trace in fig.data:
-            plotly_fig.add_trace(trace)
-        plotly_fig.update_layout(
-            title="Parameter Optimization Contour Plot",
-            xaxis_title=fig.layout.xaxis.title.text,
-            yaxis_title=fig.layout.yaxis.title.text,
-            showlegend=True,
-        )
-        return plotly_fig
-    except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        logger.error(f"Error generating contour plot: {e}")
-        return {"error": f"Failed to generate contour plot: {str(e)}"}
-
-
 def plot_time_analysis(time_analysis):
     """Create visualizations for time analysis data."""
     try:
@@ -1912,6 +2067,62 @@ def plot_time_analysis(time_analysis):
         return None
 
 
+def plot_equity_curve(equity_data):
+    """Plot equity curve from time return analyzer."""
+    try:
+        if not equity_data:
+            return None
+
+        if isinstance(equity_data, pd.Series):
+            # Already a series, use directly
+            equity_series = equity_data
+        elif isinstance(equity_data, dict):
+            # Handle different dictionary formats
+            if all(isinstance(k, (pd.Timestamp, datetime)) for k in equity_data.keys()):
+                # Dictionary with datetime keys
+                dates = list(equity_data.keys())
+                values = list(equity_data.values())
+            elif all(isinstance(k, str) for k in equity_data.keys()):
+                # Dictionary with string dates
+                dates = pd.to_datetime(list(equity_data.keys()))
+                values = list(equity_data.values())
+            else:
+                # Fallback to numeric index
+                dates = np.arange(len(equity_data))
+                values = list(equity_data.values())
+
+            equity_series = pd.Series(values, index=dates)
+        else:
+            return None
+
+        # Calculate cumulative returns
+        cumulative = (1 + equity_series).cumprod()
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=cumulative.index,
+                y=cumulative.values,
+                mode="lines",
+                name="Equity Curve",
+                line=dict(color="royalblue", width=3),
+            )
+        )
+
+        fig.update_layout(
+            title="Equity Curve",
+            xaxis_title="Date",
+            yaxis_title="Cumulative Return",
+            hovermode="x",
+            showlegend=True,
+        )
+
+        return fig
+    except Exception as e:
+        logger.error(f"Error plotting equity curve: {e}")
+        return None
+
+
 def complete_backtest(
     user_ticker=None,
     user_start_date=None,
@@ -1921,7 +2132,7 @@ def complete_backtest(
     user_analyzers=None,
 ):
     """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
-    st.header("Full Demonstration")
+    st.header("Complete Backtest Demonstration")
     progress_bar = st.progress(0)
     status_text = st.empty()
     try:
@@ -1980,7 +2191,6 @@ def complete_backtest(
 
         # Run complete backtest using the function from backtesting.py
         status_text.text("Running complete backtest...")
-        print("===============================", get_strategy(strategy_name))
         results = run_complete_backtest(
             ticker=ticker,
             start_date=start_date,
@@ -1998,21 +2208,63 @@ def complete_backtest(
             st.subheader("Basic Backtest Results")
             basic_analyzer = PerformanceAnalyzer(results["basic"])
             basic_report = basic_analyzer.generate_full_report()
-            st.json(basic_report)
+
+            # Show summary as table
+            st.write("### Performance Summary")
+            summary_table = create_summary_table(basic_report)
+            st.dataframe(summary_table, use_container_width=True)
+
+            # Plot basic backtest chart
+            st.write("### Basic Strategy Performance")
+            fig = create_candlestick_chart_with_trades(
+                data, results["basic"], "Basic Strategy Results"
+            )
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
 
         if "optimization" in results:
             st.subheader("Optimization Results")
             opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
             opt_report = opt_analyzer.generate_full_report()
-            st.json(opt_report)
+
+            # Show summary as table
+            st.write("### Performance Summary")
+            summary_table = create_summary_table(opt_report)
+            st.dataframe(summary_table, use_container_width=True)
+
+            # Plot optimization contour
+            st.write("### Parameter Optimization Landscape")
+            contour_fig = plot_contour(results["optimization"]["study"])
+            if contour_fig:
+                st.plotly_chart(contour_fig, use_container_width=True)
+
+            # Plot optimized strategy chart
+            st.write("### Optimized Strategy Performance")
+            fig = create_candlestick_chart_with_trades(
+                data, results["optimization"]["results"], "Optimized Strategy Results"
+            )
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
 
         if "walk_forward" in results:
             st.subheader("Walk-Forward Analysis Results")
+            print("WFFFFFFF====", results)
             wf_analyzer = PerformanceAnalyzer(
-                results["walk_forward"]["windows"][-1]["out_sample_performance"]
+                results["walk_forward"]["windows"][-1]["summary"]
             )
             wf_report = wf_analyzer.generate_full_report()
-            st.json(wf_report)
+
+            # Show summary as table
+            st.write("### Performance Summary")
+            summary_table = create_summary_table(wf_report)
+            st.dataframe(summary_table, use_container_width=True)
+
+            # Plot equity curve
+            st.write("### Walk-Forward Equity Curve")
+            equity_data = wf_report.get("timereturn", {})
+            equity_fig = plot_equity_curve(equity_data)
+            if equity_fig:
+                st.plotly_chart(equity_fig, use_container_width=True)
 
         # Show comparison if available
         if "comparison" in results:
@@ -2095,6 +2347,12 @@ def main():
     .improvement-negative {
         color: #ff4444;
         font-weight: bold;
+    }
+    .indicator-entry {
+        background-color: #e8f5e9;
+    }
+    .indicator-exit {
+        background-color: #ffebee;
     }
     </style>
     """,
@@ -2273,7 +2531,7 @@ def main():
             help="Number of optimization trials to run (increases in steps of 10)",
         )
     else:
-        n_trials = 50
+        n_trials = 10
 
     # Timeframe selection
     timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m"])
@@ -2357,8 +2615,8 @@ def main():
                     ticker=ticker,
                     start_date=start_date.strftime("%Y-%m-%d"),
                     end_date=end_date.strftime("%Y-%m-%d"),
-                    # interval=timeframe,
-                    # analyzers=analyzer_config
+                    interval=timeframe,
+                    analyzers=analyzer_config,
                 )
                 progress_bar.progress(100)
                 status_text.text("Backtest complete!")
@@ -2367,13 +2625,26 @@ def main():
                 # Initialize PerformanceAnalyzer with results
                 analyzer = PerformanceAnalyzer(results[0])
                 report = analyzer.generate_full_report()
-                st.write("### Backtest Results")
-                st.json(report)
+
+                # Display report as table instead of JSON
+                st.write("### Backtest Results Summary")
+                summary_table = create_summary_table(report)
+                st.dataframe(summary_table, use_container_width=True)
+
+                # Export summary table
+                if st.button("Export Summary Table"):
+                    csv_data = summary_table.to_csv(index=False)
+                    st.download_button(
+                        label="Download Summary as CSV",
+                        data=csv_data,
+                        file_name=f"{ticker}_backtest_summary.csv",
+                        mime="text/csv",
+                    )
 
                 # Enhanced Candlestick Chart with Technical Indicators
                 st.write("### 📈 Enhanced Chart with Technical Indicators & Trades")
                 plotly_fig = create_candlestick_chart_with_trades(data, results)
-                if plotly_fig is not None and not isinstance(plotly_fig, dict):
+                if plotly_fig:
                     st.plotly_chart(plotly_fig, use_container_width=True)
                     # Export plot
                     if st.button("Export Enhanced Chart"):
@@ -2385,6 +2656,8 @@ def main():
                             file_name=f"{ticker}_enhanced_backtest_chart.png",
                             mime="image/png",
                         )
+                else:
+                    st.warning("Could not generate chart")
 
                 # Dynamic Technical Indicators Table
                 st.write("### 📊 Technical Indicators - Latest Values")
@@ -2432,25 +2705,40 @@ def main():
                         st.markdown("\n".join(indicator_summary))
                     else:
                         st.info("No technical indicators detected in this strategy.")
+                else:
+                    st.info("No indicator data available")
 
                 # Comprehensive Trades Table
                 st.write("### 📊 Detailed Trades Table")
-                trades_df, trades_error = create_trades_table(results)
-                if trades_error:
-                    st.warning(f"Could not create trades table: {trades_error}")
-                elif not trades_df.empty:
-                    st.dataframe(trades_df, use_container_width=True)
+                try:
+                    trades_df, trades_error = create_trades_table(results)
+                    if trades_error:
+                        st.warning(f"Could not create trades table: {trades_error}")
+                    elif not trades_df.empty:
+                        # Apply styling to highlight entry and exit indicators
+                        def highlight_columns(col):
+                            if "Entry" in col:
+                                return ["background-color: #e8f5e9"] * len(col)
+                            elif "Exit" in col:
+                                return ["background-color: #ffebee"] * len(col)
+                            return [""] * len(col)
 
-                    # Export trades table
-                    csv_data = trades_df.to_csv(index=False)
-                    st.download_button(
-                        label="Download Trades Table as CSV",
-                        data=csv_data,
-                        file_name=f"{ticker}_trades_table.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.info("No trades executed during the backtest period.")
+                        styled_trades = trades_df.style.apply(highlight_columns, axis=0)
+                        st.dataframe(styled_trades, use_container_width=True)
+
+                        # Export trades table
+                        csv_data = trades_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download Trades Table as CSV",
+                            data=csv_data,
+                            file_name=f"{ticker}_trades_table.csv",
+                            mime="text/csv",
+                        )
+                    else:
+                        st.info("No trades executed during the backtest period.")
+                except Exception as e:
+                    st.error(f"Error creating trades table: {str(e)}")
+                    logger.exception("Error creating trades table")
 
                 # Trade Statistics Summary
                 st.write("### 📈 Trade Statistics Summary")
@@ -2529,11 +2817,21 @@ def main():
                         else:
                             st.info("No monthly data available")
 
+                    # Time Analysis Chart
+                    st.write("### 📊 Trading Time Analysis")
+                    time_chart = plot_time_analysis(time_analysis)
+                    if time_chart:
+                        st.plotly_chart(time_chart, use_container_width=True)
+                else:
+                    st.warning(
+                        f"Could not analyze best times: {time_analysis.get('error', 'Unknown error')}"
+                    )
+
                 # Export option
-                if st.button("Export Backtest Report"):
+                if st.button("Export Full Backtest Report"):
                     report_json = json.dumps(report, indent=2, default=str)
                     st.download_button(
-                        label="Download Backtest Report as JSON",
+                        label="Download Full Report as JSON",
                         data=report_json,
                         file_name=f"{ticker}_backtest_report.json",
                         mime="application/json",
@@ -2547,8 +2845,8 @@ def main():
                     start_date=start_date.strftime("%Y-%m-%d"),
                     end_date=end_date.strftime("%Y-%m-%d"),
                     n_trials=n_trials,
-                    # interval=timeframe,
-                    # analyzers=analyzer_config
+                    interval=timeframe,
+                    analyzers=analyzer_config,
                 )
                 progress_bar.progress(100)
                 status_text.text("Optimization complete!")
@@ -2564,24 +2862,45 @@ def main():
                     return
 
                 # Initialize PerformanceAnalyzer with results
-                print("Optimization results:", results)
-                print("Results keys:", results.keys())
-
                 analyzer = PerformanceAnalyzer(results["results"][0])
                 report = analyzer.generate_full_report()
-                st.write("### Optimization Results")
-                st.json(report)
+
+                # Display report as table instead of JSON
+                st.write("### Optimization Results Summary")
+                summary_table = create_summary_table(report)
+                st.dataframe(summary_table, use_container_width=True)
+
+                # Export summary table
+                if st.button("Export Optimization Summary"):
+                    csv_data = summary_table.to_csv(index=False)
+                    st.download_button(
+                        label="Download Summary as CSV",
+                        data=csv_data,
+                        file_name=f"{ticker}_optimization_summary.csv",
+                        mime="text/csv",
+                    )
+
+                # Optimization Contour Plot
+                st.write("### 🗺️ Parameter Optimization Landscape")
+                contour_fig = plot_contour(results["study"])
+                if contour_fig:
+                    st.plotly_chart(contour_fig, use_container_width=True)
+                    if st.button("Export Contour Plot"):
+                        buf = BytesIO()
+                        contour_fig.write_image(buf, format="png")
+                        st.download_button(
+                            label="Download Contour Plot as PNG",
+                            data=buf.getvalue(),
+                            file_name=f"{ticker}_contour_plot.png",
+                            mime="image/png",
+                        )
+                else:
+                    st.warning("Could not generate contour plot")
 
                 # Enhanced Candlestick Chart for Optimized Strategy
                 st.write("### 📈 Optimized Strategy - Enhanced Chart with Indicators")
-                opt_result = results["results"]
-                if isinstance(opt_result, (tuple, list)):
-                    strategy_result = opt_result[0]
-                else:
-                    strategy_result = opt_result
-
                 plotly_fig = create_candlestick_chart_with_trades(
-                    data, [strategy_result], "Optimized Strategy Results"
+                    data, results["results"], "Optimized Strategy Results"
                 )
                 if plotly_fig:
                     st.plotly_chart(plotly_fig, use_container_width=True)
@@ -2594,6 +2913,8 @@ def main():
                             file_name=f"{ticker}_optimized_strategy_chart.png",
                             mime="image/png",
                         )
+                else:
+                    st.warning("Could not generate optimized strategy chart")
 
                 # Dynamic Technical Indicators for Optimized Strategy
                 st.write("### 📊 Optimized Strategy - Technical Indicators")
@@ -2669,98 +2990,43 @@ def main():
                         + best_params_info.get("error", "Unknown error")
                     )
 
-                # Optimization Contour Plot
-                st.write("### 🗺️ Parameter Optimization Landscape")
-                contour_fig = plot_contour(results["study"])
-                if contour_fig:
-                    st.plotly_chart(contour_fig, use_container_width=True)
-                    if st.button("Export Contour Plot"):
-                        buf = BytesIO()
-                        contour_fig.write_image(buf, format="png")
-                        st.download_button(
-                            label="Download Contour Plot as PNG",
-                            data=buf.getvalue(),
-                            file_name=f"{ticker}_contour_plot.png",
-                            mime="image/png",
-                        )
-
-                # New section: Best time to trade, best parameters, best holding period
-                st.write("## Best Trading Insights")
-                # Best time to trade
-                opt_result = results["results"]
-                if isinstance(opt_result, (tuple, list)):
-                    strategy_result = opt_result[0]
-                else:
-                    strategy_result = opt_result
-
-                time_analysis = analyze_best_time_ranges([strategy_result])
-                if "error" not in time_analysis:
-                    st.write("**Best Time to Trade (Winning Trades):**")
-                    st.write("- Best Hours:")
-                    for hour_info in time_analysis["best_hours"]:
-                        st.write(
-                            f"  - {hour_info['hour']}: {hour_info['trades']} trades ({hour_info['total_pnl']:.2f})"
-                        )
-                    st.write("- Best Days:")
-                    for day_info in time_analysis["best_days"]:
-                        st.write(
-                            f"  - {day_info['day']}: {day_info['trades']} trades ({day_info['total_pnl']:.2f})"
-                        )
-                    st.write("- Best Months:")
-                    for month_info in time_analysis["best_months"]:
-                        st.write(
-                            f"  - {month_info['month']}: {month_info['trades']} trades ({month_info['total_pnl']:.2f})"
-                        )
-                else:
-                    st.warning(
-                        "Could not analyze best time to trade: "
-                        + time_analysis.get("error", "Unknown error")
-                    )
-
-                # Best holding period
-                best_trades_analysis = analyze_best_trades([strategy_result])
-                if (
-                    "error" not in best_trades_analysis
-                    and best_trades_analysis["best_trades"]
-                ):
-                    best_trade = best_trades_analysis["best_trades"][0]
-                    avg_holding = sum(
-                        trade["duration_hours"]
-                        for trade in best_trades_analysis["best_trades"]
-                    ) / len(best_trades_analysis["best_trades"])
-                    st.write("**Best Holding Period:**")
-                    st.write(
-                        f"- Best Trade Holding: {best_trade['duration_hours']:.2f} hours"
-                    )
-                    st.write(f"- Average Holding (Top 5): {avg_holding:.2f} hours")
-                else:
-                    st.warning(
-                        "Could not analyze holding period: "
-                        + best_trades_analysis.get("error", "Unknown error")
-                    )
-
                 # Comprehensive Trades Table for Optimized Strategy
                 st.write("### 📊 Optimized Strategy - Detailed Trades Table")
-                opt_trades_df, opt_trades_error = create_trades_table(
-                    results["results"]
-                )
-                if opt_trades_error:
-                    st.warning(
-                        f"Could not create optimized trades table: {opt_trades_error}"
+                try:
+                    opt_trades_df, opt_trades_error = create_trades_table(
+                        results["results"]
                     )
-                elif not opt_trades_df.empty:
-                    st.dataframe(opt_trades_df, use_container_width=True)
+                    if opt_trades_error:
+                        st.warning(
+                            f"Could not create optimized trades table: {opt_trades_error}"
+                        )
+                    elif not opt_trades_df.empty:
+                        # Apply styling to highlight entry and exit indicators
+                        def highlight_columns(col):
+                            if "Entry" in col:
+                                return ["background-color: #e8f5e9"] * len(col)
+                            elif "Exit" in col:
+                                return ["background-color: #ffebee"] * len(col)
+                            return [""] * len(col)
 
-                    # Export optimized trades table
-                    csv_data = opt_trades_df.to_csv(index=False)
-                    st.download_button(
-                        label="Download Optimized Trades Table as CSV",
-                        data=csv_data,
-                        file_name=f"{ticker}_optimized_trades_table.csv",
-                        mime="text/csv",
-                    )
-                else:
-                    st.info("No trades executed by the optimized strategy.")
+                        styled_trades = opt_trades_df.style.apply(
+                            highlight_columns, axis=0
+                        )
+                        st.dataframe(styled_trades, use_container_width=True)
+
+                        # Export optimized trades table
+                        csv_data = opt_trades_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download Optimized Trades Table as CSV",
+                            data=csv_data,
+                            file_name=f"{ticker}_optimized_trades_table.csv",
+                            mime="text/csv",
+                        )
+                    else:
+                        st.info("No trades executed by the optimized strategy.")
+                except Exception as e:
+                    st.error(f"Error creating trades table: {str(e)}")
+                    logger.exception("Error creating trades table")
 
                 # Trade Statistics Summary for Optimized Strategy
                 st.write("### 📈 Optimized Strategy - Trade Statistics")
@@ -2840,6 +3106,7 @@ def main():
                             st.info("No monthly data available")
 
                     # Time Analysis Chart for Optimized Strategy
+                    st.write("### 📊 Optimized Strategy - Trading Time Analysis")
                     time_chart = plot_time_analysis(time_analysis)
                     if time_chart:
                         st.plotly_chart(time_chart, use_container_width=True)
@@ -2850,20 +3117,17 @@ def main():
                     )
 
                 # Export option
-                if st.button("Export Optimization Report"):
+                if st.button("Export Full Optimization Report"):
                     report_json = json.dumps(report, indent=2, default=str)
                     st.download_button(
-                        label="Download Optimization Report as JSON",
+                        label="Download Full Report as JSON",
                         data=report_json,
                         file_name=f"{ticker}_optimization_report.json",
                         mime="application/json",
                     )
-
             elif analysis_type == "Walk-Forward":
                 status_text.text("Starting walk-forward analysis...")
-                validation_analyzer = ValidationAnalyzer(
-                    strategy_class=get_strategy(selected_strategy), ticker=ticker
-                )
+                # Use strategy name instead of class
                 results = run_walkforward_analysis(
                     ticker=ticker,
                     start_date=start_date.strftime("%Y-%m-%d"),
@@ -2873,163 +3137,246 @@ def main():
                     step_days=7,
                     n_trials=n_trials,
                     interval=timeframe,
-                    strategy_class=selected_strategy,
+                    strategy_name=selected_strategy,  # Changed from strategy_class
                 )
                 progress_bar.progress(100)
                 status_text.text("Walk-forward analysis complete!")
                 st.toast("Backtesting complete")
 
-                # Initialize PerformanceAnalyzer with results from the last window
-                if results["windows"]:
-                    analyzer = PerformanceAnalyzer(
-                        results["windows"][-1]["out_sample_performance"]
-                    )
-                    report = analyzer.generate_full_report()
-                    st.write("### Walk-Forward Results")
-                    st.json(report)
+                # NEW: Comprehensive Walk-Forward Results Display
+                if results and "windows" in results and results["windows"]:
+                    st.subheader("📊 Walk-Forward Analysis Results")
 
-                    # Display walk-forward summary
-                    st.write("### Walk-Forward Analysis Summary")
-                    col1, col2 = st.columns(2)
+                    # 1. Display overall summary metrics
+                    st.write("### 🔍 Overall Walk-Forward Metrics")
+                    col1, col2, col3 = st.columns(3)
 
                     with col1:
-                        st.write("**Analysis Overview:**")
                         st.metric("Total Windows", len(results["windows"]))
-                        if results["windows"]:
-                            # Calculate average performance across windows
-                            avg_performance = sum(
-                                window.get("out_sample_performance", {}).get(
-                                    "total_return_pct", 0
-                                )
-                                for window in results["windows"]
-                            ) / len(results["windows"])
-                            st.metric(
-                                "Average Return per Window", f"{avg_performance:.2f}%"
-                            )
+                        st.metric(
+                            "Valid Windows",
+                            sum(1 for w in results["windows"] if w.get("valid", False)),
+                        )
 
                     with col2:
-                        st.write("**Best Window Performance:**")
-                        if results["windows"]:
+                        avg_return = np.mean(
+                            [
+                                w["out_sample_performance"]["summary"][
+                                    "total_return_pct"
+                                ]
+                                for w in results["windows"]
+                                if w.get("valid", False)
+                            ]
+                        )
+                        st.metric("Average Return", f"{avg_return:.2f}%")
+
+                    with col3:
+                        valid_windows = [
+                            w for w in results["windows"] if w.get("valid", False)
+                        ]
+                        if valid_windows:
                             best_window = max(
-                                results["windows"],
-                                key=lambda x: x.get("out_sample_performance", {}).get(
-                                    "total_return_pct", 0
-                                ),
+                                valid_windows,
+                                key=lambda w: w["out_sample_performance"]["summary"][
+                                    "total_return_pct"
+                                ],
                             )
-                            best_return = best_window.get(
-                                "out_sample_performance", {}
-                            ).get("total_return_pct", 0)
-                            st.metric("Best Window Return", f"{best_return:.2f}%")
+                            st.metric(
+                                "Best Window Return",
+                                f"{best_window['out_sample_performance']['summary']['total_return_pct']:.2f}%",
+                            )
+                        else:
+                            st.metric("Best Window Return", "N/A")
 
-                            # Show best parameters from the best window
-                            if "best_params" in best_window:
-                                st.write("**Best Parameters (Best Window):**")
-                                for param, value in best_window["best_params"].items():
-                                    if isinstance(value, float):
-                                        st.write(f"- **{param}**: {value:.4f}")
+                    # 2. Show parameter evolution
+                    st.write("### ⚙️ Parameter Evolution Across Windows")
+                    param_data = []
+                    for i, window in enumerate(results["windows"]):
+                        if window.get("valid", False):
+                            params = window.get("best_params", {})
+                            param_data.append(
+                                {
+                                    "Window": i + 1,
+                                    **params,
+                                    "Return": window["out_sample_performance"][
+                                        "summary"
+                                    ]["total_return_pct"],
+                                }
+                            )
+                    param_df = pd.DataFrame(param_data)
+                    if not param_df.empty:
+                        st.dataframe(
+                            param_df.style.background_gradient(
+                                cmap="RdYlGn", subset=["Return"]
+                            ),
+                            use_container_width=True,
+                        )
+
+                    # 3. Display each window in expanders
+                    st.write("### 📅 Detailed Window Analysis")
+                    for i, window in enumerate(results["windows"]):
+                        if window.get("valid", False):
+                            with st.expander(
+                                f"Window {i+1} ({window['out_sample_start']} to {window['out_sample_end']})",
+                                expanded=False,
+                            ):
+                                # Window summary
+                                col1, col2 = st.columns(2)
+
+                                with col1:
+                                    st.write("**In-Sample Period**")
+                                    st.write(f"Start: {window['in_sample_start']}")
+                                    st.write(f"End: {window['in_sample_end']}")
+                                    st.write(f"Optimization Trials: {n_trials}")
+
+                                with col2:
+                                    st.write("**Out-Sample Performance**")
+                                    st.metric(
+                                        "Return",
+                                        f"{window['out_sample_performance']['summary']['total_return_pct']:.2f}%",
+                                    )
+                                    st.metric(
+                                        "Sharpe Ratio",
+                                        f"{window['out_sample_performance']['risk_metrics']['sharpe_ratio']:.2f}",
+                                    )
+
+                                # Show best parameters
+                                st.write("**🎯 Best Parameters**")
+                                if window.get("best_params"):
+                                    for param, value in window["best_params"].items():
+                                        st.code(f"{param}: {value}")
+
+                                # Plot out-sample equity curve
+                                st.write("### 📈 Out-Sample Equity Curve")
+                                equity_data = window["out_sample_performance"].get(
+                                    "timereturn", {}
+                                )
+                                equity_fig = plot_equity_curve(equity_data)
+                                if equity_fig:
+                                    st.plotly_chart(
+                                        equity_fig, use_container_width=True
+                                    )
+
+                                # Show trades table for out-sample period
+                                st.write("### 💰 Out-Sample Trades")
+                                try:
+                                    # Get strategy and data for this window
+                                    strategy_obj = window.get("out_sample_strategy")
+                                    out_sample_data = get_data_sync(
+                                        ticker,
+                                        window["out_sample_start"],
+                                        window["out_sample_end"],
+                                        interval=timeframe,
+                                    )
+
+                                    if strategy_obj and not out_sample_data.empty:
+                                        trades_df, trades_error = create_trades_table(
+                                            strategy_obj, out_sample_data
+                                        )
+                                        if trades_error:
+                                            st.warning(
+                                                f"Could not create trades table: {trades_error}"
+                                            )
+                                        elif not trades_df.empty:
+                                            st.dataframe(
+                                                trades_df, use_container_width=True
+                                            )
+                                        else:
+                                            st.info(
+                                                "No trades executed in this out-sample period"
+                                            )
                                     else:
-                                        st.write(f"- **{param}**: {value}")
+                                        st.warning("Missing data for trades table")
+                                except Exception as e:
+                                    st.error(f"Error creating trades table: {str(e)}")
 
-                    # Export option
-                    if st.button("Export Walk-Forward Report"):
-                        report_json = json.dumps(report, indent=2, default=str)
+                                # Trade analysis summary
+                                st.write("### 📊 Trade Statistics")
+                                if "trade_analysis" in window["out_sample_performance"]:
+                                    ta = window["out_sample_performance"][
+                                        "trade_analysis"
+                                    ]
+                                    col1, col2, col3 = st.columns(3)
+
+                                    with col1:
+                                        st.metric(
+                                            "Total Trades", ta.get("total_trades", 0)
+                                        )
+                                        st.metric(
+                                            "Win Rate",
+                                            f"{ta.get('win_rate_percent', 0):.1f}%",
+                                        )
+
+                                    with col2:
+                                        st.metric(
+                                            "Profit Factor",
+                                            f"{ta.get('profit_factor', 0):.2f}",
+                                        )
+                                        st.metric(
+                                            "Avg Win/Avg Loss",
+                                            f"{ta.get('avg_win_avg_loss_ratio', 0):.2f}",
+                                        )
+
+                                    with col3:
+                                        st.metric(
+                                            "Max Consecutive Wins",
+                                            ta.get("consecutive_wins", 0),
+                                        )
+                                        st.metric(
+                                            "Max Consecutive Losses",
+                                            ta.get("consecutive_losses", 0),
+                                        )
+
+                    # 4. Combined equity curve visualization
+                    st.write("### 📈 Combined Equity Curve")
+                    cumulative_return = 100
+                    equity_points = [cumulative_return]
+                    dates = []
+
+                    for window in results["windows"]:
+                        if window.get("valid", False):
+                            equity = window["out_sample_performance"].get(
+                                "timereturn", {}
+                            )
+                            if equity:
+                                # Calculate cumulative returns
+                                returns = list(equity.values())
+                                for ret in returns:
+                                    cumulative_return *= 1 + ret / 100
+                                    equity_points.append(cumulative_return)
+
+                                # Add dates for plotting
+                                dates.extend(sorted(equity.keys()))
+
+                    if len(equity_points) > 1:
+                        fig = go.Figure()
+                        fig.add_trace(
+                            go.Scatter(
+                                x=dates,
+                                y=equity_points,
+                                mode="lines",
+                                name="Cumulative Equity",
+                            )
+                        )
+                        fig.update_layout(
+                            title="Walk-Forward Equity Curve",
+                            xaxis_title="Date",
+                            yaxis_title="Cumulative Value",
+                            showlegend=True,
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    # 5. Export option
+                    if st.button("Export Full Walk-Forward Report", key="export_wf"):
+                        report_json = json.dumps(results, indent=2, default=str)
                         st.download_button(
-                            label="Download Report as JSON",
+                            label="Download Full Report as JSON",
                             data=report_json,
                             file_name=f"{ticker}_walkforward_report.json",
                             mime="application/json",
                         )
-
-                    # Plot equity curve
-                    if (
-                        "resampled_returns"
-                        in results["windows"][-1]["out_sample_performance"]
-                    ):
-                        equity_data = results["windows"][-1]["out_sample_performance"][
-                            "resampled_returns"
-                        ]
-                        # If equity_data is a dict with time series as a subkey, extract it
-                        if isinstance(equity_data, dict):
-                            # Try to find a key that looks like a time series (e.g., 'resampled_returns_pct')
-                            ts_key = None
-                            for k, v in equity_data.items():
-                                if isinstance(v, dict):
-                                    ts_key = k
-                                    break
-                            if ts_key:
-                                logger.info(
-                                    f"Equity data contains time series key: {ts_key}"
-                                )
-                                equity_data = equity_data[ts_key]
-                        # Now process as before if it's a dict of date:value
-                        if isinstance(equity_data, dict):
-                            filtered = [
-                                (k, v)
-                                for k, v in equity_data.items()
-                                if not isinstance(k, str)
-                                or not k.lower().startswith("return")
-                            ]
-                            if filtered:
-                                date_keys, values = zip(*filtered)
-                                equity_dates = pd.to_datetime(
-                                    list(date_keys), errors="coerce"
-                                )
-                                logger.info(f"Equity values (raw): {values}")
-                                equity_values = [
-                                    (
-                                        v["returns"]
-                                        if isinstance(v, dict) and "returns" in v
-                                        else v
-                                    )
-                                    for v in values
-                                ]
-                                # Remove any NaT dates and corresponding values
-                                mask = ~pd.isnull(equity_dates)
-                                equity_dates = equity_dates[mask]
-                                equity_values = [
-                                    v for i, v in enumerate(equity_values) if mask[i]
-                                ]
-                            else:
-                                equity_dates = []
-                                equity_values = []
-                        elif hasattr(equity_data, "index") and hasattr(
-                            equity_data, "values"
-                        ):
-                            equity_dates = pd.to_datetime(equity_data.index).tz_convert(
-                                IST
-                            )
-                            equity_values = equity_data.values
-                        else:
-                            equity_dates = []
-                            equity_values = []
-
-                        plotly_fig = go.Figure()
-                        plotly_fig.add_trace(
-                            go.Scatter(
-                                x=equity_dates,
-                                y=equity_values,
-                                mode="lines",
-                                name="Equity Curve",
-                            )
-                        )
-                        plotly_fig.update_layout(
-                            title="Walk-Forward Equity Curve",
-                            xaxis_title="Date",
-                            yaxis_title="Equity",
-                            height=600,
-                        )
-                        st.plotly_chart(plotly_fig)
-
-                        # Export plot
-                        if st.button("Export Equity Curve Plot"):
-                            buf = BytesIO()
-                            plotly_fig.write_image(buf, format="png")
-                            st.download_button(
-                                label="Download Equity Curve as PNG",
-                                data=buf.getvalue(),
-                                file_name=f"{ticker}_walkforward_plot.png",
-                                mime="image/png",
-                            )
+                else:
+                    st.warning("No valid walk-forward windows available")
 
             elif analysis_type == "Complete Backtest":
                 complete_backtest()

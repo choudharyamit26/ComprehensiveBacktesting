@@ -77,6 +77,9 @@ class PerformanceAnalyzer:
             logger.info("Generated full performance report")
             return report
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             logger.error(
                 f"Error generating full report: {str(e)}. Check analyzer availability."
             )
@@ -527,6 +530,9 @@ class PerformanceAnalyzer:
             logger.info(f"Report saved to {filename}")
             return True
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             logger.error(f"Error saving report to {filename}: {str(e)}")
             return False
 
@@ -558,7 +564,7 @@ class PerformanceAnalyzer:
                 print(f"Sortino Ratio: {summary.get('sortino_ratio', 0):.3f}")
                 print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0):.2f}%")
                 print(f"Calmar Ratio: {summary.get('calmar_ratio', 0):.3f}")
-                print(f"SQN: {summary.get('sqn', 0):.3f}")
+                print(f"SQN: {summary.get('sqn', 0)}")
                 print(f"Profit/Loss: ${summary.get('profit_loss', 0):,.2f}")
 
             trade_analysis = report.get("trade_analysis", {})
@@ -663,6 +669,10 @@ class PerformanceAnalyzer:
                 )
 
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+            print(f"Error processing report: {str(e)}")
             logger.error(f"Error printing report: {str(e)}")
             print(f"Error printing report: {str(e)}")
 
@@ -818,5 +828,8 @@ def compare_strategies(strategy_results_dict):
         return df.set_index("Strategy")
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         logger.error(f"Error comparing strategies: {str(e)}. Check strategy results.")
         return pd.DataFrame()
