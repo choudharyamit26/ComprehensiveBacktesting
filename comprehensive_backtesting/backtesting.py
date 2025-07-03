@@ -15,13 +15,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def run_basic_backtest(ticker, start_date, end_date):
+def run_basic_backtest(strategy_class, ticker, start_date, end_date):
     """Run a basic backtest with default parameters."""
     logger.info(f"Running basic backtest for {ticker}")
     print(f"\n=== BASIC BACKTEST: {ticker} ===")
     try:
         results, cerebro = run_backtest(
-            strategy_class="EMARSI",
+            strategy_class=strategy_class,
             ticker=ticker,
             start_date=start_date,
             end_date=end_date,
@@ -81,13 +81,13 @@ def run_insample_outsample_analysis(ticker, start_date, end_date):
         print("\nOut-of-Sample Performance:")
         print("-" * 60)
         summary = results["out_sample_performance"].get("summary", {})
-        print(f"Total Return: {summary.get('total_return_pct', 0):.2f}%")
-        print(f"Sharpe Ratio: {summary.get('sharpe_ratio', 0):.3f}")
-        print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0):.2f}%")
+        print(f"Total Return: {summary.get('total_return_pct', 0)}%")
+        print(f"Sharpe Ratio: {summary.get('sharpe_ratio', 0)}")
+        print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0)}%")
         print("\nValidation Summary:")
         degradation = results.get("performance_degradation", {})
-        print(f"Return degradation: {degradation.get('return_degradation', 0):.2f}%")
-        print(f"Sharpe degradation: {degradation.get('sharpe_degradation', 0):.3f}")
+        print(f"Return degradation: {degradation.get('return_degradation', 0)}%")
+        print(f"Sharpe degradation: {degradation.get('sharpe_degradation', 0)}")
         return results
     except Exception as e:
         import traceback
@@ -107,6 +107,7 @@ def run_walkforward_analysis(
     n_trials=20,
     min_trades=1,
     strategy_class="EMARSI",
+    interval="5m",  # Default to 5-minute interval for Indian equities
 ):
     """Run walk-forward analysis."""
     logger.info(f"Running walk-forward analysis for {ticker}")
@@ -139,6 +140,7 @@ def run_walkforward_analysis(
             n_trials=n_trials,
             min_trades=min_trades,
             strategy_class=strategy_class,
+            interval=interval,
         )
         summary = results.get("summary_stats", {})
         print(f"\nWalk-Forward Analysis Summary:")
@@ -226,14 +228,14 @@ def run_basic_comparison_analysis(ticker, start_date, end_date):
             logger.error(f"Failed to run {name} strategy: {str(e)}")
             continue
 
-    if results_comparison:
-        try:
-            comparison_df = compare_strategies(results_comparison)
-            if not comparison_df.empty:
-                print("\nStrategy Comparison:")
-                print(comparison_df.round(3))
-        except Exception as e:
-            logger.error(f"Strategy comparison failed: {str(e)}")
+    # if results_comparison:
+    #     try:
+    comparison_df = compare_strategies(results_comparison)
+    # if not comparison_df.empty:
+    # print("\nStrategy Comparison:")
+    print(comparison_df.round(3))
+    # except Exception as e:
+    #     logger.error(f"Strategy comparison failed: {str(e)}")
     return results_comparison
 
 
