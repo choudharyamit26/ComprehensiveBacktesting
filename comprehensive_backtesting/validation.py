@@ -63,6 +63,7 @@ class ValidationAnalyzer:
         self,
         start_date: str,
         end_date: str,
+        interval: str,
         analysis_type: str = "walkforward",
         in_sample_days: int = 30,
         out_sample_days: int = 15,
@@ -71,7 +72,6 @@ class ValidationAnalyzer:
         min_trades: int = 1,
         split_ratio: float = 0.7,
         optimize_in_sample: bool = True,
-        interval: str = "5m",
     ) -> Dict:
         """Run validation analysis (in-sample/out-of-sample or walk-forward).
 
@@ -107,6 +107,7 @@ class ValidationAnalyzer:
                     step_days=step_days,
                     n_trials=n_trials,
                     min_trades=min_trades,
+                    interval=interval,
                 )
             elif analysis_type.lower() == "inout":
                 results = self.in_sample_out_sample_analysis(
@@ -129,10 +130,10 @@ class ValidationAnalyzer:
         self,
         start_date: str,
         end_date: str,
+        interval: str,
         split_ratio: float = 0.7,
         optimize_in_sample: bool = True,
         n_trials: int = 50,
-        interval: str = "5m",
     ) -> Dict:
         """Perform in-sample and out-of-sample analysis.
 
@@ -549,6 +550,7 @@ class ValidationAnalyzer:
         if not wf_results["windows"]:
             print("No walk-forward results to plot")
             return None
+        print("Plotting walk-forward results...", [w for w in wf_results])
 
         # Extract data for plotting
         valid_windows = [w for w in wf_results["windows"] if w.get("valid", False)]
@@ -556,7 +558,6 @@ class ValidationAnalyzer:
         if not valid_windows:
             print("No valid windows to plot")
             return None
-
         window_ids = [w["window_id"] for w in valid_windows]
         in_sample_returns = [
             w["in_sample_performance"]["summary"].get("total_return_pct", 0)
@@ -637,12 +638,12 @@ class ValidationAnalyzer:
         self,
         start_date: str,
         end_date: str,
+        interval: str,
         in_sample_days: int = 30,
         out_sample_days: int = 15,
         step_days: int = 15,
         n_trials: int = 20,
         min_trades: int = 1,
-        interval: str = "5m",
     ) -> Dict:
         """Perform walk-forward analysis with day-based windows."""
         logger.info(f"Starting walk-forward analysis for {self.ticker}")
@@ -1072,7 +1073,7 @@ class ValidationAnalyzer:
         return windows
 
     def _run_backtest(
-        self, start_date: str, end_date: str, interval: str = "5m", **strategy_params
+        self, start_date: str, end_date: str, interval: str, **strategy_params
     ):
         """Run a backtest with given parameters.
 
@@ -1123,7 +1124,7 @@ class ValidationAnalyzer:
             cerebro = bt.Cerebro()
             cerebro.addstrategy(self.strategy_class, **strategy_params)
             # Add 5-minute data
-            cerebro.adddata(data, name="5m")
+            cerebro.adddata(data, name=interval)
             # Add 15-minute resampled data
             cerebro.resampledata(
                 data, timeframe=bt.TimeFrame.Minutes, compression=15, name="15m"

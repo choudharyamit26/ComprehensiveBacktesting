@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_basic_backtest(
-    strategy_class, ticker, start_date, end_date, interval="5m", analyzers=None
+    strategy_class, ticker, start_date, end_date, interval, analyzers=None
 ):
     """Run a basic backtest with default parameters."""
     logger.info(f"Running basic backtest for {ticker}")
@@ -46,8 +46,8 @@ def run_parameter_optimization(
     ticker,
     start_date,
     end_date,
-    interval="5m",
-    n_trials=10,
+    interval,
+    n_trials,
     analyzers=None,
 ):
     """Run parameter optimization analysis."""
@@ -73,7 +73,9 @@ def run_parameter_optimization(
         raise
 
 
-def run_insample_outsample_analysis(strategy_name, ticker, start_date, end_date):
+def run_insample_outsample_analysis(
+    strategy_name, ticker, start_date, end_date, interval
+):
     """Run in-sample/out-of-sample validation analysis."""
     logger.info(f"Running in-sample/out-of-sample analysis for {ticker}")
     print(f"\n=== IN-SAMPLE / OUT-OF-SAMPLE ANALYSIS: {ticker} ===")
@@ -82,7 +84,7 @@ def run_insample_outsample_analysis(strategy_name, ticker, start_date, end_date)
             strategy_name=strategy_name, ticker=ticker
         )
         results = validation_analyzer.in_sample_out_sample_analysis(
-            start_date=start_date, end_date=end_date
+            start_date=start_date, end_date=end_date, interval=interval
         )
         print("\nIn-Sample Performance:")
         print("-" * 60)
@@ -107,7 +109,7 @@ def run_insample_outsample_analysis(strategy_name, ticker, start_date, end_date)
         traceback.print_exc()
         logger.error(f"In-sample/out-of-sample analysis failed: {str(e)}")
         return run_basic_comparison_analysis(
-            strategy_name, ticker, start_date, end_date
+            strategy_name, ticker, start_date, end_date, interval=interval
         )
 
 
@@ -115,13 +117,13 @@ def run_walkforward_analysis(
     ticker,
     start_date,
     end_date,
-    window_days=None,
-    out_days=None,
-    step_days=None,
-    n_trials=20,
-    min_trades=1,
-    strategy_name="EMARSI",
-    interval="5m",  # Default to 5-minute interval for Indian equities
+    window_days,
+    out_days,
+    step_days,
+    n_trials,
+    min_trades,
+    strategy_name,
+    interval,  # Default to 5-minute interval for Indian equities
 ):
     """Run walk-forward analysis."""
     logger.info(f"Running walk-forward analysis for {ticker}")
@@ -169,13 +171,15 @@ def run_walkforward_analysis(
         print(f"Out-of-sample win rate: {summary.get('win_rate_out_sample', 0):.1f}%")
         print(f"Return correlation: {summary.get('correlation', 0):.3f}")
         print(f"Average degradation: {summary.get('avg_degradation', 0):.2f}%")
-
         validation_analyzer.plot_walk_forward_results(results)
         return results
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         logger.error(f"Walk-forward analysis failed: {str(e)}")
         return run_parameter_optimization(
-            strategy_name, ticker, start_date, end_date, n_trials=10
+            strategy_name, ticker, start_date, end_date, n_trials=10, interval=interval
         )
 
 
@@ -197,7 +201,9 @@ def run_comprehensive_validation(strategy_class, ticker, start_date, end_date):
         return run_basic_backtest(strategy_class, ticker, start_date, end_date)
 
 
-def run_basic_comparison_analysis(strategy_name, ticker, start_date, end_date):
+def run_basic_comparison_analysis(
+    strategy_name, ticker, start_date, end_date, interval
+):
     """Run basic strategy comparison."""
     logger.info(f"Running strategy comparison for {ticker}")
     print(f"\n=== STRATEGY COMPARISON ANALYSIS: {ticker} ===")
@@ -234,6 +240,7 @@ def run_basic_comparison_analysis(strategy_name, ticker, start_date, end_date):
                 ticker=ticker,
                 start_date=start_date,
                 end_date=end_date,
+                interval=interval,
                 **params,
             )
             results_comparison[name] = results
@@ -263,7 +270,12 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         basic_results, basic_cerebro = run_basic_backtest(
-            strategy_class, ticker, start_date, end_date
+            strategy_class,
+            ticker,
+            start_date,
+            end_date,
+            interval=interval,
+            analyzers=analyzers,
         )
         results["basic"] = basic_results
         results["basic_cerebro"] = basic_cerebro
@@ -277,7 +289,13 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         opt_results = run_parameter_optimization(
-            strategy_class, ticker, start_date, end_date, n_trials=10
+            strategy_class,
+            ticker,
+            start_date,
+            end_date,
+            n_trials=10,
+            interval=interval,
+            analyzers=analyzers,
         )
         results["optimization"] = opt_results
     except Exception as e:
@@ -286,7 +304,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         validation_results = run_insample_outsample_analysis(
-            strategy_class, ticker, start_date, end_date
+            strategy_class, ticker, start_date, end_date, interval=interval
         )
         results["validation"] = validation_results
     except Exception as e:
@@ -295,7 +313,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         comparison_results = run_basic_comparison_analysis(
-            strategy_class, ticker, start_date, end_date
+            strategy_class, ticker, start_date, end_date, interval=interval
         )
         results["comparison"] = comparison_results
     except Exception as e:
@@ -324,6 +342,7 @@ def run_complete_backtest(
             step_days=step,
             n_trials=20,
             min_trades=1,
+            interval=interval,
         )
         results["walk_forward"] = wf_results
     except Exception as e:
@@ -346,122 +365,4 @@ def run_complete_backtest(
     except Exception as e:
         logger.error(f"Report generation failed: {str(e)}")
 
-    try:
-
-        basic_cerebro.plot(style="candlestick", barup="green", bardown="red")
-        if (
-            "optimization" in results
-            and results["optimization"]
-            and "cerebro" in results["optimization"]
-        ):
-            print("Plotting optimized strategy results...")
-            results["optimization"]["cerebro"].plot(
-                style="candlestick", barup="green", bardown="red"
-            )
-    except Exception as e:
-        logger.error(f"Plotting failed: {str(e)}")
-
     return results
-
-
-# def main():
-#     """Main function for interactive backtesting framework."""
-#     logger.info("Starting Enhanced Backtesting Framework")
-#     print("=== ENHANCED BACKTESTING FRAMEWORK ===\n")
-#     import datetime
-
-#     ticker = input("Enter ticker symbol (default: SBIN.NS): ").strip() or "SBIN.NS"
-#     interval = "5m"  # Default to intraday for Indian equities
-#     end_date = datetime.date.today() - datetime.timedelta(days=2)
-#     start_date = end_date - datetime.timedelta(days=58)
-#     run_basic_backtest(ticker, start_date, end_date)
-#     run_parameter_optimization(strategy_class="EMARSI", ticker=ticker, start_date=start_date, end_date=end_date, n_trials=10)
-#     run_insample_outsample_analysis(ticker, start_date, end_date)
-#     run_walkforward_analysis(ticker, start_date, end_date)
-#     run_comprehensive_validation(ticker, start_date, end_date)
-#     run_complete_backtest(ticker, start_date, end_date)
-#     run_basic_backtest(ticker, start_date, end_date)
-
-#     print("Trying basic fallback...")
-#     test_data = get_data_sync(ticker, start_date, end_date, interval="5m")
-#     if validate_data(test_data):
-#         print("Data is valid. The issue might be with the strategy module.")
-#     else:
-#         print("Data validation failed.")
-
-#     print("\n=== ANALYSIS COMPLETE ===")
-
-
-# def quick_test(ticker):
-#     """Quick test function for rapid development."""
-#     logger.info("Running quick test")
-#     print("=== QUICK TEST ===")
-
-
-#     end_date = datetime.date.today() - datetime.timedelta(days=2)
-#     start_date = end_date - datetime.timedelta(days=58)
-#     results, cerebro = run_backtest(
-#         strategy_class="EMARSI",
-#         ticker=ticker,
-#         start_date=start_date,
-#         end_date=end_date,
-#     )
-#     analyzer = PerformanceAnalyzer(results)
-#     analyzer.print_report()
-
-#     cerebro.plot(style="candlestick", barup="green", bardown="red")
-#     print("Testing data loading...")
-#     end_date = datetime.date.today() - datetime.timedelta(days=2)
-#     start_date = end_date - datetime.timedelta(days=58)
-#     df = preview_data_sync(ticker, start_date, end_date, rows=3)
-#     if df is not None:
-#         is_valid = validate_data(df)
-#         print(f"Data validation: {'PASSED' if is_valid else 'FAILED'}")
-
-
-# if __name__ == "__main__":
-#     print("Welcome to the Enhanced Backtesting Framework!")
-
-#     cerebro = bt.Cerebro()
-#     end_date = datetime.date.today() - datetime.timedelta(days=2)
-#     start_date = end_date - datetime.timedelta(days=58)
-#     data_df = get_data_sync("AAPL", start_date, end_date, interval="5m")
-#     data_5m = bt.feeds.PandasData(
-#         dataname=data_df,
-#         datetime=None,
-#         open="Open",
-#         high="High",
-#         low="Low",
-#         close="Close",
-#         volume="Volume",
-#         openinterest=None,
-#     )
-#     cerebro.addstrategy(get_strategy("EMARSI"))
-#     cerebro.broker.setcash(100000.0)
-#     cerebro.broker.setcommission(commission=0.001)
-#     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe")
-#     cerebro.addanalyzer(bt.analyzers.Calmar, _name="calmar")
-#     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
-#     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
-#     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
-#     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name="timereturn")
-#     cerebro.addanalyzer(bt.analyzers.PyFolio, _name="pyfolio")
-#     cerebro.addanalyzer(bt.analyzers.SQN, _name="sqn")
-#     cerebro.addanalyzer(bt.analyzers.AnnualReturn, _name="annualreturn")
-#     cerebro.addanalyzer(bt.analyzers.Transactions, _name="transactions")
-#     cerebro.addanalyzer(bt.analyzers.PositionsValue, _name="positionsvalue")
-#     # Add 5-minute data
-#     cerebro.adddata(data_5m, name="5m")
-#     # Add 15-minute resampled data
-#     cerebro.resampledata(
-#         data_5m, timeframe=bt.TimeFrame.Minutes, compression=15, name="15m"
-#     )
-#     print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
-#     results = cerebro.run()
-#     print(f"Final Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
-#     analyzer = PerformanceAnalyzer(results)
-#     analyzer.print_report()
-#     plot_choice = input("\nPlot results? (y/n): ").lower().strip()
-#     cerebro.plot(style="candlestick", barup="green", bardown="red")
-
-#     print("\nThank you for using the Enhanced Backtesting Framework!")

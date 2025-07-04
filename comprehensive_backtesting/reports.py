@@ -556,16 +556,16 @@ class PerformanceAnalyzer:
             if "error" not in summary and summary:
                 print("\nSummary Metrics")
                 print("-" * 30)
-                print(f"Initial Cash: ${summary.get('initial_cash', 0):,.2f}")
-                print(f"Final Value: ${summary.get('final_value', 0):,.2f}")
-                print(f"Total Return: {summary.get('total_return_pct', 0):.2f}%")
-                print(f"Annual Return: {summary.get('annual_return_pct', 0):.2f}%")
-                print(f"Sharpe Ratio: {summary.get('sharpe_ratio', 0):.3f}")
-                print(f"Sortino Ratio: {summary.get('sortino_ratio', 0):.3f}")
-                print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0):.2f}%")
-                print(f"Calmar Ratio: {summary.get('calmar_ratio', 0):.3f}")
+                print(f"Initial Cash: ${summary.get('initial_cash', 0):}")
+                print(f"Final Value: ${summary.get('final_value', 0):}")
+                print(f"Total Return: {summary.get('total_return_pct', 0)}%")
+                print(f"Annual Return: {summary.get('annual_return_pct', 0)}%")
+                print(f"Sharpe Ratio: {summary.get('sharpe_ratio', 0)}")
+                print(f"Sortino Ratio: {summary.get('sortino_ratio', 0)}")
+                print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0)}%")
+                print(f"Calmar Ratio: {summary.get('calmar_ratio', 0)}")
                 print(f"SQN: {summary.get('sqn', 0)}")
-                print(f"Profit/Loss: ${summary.get('profit_loss', 0):,.2f}")
+                print(f"Profit/Loss: ${summary.get('profit_loss', 0):}")
 
             trade_analysis = report.get("trade_analysis", {})
             if (
@@ -675,100 +675,6 @@ class PerformanceAnalyzer:
             print(f"Error processing report: {str(e)}")
             logger.error(f"Error printing report: {str(e)}")
             print(f"Error printing report: {str(e)}")
-
-    def plot_performance(self, save_path=None):
-        """Plot performance metrics.
-
-        Args:
-            save_path (str, optional): Path to save the plot.
-        """
-        try:
-            if self.is_dict_input:
-                # For dictionary input, we need to extract data differently
-                resampled_returns = self.processed_results.get("resampled_returns", {})
-                returns_data = resampled_returns.get("resampled_returns_pct", {})
-
-                if not returns_data:
-                    logger.warning(
-                        "No returns data available for plotting from dictionary"
-                    )
-                    print("No returns data available for plotting")
-                    return
-
-                # Convert string dates back to datetime and create series
-                dates = [pd.to_datetime(date) for date in returns_data.keys()]
-                returns = [returns_data[str(date)] for date in sorted(dates)]
-                returns_series = pd.Series(returns, index=sorted(dates))
-
-                # Calculate cumulative returns and basic drawdown
-                cumulative_returns = (1 + returns_series / 100).cumprod() - 1
-                running_max = cumulative_returns.expanding().max()
-                drawdown = (cumulative_returns - running_max) * 100
-
-            else:
-                if self.strategy is None:
-                    raise ValueError("No strategy available")
-
-                timereturn_analyzer = getattr(
-                    self.strategy.analyzers, "timereturn", None
-                )
-                if timereturn_analyzer is None:
-                    raise ValueError("TimeReturn analyzer not available")
-
-                returns = pd.Series(timereturn_analyzer.get_analysis())
-                if returns.empty:
-                    logger.warning("No returns data available for plotting")
-                    print("No returns data available for plotting")
-                    return
-
-                returns_df = pd.DataFrame({"returns": returns})
-                returns_df.index = pd.to_datetime(returns_df.index)
-                cumulative_returns = (1 + returns).cumprod() - 1
-
-                # Calculate drawdown
-                running_max = cumulative_returns.expanding().max()
-                drawdown = (cumulative_returns - running_max) * 100
-
-            # Create the plot
-            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
-            fig.suptitle("Performance Analysis", fontsize=16)
-
-            # Plot cumulative returns
-            ax1.plot(
-                cumulative_returns.index,
-                cumulative_returns * 100,
-                label="Cumulative Return (%)",
-                color="blue",
-                linewidth=2,
-            )
-            ax1.set_ylabel("Cumulative Return (%)")
-            ax1.legend()
-            ax1.grid(True, alpha=0.3)
-
-            # Plot drawdown
-            ax2.fill_between(
-                drawdown.index,
-                drawdown,
-                0,
-                alpha=0.3,
-                color="red",
-                label="Drawdown (%)",
-            )
-            ax2.plot(drawdown.index, drawdown, color="red", linewidth=1)
-            ax2.set_ylabel("Drawdown (%)")
-            ax2.set_xlabel("Date")
-            ax2.legend()
-            ax2.grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            if save_path:
-                plt.savefig(save_path, dpi=300, bbox_inches="tight")
-                logger.info(f"Performance plot saved to {save_path}")
-            plt.show()
-
-        except Exception as e:
-            logger.error(f"Error plotting performance: {str(e)}")
-            print(f"Error plotting performance: {str(e)}")
 
 
 def compare_strategies(strategy_results_dict):

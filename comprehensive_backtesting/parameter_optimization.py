@@ -67,7 +67,7 @@ class OptimizationObjective:
         end_date: str,
         initial_cash: float,
         commission: float,
-        interval: str = "5m",
+        interval,
     ):
         """Initialize optimization objective.
 
@@ -90,7 +90,7 @@ class OptimizationObjective:
         self.end_date = end_date
         self.initial_cash = initial_cash
         self.commission = commission
-        self.interval = getattr(self, "interval", "5m")
+        self.interval = interval
         self.data = get_data_sync(ticker, start_date, end_date, interval=self.interval)
         if self.data is None or self.data.empty:
             raise ValueError(
@@ -134,7 +134,9 @@ class OptimizationObjective:
 
             # Validate results structure
             if not results or not isinstance(results, list) or len(results) == 0:
-                logger.error("Backtest returned empty results")
+                logger.error(
+                    "Backtest returned empty results (possibly due to insufficient data)"
+                )
                 return -999
 
             strategy = results[0]
@@ -228,10 +230,10 @@ def optimize_strategy(
     ticker: str,
     start_date: str,
     end_date: str,
-    n_trials: int = 50,
+    interval: str,
+    n_trials: int,
     initial_cash: float = 100000.0,
     commission: float = 0.00,
-    interval: str = "5m",
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Optimize strategy parameters using Optuna.
@@ -248,7 +250,9 @@ def optimize_strategy(
     Returns:
         Dict: Optimization results including best parameters and value.
     """
-    logger.info(f"Starting parameter optimization for {ticker} with {strategy_class}")
+    logger.info(
+        f"Starting parameter optimization for {ticker} with {strategy_class} on interval {interval}"
+    )
     print(
         f"Optimizing strategy {strategy_class} for {ticker} from {start_date} to {end_date}"
     )
@@ -404,7 +408,7 @@ def analyze_optimization_results(study, save_plots=False):
         return {"error": f"Error analyzing results: {str(e)}"}
 
 
-def quick_optimize(strategy_class, ticker, n_trials):
+def quick_optimize(strategy_class, ticker, n_trials, interval):
     """Quick optimization for testing purposes.
 
     Args:
@@ -429,6 +433,7 @@ def quick_optimize(strategy_class, ticker, n_trials):
             n_trials=n_trials,
             initial_cash=100000.0,
             commission=0.001,
+            interval=interval,
         )
 
         print("\nQuick Optimization Results:")

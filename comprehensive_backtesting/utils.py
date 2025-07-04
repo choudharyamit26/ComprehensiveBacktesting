@@ -30,15 +30,18 @@ DEFAULT_TICKERS = [
 
 def run_backtest(
     strategy_class,
+    interval,
     ticker="AAPL",
     start_date="2022-01-01",
     end_date="2025-06-01",
     initial_cash=100000.0,
     commission=0.001,
-    interval="5m",
     **strategy_params,
 ):
     """Run a backtest with specified parameters."""
+    logger.info(
+        f"Running backtest for {ticker} with strategy {strategy_class} and type {type(strategy_class)}"
+    )
     if isinstance(strategy_class, str):
         strategy_class = get_strategy(strategy_class)
 
@@ -60,10 +63,12 @@ def run_backtest(
     )
 
     if len(data_df) < min_data_points:
-        logger.warning(
+        logger.error(
             f"Insufficient data: {len(data_df)} rows available, "
-            f"{min_data_points} required. Continuing but trades may be limited."
+            f"{min_data_points} required. Skipping backtest."
         )
+        # Return empty results and None cerebro to signal failure upstream
+        return [], None
 
     data = bt.feeds.PandasData(
         dataname=data_df,
@@ -115,7 +120,7 @@ def run_backtest(
         cerebro.addanalyzer(analyzer_class, **params)
 
     # Add 5-minute data
-    cerebro.adddata(data, name="5m")
+    cerebro.adddata(data, name=interval)
 
     print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
     print(f"Data range: {data_df.index.min()} to {data_df.index.max()}")

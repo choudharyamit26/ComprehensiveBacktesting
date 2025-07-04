@@ -33,18 +33,16 @@ from io import BytesIO
 import matplotlib
 from comprehensive_backtesting.parameter_optimization import SortinoRatio
 from comprehensive_backtesting.utils import DEFAULT_TICKERS
-from comprehensive_backtesting.validation import ValidationAnalyzer
 
 matplotlib.use("Agg")
 import logging
 from datetime import datetime, timedelta
 import pytz
-from comprehensive_backtesting.registry import STRATEGY_REGISTRY, get_strategy
+from comprehensive_backtesting.registry import STRATEGY_REGISTRY
 from comprehensive_backtesting.data import get_data_sync
 from comprehensive_backtesting.reports import PerformanceAnalyzer, compare_strategies
 import json
 import numpy as np
-from comprehensive_backtesting.parameter_optimization import optimize_strategy
 from comprehensive_backtesting.backtesting import (
     run_basic_backtest,
     run_complete_backtest,
@@ -59,6 +57,261 @@ logger = logging.getLogger(__name__)
 
 # Set timezone for IST
 IST = pytz.timezone("Asia/Kolkata")
+
+
+def create_parameter_evolution_table(wf_results):
+    """Create a table showing parameter evolution across walk-forward windows."""
+    if not wf_results or "windows" not in wf_results:
+        return pd.DataFrame()
+
+    windows = wf_results["windows"]
+    valid_windows = [w for w in windows if w.get("valid", False)]
+
+    if not valid_windows:
+        return pd.DataFrame()
+
+    # Collect all parameter names across windows
+    all_params = set()
+    for window in valid_windows:
+        if "best_params" in window:
+            all_params |= set(window["best_params"].keys())
+
+    # Create a row for each window
+    rows = []
+    for i, window in enumerate(valid_windows):
+        row = {"Window": i + 1}
+        # Add out-sample performance if available
+        if "out_sample_performance" in window:
+            perf = window["out_sample_performance"].get("summary", {})
+            row["Return (%)"] = perf.get("total_return_pct", 0)
+            row["Sharpe Ratio"] = pd.to_numeric(
+                perf.get("sharpe_ratio"), errors="coerce"
+            )
+            row["Max Drawdown (%)"] = perf.get("max_drawdown_pct", 0)
+
+        # Add parameters
+        params = window.get("best_params", {})
+        for param in all_params:
+            row[param] = params.get(param, None)
+
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def plot_walkforward_summary(wf_results):
+    """Visualize walk-forward analysis summary"""
+    try:
+        if not wf_results or "windows" not in wf_results:
+            return None
+
+        windows = wf_results["windows"]
+        valid_windows = [w for w in windows if w.get("valid", False)]
+
+        if not valid_windows:
+            return None
+
+        # Create subplots: Equity curve + Parameter evolution
+        fig = make_subplots(
+            rows=2,
+            cols=1,
+            subplot_titles=("Combined Equity Curve", "Parameter Evolution"),
+            vertical_spacing=0.1,
+            row_heights=[0.7, 0.3],
+        )
+
+        # 1. Combined equity curve
+        cumulative = 100  # Starting at 100%
+        equity_points = [cumulative]
+        dates = []
+        window_labels = []
+
+        for i, window in enumerate(valid_windows):
+            if (
+                "out_sample_performance" in window
+                and "timereturn" in window["out_sample_performance"]
+            ):
+                equity_data = window["out_sample_performance"]["timereturn"]
+                if isinstance(equity_data, dict):
+                    sorted_dates = sorted(equity_data.keys())
+                    for date in sorted_dates:
+                        ret = equity_data[date]
+                        cumulative *= 1 + ret / 100  # Convert percentage to decimal
+                        equity_points.append(cumulative)
+                        dates.append(date)
+                        window_labels.append(f"Window {i+1}")
+
+        if len(equity_points) > 1:
+            fig.add_trace(
+                go.Scatter(
+                    x=dates,
+                    y=equity_points,
+                    mode="lines",
+                    name="Combined Equity",
+                    line=dict(color="royalblue", width=3),
+                    text=window_labels,
+                    hovertemplate="<b>%{text}</b><br>Date: %{x}<br>Equity: %{y:.2f}<extra></extra>",
+                ),
+                row=1,
+                col=1,
+            )
+
+        # 2. Parameter evolution
+        param_data = {}
+        param_names = set()
+
+        for i, window in enumerate(valid_windows):
+            params = window.get("best_params", {})
+            for param, value in params.items():
+                if param not in param_data:
+                    param_data[param] = []
+                param_data[param].append(value)
+                param_names.add(param)
+
+        param_names = sorted(param_names)
+        window_numbers = list(range(1, len(valid_windows) + 1))
+
+        for param in param_names:
+            if param in param_data and len(param_data[param]) == len(valid_windows):
+                fig.add_trace(
+                    go.Scatter(
+                        x=window_numbers,
+                        y=param_data[param],
+                        mode="lines+markers",
+                        name=param,
+                    ),
+                    row=2,
+                    col=1,
+                )
+
+        # Add window annotations
+        for i in range(len(valid_windows)):
+            fig.add_vline(x=i + 1, line_dash="dot", line_color="gray", row=2, col=1)
+
+        fig.update_layout(
+            title="Walk-Forward Analysis Summary", height=800, showlegend=True
+        )
+
+        fig.update_yaxes(title_text="Equity Value", row=1, col=1)
+        fig.update_yaxes(title_text="Parameter Value", row=2, col=1)
+        fig.update_xaxes(title_text="Window Number", row=2, col=1)
+
+        return fig
+
+    except Exception as e:
+        logger.error(f"Error creating walk-forward summary plot: {e}")
+        return None
+
+
+def plot_composite_backtest_results(results, data):
+    """Visualize all backtest phases in single chart"""
+    try:
+        fig = go.Figure()
+
+        # Add price data
+        fig.add_trace(
+            go.Scatter(
+                x=data.index,
+                y=data["Close"],
+                mode="lines",
+                name="Price",
+                line=dict(color="rgba(100,100,100,0.5)"),
+                visible="legendonly",
+            )
+        )
+
+        # Basic strategy equity
+        if "basic" in results and results["basic"]:
+            strategy = get_first_strategy(results["basic"])
+            if hasattr(strategy, "analyzers") and hasattr(
+                strategy.analyzers, "timereturn"
+            ):
+                equity_data = strategy.analyzers.timereturn.get_analysis()
+                if equity_data:
+                    dates = sorted(equity_data.keys())
+                    values = [equity_data[d] for d in dates]
+                    cumulative = (
+                        np.cumprod([1 + v / 100 for v in values]) * 100
+                    )  # Convert % to decimal
+                    fig.add_trace(
+                        go.Scatter(
+                            x=dates,
+                            y=cumulative,
+                            mode="lines",
+                            name="Basic Strategy",
+                            line=dict(color="blue", width=2),
+                        )
+                    )
+
+        # Optimized strategy equity
+        if (
+            "optimization" in results
+            and "results" in results["optimization"]
+            and results["optimization"]["results"]
+        ):
+            strategy = get_first_strategy(results["optimization"]["results"])
+            if hasattr(strategy, "analyzers") and hasattr(
+                strategy.analyzers, "timereturn"
+            ):
+                equity_data = strategy.analyzers.timereturn.get_analysis()
+                if equity_data:
+                    dates = sorted(equity_data.keys())
+                    values = [equity_data[d] for d in dates]
+                    cumulative = np.cumprod([1 + v / 100 for v in values]) * 100
+                    fig.add_trace(
+                        go.Scatter(
+                            x=dates,
+                            y=cumulative,
+                            mode="lines",
+                            name="Optimized Strategy",
+                            line=dict(color="green", width=2),
+                        )
+                    )
+
+        # Walk-forward equity
+        if "walk_forward" in results and "windows" in results["walk_forward"]:
+            windows = results["walk_forward"]["windows"]
+            valid_windows = [w for w in windows if w.get("valid", False)]
+
+            for i, window in enumerate(valid_windows):
+                if (
+                    "out_sample_performance" in window
+                    and "timereturn" in window["out_sample_performance"]
+                ):
+                    equity_data = window["out_sample_performance"]["timereturn"]
+                    if equity_data:
+                        dates = sorted(equity_data.keys())
+                        values = [equity_data[d] for d in dates]
+                        cumulative = np.cumprod([1 + v / 100 for v in values]) * 100
+                        fig.add_trace(
+                            go.Scatter(
+                                x=dates,
+                                y=cumulative,
+                                mode="lines",
+                                name=f"WF Window {i+1}",
+                                line=dict(width=1.5, dash="dot"),
+                            )
+                        )
+
+        fig.update_layout(
+            title="Complete Backtest - Strategy Comparison",
+            xaxis_title="Date",
+            yaxis_title="Equity Value (Indexed to 100)",
+            legend_title="Strategies",
+            hovermode="x unified",
+            height=600,
+        )
+
+        return fig
+
+    except Exception as e:
+        logger.error(f"Error creating composite plot: {e}")
+        return None
+
+
+# ---------------------
+# EXISTING FUNCTIONALITY (with integrated visualizations)
+# ---------------------
 
 
 def load_tickers_from_file(file_path="tickers.txt"):
@@ -995,13 +1248,8 @@ def extract_indicator_values_from_strategy(
             try:
                 attr = getattr(strategy_result, attr_name)
 
-                # Check if it's an indicator by looking for lines attribute
-                if (
-                    hasattr(attr, "lines")
-                    and hasattr(attr, "_clock")
-                    and hasattr(attr, "_owner")
-                    and callable(getattr(attr, "__call__", None))
-                ):
+                # Check if it's an indicator instance
+                if isinstance(attr, bt.Indicator):
 
                     indicator_name = attr_name
 
@@ -1909,8 +2157,8 @@ def create_strategy_comparison_table(basic_report, opt_report):
             ),
             (
                 "Sharpe Ratio",
-                basic_summary.get("sharpe_ratio", 0),
-                opt_summary.get("sharpe_ratio", 0),
+                pd.to_numeric(basic_summary.get("sharpe_ratio"), errors="coerce"),
+                pd.to_numeric(opt_summary.get("sharpe_ratio"), errors="coerce"),
             ),
             (
                 "Max Drawdown (%)",
@@ -2131,7 +2379,7 @@ def complete_backtest(
     user_timeframe=None,
     user_analyzers=None,
 ):
-    """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
+    """Run a full demonstration of backtest, optimization, and walk-forward analysis with enhanced visuals"""
     st.header("Complete Backtest Demonstration")
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -2203,7 +2451,213 @@ def complete_backtest(
         status_text.text("Complete backtest finished!")
         st.toast("Backtesting complete")
 
-        # Display results
+        # NEW: Composite visualization
+        st.subheader("Strategy Comparison")
+        composite_fig = plot_composite_backtest_results(results, data)
+        if composite_fig:
+            st.plotly_chart(composite_fig, use_container_width=True)
+        else:
+            st.warning("Could not generate composite strategy comparison")
+
+        # NEW: Parameter Evolution for Walk-Forward
+        if "walk_forward" in results:
+            st.subheader("Walk-Forward Parameter Evolution")
+            param_evolution_df = create_parameter_evolution_table(
+                results["walk_forward"]
+            )
+            if not param_evolution_df.empty:
+                st.dataframe(param_evolution_df, use_container_width=True)
+
+                # Export parameter evolution
+                if st.button("Export Parameter Evolution Table"):
+                    csv_data = param_evolution_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download as CSV",
+                        data=csv_data,
+                        file_name=f"{ticker}_parameter_evolution.csv",
+                        mime="text/csv",
+                    )
+            else:
+                st.info("No parameter evolution data available for walk-forward")
+
+        # NEW: Composite Strategy Comparison
+        st.subheader("Overall Strategy Comparison")
+        if (
+            "basic" in results
+            and "optimization" in results
+            and "walk_forward" in results
+        ):
+            # Create comparison data
+            comparison_data = []
+
+            # Basic strategy
+            import numpy as np
+
+            basic_analyzer = PerformanceAnalyzer(results["basic"])
+            basic_report = basic_analyzer.generate_full_report()
+            basic_summary = basic_report.get("summary", {})
+            basic_trades = basic_report.get("trade_analysis", {})
+            comparison_data.append(
+                {
+                    "Strategy": "Basic",
+                    "Return (%)": basic_summary.get("total_return_pct", np.nan),
+                    "Sharpe Ratio": pd.to_numeric(
+                        basic_summary.get("sharpe_ratio"), errors="coerce"
+                    ),
+                    "Max Drawdown (%)": basic_summary.get("max_drawdown_pct", np.nan),
+                    "Total Trades": basic_trades.get("total_trades", np.nan),
+                }
+            )
+
+            # Optimized strategy
+            opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
+            opt_report = opt_analyzer.generate_full_report()
+            opt_summary = opt_report.get("summary", {})
+            opt_trades = opt_report.get("trade_analysis", {})
+            comparison_data.append(
+                {
+                    "Strategy": "Optimized",
+                    "Return (%)": opt_summary.get("total_return_pct", np.nan),
+                    "Sharpe Ratio": pd.to_numeric(
+                        opt_summary.get("sharpe_ratio"), errors="coerce"
+                    ),
+                    "Max Drawdown (%)": opt_summary.get("max_drawdown_pct", np.nan),
+                    "Total Trades": opt_trades.get("total_trades", np.nan),
+                }
+            )
+
+            # Walk-forward strategy (last window)
+            wf_window = results["walk_forward"]["windows"][-1]
+            logger.info(f"WF Window:{wf_window}")
+            wf_summary = wf_window.get("summary", {})
+
+            def safe_float(val):
+                import numpy as np
+
+                try:
+                    if val is None or (isinstance(val, float) or isinstance(val, int)):
+                        return val
+                    # Accept np.float64, int, float, or None
+                    if isinstance(val, str):
+                        # If it's 'N/A' or similar, return np.nan
+                        if val.strip().upper() in [
+                            "N/A",
+                            "NA",
+                            "NONE",
+                            "NULL",
+                            "-",
+                            "",
+                        ]:
+                            return np.nan
+                        return float(val)
+                    return float(val)
+                except Exception:
+                    return np.nan
+
+            trade_analysis = wf_summary.get("trade_analysis", {})
+            total_trades = (
+                trade_analysis.get("total_trades", np.nan)
+                if isinstance(trade_analysis, dict)
+                else np.nan
+            )
+            comparison_data.append(
+                {
+                    "Strategy": "Walk-Forward",
+                    "Return (%)": safe_float(
+                        wf_summary.get("total_return_pct", np.nan)
+                    ),
+                    "Sharpe Ratio": safe_float(wf_summary.get("sharpe_ratio", np.nan)),
+                    "Max Drawdown (%)": safe_float(
+                        wf_summary.get("max_drawdown_pct", np.nan)
+                    ),
+                    "Total Trades": safe_float(total_trades),
+                }
+            )
+
+            # Create comparison table
+            comparison_df = pd.DataFrame(comparison_data)
+            st.dataframe(comparison_df, use_container_width=True)
+
+            # Create comparison chart
+            fig = make_subplots(
+                rows=2,
+                cols=2,
+                subplot_titles=(
+                    "Return (%)",
+                    "Sharpe Ratio",
+                    "Max Drawdown (%)",
+                    "Total Trades",
+                ),
+                vertical_spacing=0.15,
+            )
+
+            strategies = comparison_df["Strategy"]
+
+            # Return
+            fig.add_trace(
+                go.Bar(
+                    x=strategies,
+                    y=comparison_df["Return (%)"],
+                    name="Return (%)",
+                    text=comparison_df["Return (%)"].apply(lambda x: f"{x}%"),
+                    textposition="auto",
+                ),
+                row=1,
+                col=1,
+            )
+
+            # Sharpe
+            fig.add_trace(
+                go.Bar(
+                    x=strategies,
+                    y=comparison_df["Sharpe Ratio"],
+                    name="Sharpe Ratio",
+                    text=comparison_df["Sharpe Ratio"].apply(lambda x: f"{x}"),
+                    textposition="auto",
+                ),
+                row=1,
+                col=2,
+            )
+
+            # Drawdown
+            fig.add_trace(
+                go.Bar(
+                    x=strategies,
+                    y=comparison_df["Max Drawdown (%)"],
+                    name="Max Drawdown (%)",
+                    text=comparison_df["Max Drawdown (%)"].apply(lambda x: f"{x}%"),
+                    textposition="auto",
+                ),
+                row=2,
+                col=1,
+            )
+
+            # Trades
+            fig.add_trace(
+                go.Bar(
+                    x=strategies,
+                    y=comparison_df["Total Trades"],
+                    name="Total Trades",
+                    text=comparison_df["Total Trades"],
+                    textposition="auto",
+                ),
+                row=2,
+                col=2,
+            )
+
+            fig.update_layout(
+                title="Strategy Comparison", height=600, showlegend=False, hovermode="x"
+            )
+
+            # Add axis titles
+            fig.update_yaxes(title_text="Return (%)", row=1, col=1)
+            fig.update_yaxes(title_text="Sharpe Ratio", row=1, col=2)
+            fig.update_yaxes(title_text="Max Drawdown (%)", row=2, col=1)
+            fig.update_yaxes(title_text="Total Trades", row=2, col=2)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Display results for each phase
         if "basic" in results:
             st.subheader("Basic Backtest Results")
             basic_analyzer = PerformanceAnalyzer(results["basic"])
@@ -2221,6 +2675,29 @@ def complete_backtest(
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
+
+            # NEW: Trades table for basic strategy
+            st.write("### 💰 Basic Strategy Trades")
+            try:
+                trades_df, trades_error = create_trades_table(results["basic"], data)
+                if trades_error:
+                    st.warning(f"Could not create trades table: {trades_error}")
+                elif not trades_df.empty:
+                    st.dataframe(trades_df, use_container_width=True)
+
+                    # Export trades table
+                    if st.button("Export Basic Trades Table"):
+                        csv_data = trades_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download as CSV",
+                            data=csv_data,
+                            file_name=f"{ticker}_basic_trades.csv",
+                            mime="text/csv",
+                        )
+                else:
+                    st.info("No trades executed by the basic strategy")
+            except Exception as e:
+                st.error(f"Error creating trades table: {str(e)}")
 
         if "optimization" in results:
             st.subheader("Optimization Results")
@@ -2246,9 +2723,58 @@ def complete_backtest(
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
 
+            # NEW: Trades table for optimized strategy
+            st.write("### 💰 Optimized Strategy Trades")
+            try:
+                trades_df, trades_error = create_trades_table(
+                    results["optimization"]["results"], data
+                )
+                if trades_error:
+                    st.warning(f"Could not create trades table: {trades_error}")
+                elif not trades_df.empty:
+                    st.dataframe(trades_df, use_container_width=True)
+
+                    # Export trades table
+                    if st.button("Export Optimized Trades Table"):
+                        csv_data = trades_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download as CSV",
+                            data=csv_data,
+                            file_name=f"{ticker}_optimized_trades.csv",
+                            mime="text/csv",
+                        )
+                else:
+                    st.info("No trades executed by the optimized strategy")
+            except Exception as e:
+                st.error(f"Error creating trades table: {str(e)}")
+
+            # NEW: Best Parameters Table
+            st.write("### 🎯 Optimized Parameters")
+            best_params_info = display_best_parameters(results["optimization"])
+            if "error" not in best_params_info:
+                params_df = create_parameters_table(best_params_info)
+                if not params_df.empty:
+                    st.dataframe(params_df, use_container_width=True)
+
+                    # Export parameters table
+                    if st.button("Export Optimized Parameters"):
+                        csv_data = params_df.to_csv(index=False)
+                        st.download_button(
+                            label="Download as CSV",
+                            data=csv_data,
+                            file_name=f"{ticker}_optimized_parameters.csv",
+                            mime="text/csv",
+                        )
+                else:
+                    st.info("No parameter data available")
+            else:
+                st.warning(
+                    "Could not display best parameters: "
+                    + best_params_info.get("error", "Unknown error")
+                )
+
         if "walk_forward" in results:
             st.subheader("Walk-Forward Analysis Results")
-            print("WFFFFFFF====", results)
             wf_analyzer = PerformanceAnalyzer(
                 results["walk_forward"]["windows"][-1]["summary"]
             )
@@ -2266,27 +2792,74 @@ def complete_backtest(
             if equity_fig:
                 st.plotly_chart(equity_fig, use_container_width=True)
 
-        # Show comparison if available
-        if "comparison" in results:
-            st.subheader("Strategy Comparison")
-            comparison_df = compare_strategies(results["comparison"])
-            st.dataframe(comparison_df)
+            # NEW: Trades table for last walk-forward window
+            st.write("### 💰 Walk-Forward Strategy Trades (Last Window)")
+            last_window = results["walk_forward"]["windows"][-1]
+            if last_window.get("valid", False):
+                try:
+                    out_sample_data = get_data_sync(
+                        ticker,
+                        last_window["out_sample_start"],
+                        last_window["out_sample_end"],
+                        interval=timeframe,
+                    )
+                    trades_df, trades_error = create_trades_table(
+                        last_window["out_sample_strategy"], out_sample_data
+                    )
+                    if trades_error:
+                        st.warning(f"Could not create trades table: {trades_error}")
+                    elif not trades_df.empty:
+                        st.dataframe(trades_df, use_container_width=True)
+
+                        # Export trades table
+                        if st.button("Export Walk-Forward Trades Table"):
+                            csv_data = trades_df.to_csv(index=False)
+                            st.download_button(
+                                label="Download as CSV",
+                                data=csv_data,
+                                file_name=f"{ticker}_walkforward_trades.csv",
+                                mime="text/csv",
+                            )
+                    else:
+                        st.info("No trades executed in last window")
+                except Exception as e:
+                    st.error(f"Error creating trades table: {str(e)}")
+
+            # NEW: Best Parameters for Last Window
+            st.write("### 🎯 Last Window Best Parameters")
+            if last_window.get("best_params"):
+                params_df = pd.DataFrame(
+                    list(last_window["best_params"].items()),
+                    columns=["Parameter", "Value"],
+                )
+                st.dataframe(params_df, use_container_width=True)
+
+                # Export parameters table
+                if st.button("Export Walk-Forward Parameters"):
+                    csv_data = params_df.to_csv(index=False)
+                    st.download_button(
+                        label="Download as CSV",
+                        data=csv_data,
+                        file_name=f"{ticker}_walkforward_parameters.csv",
+                        mime="text/csv",
+                    )
 
         # Show summary metrics
         st.subheader("Summary Metrics")
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             if "basic" in results:
                 st.metric(
                     "Basic Return",
                     f"{basic_report.get('summary', {}).get('total_return_pct', 0):.2f}%",
                 )
+        with col2:
             if "optimization" in results:
                 st.metric(
                     "Optimized Return",
                     f"{opt_report.get('summary', {}).get('total_return_pct', 0):.2f}%",
                 )
-        with col2:
+        with col3:
             if "walk_forward" in results:
                 st.metric(
                     "Walk-Forward Return",
@@ -2534,7 +3107,7 @@ def main():
         n_trials = 10
 
     # Timeframe selection
-    timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m"])
+    timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "4h", "1d"])
 
     # Analyzer selection
     available_analyzers = {
@@ -3125,9 +3698,9 @@ def main():
                         file_name=f"{ticker}_optimization_report.json",
                         mime="application/json",
                     )
+
             elif analysis_type == "Walk-Forward":
                 status_text.text("Starting walk-forward analysis...")
-                # Use strategy name instead of class
                 results = run_walkforward_analysis(
                     ticker=ticker,
                     start_date=start_date.strftime("%Y-%m-%d"),
@@ -3137,90 +3710,68 @@ def main():
                     step_days=7,
                     n_trials=n_trials,
                     interval=timeframe,
-                    strategy_name=selected_strategy,  # Changed from strategy_class
+                    strategy_name=selected_strategy,
+                    min_trades=1,
                 )
                 progress_bar.progress(100)
                 status_text.text("Walk-forward analysis complete!")
-                st.toast("Backtesting complete")
+                st.toast("Walk-forward analysis complete")
 
-                # NEW: Comprehensive Walk-Forward Results Display
-                if results and "windows" in results and results["windows"]:
-                    st.subheader("📊 Walk-Forward Analysis Results")
+                # Check for valid windows
+                valid_windows = [w for w in results["windows"] if w.get("valid", False)]
+                if not valid_windows:
+                    st.warning(
+                        "No valid windows found in walk-forward analysis. This could be due to "
+                        "insufficient data, no trades executed, or strategy configuration issues."
+                    )
+                    st.info(
+                        "Recommendations:\n"
+                        "- Check if data is available for the selected date range.\n"
+                        "- Adjust strategy parameters to allow for trades (e.g., widen RSI bands or adjust EMA periods).\n"
+                        "- Use longer date ranges or different timeframes to increase trading opportunities."
+                    )
+                else:
+                    # Walk-Forward Summary Visualization
+                    st.subheader("📊 Walk-Forward Analysis Summary")
 
-                    # 1. Display overall summary metrics
-                    st.write("### 🔍 Overall Walk-Forward Metrics")
-                    col1, col2, col3 = st.columns(3)
-
-                    with col1:
-                        st.metric("Total Windows", len(results["windows"]))
-                        st.metric(
-                            "Valid Windows",
-                            sum(1 for w in results["windows"] if w.get("valid", False)),
+                    # 1. Combined equity curve and parameter evolution
+                    wf_summary_fig = plot_walkforward_summary(results)
+                    if wf_summary_fig:
+                        st.plotly_chart(wf_summary_fig, use_container_width=True)
+                    else:
+                        st.warning(
+                            "Could not generate walk-forward summary visualization"
                         )
 
-                    with col2:
-                        avg_return = np.mean(
-                            [
-                                w["out_sample_performance"]["summary"][
-                                    "total_return_pct"
-                                ]
-                                for w in results["windows"]
-                                if w.get("valid", False)
-                            ]
-                        )
-                        st.metric("Average Return", f"{avg_return:.2f}%")
-
-                    with col3:
-                        valid_windows = [
-                            w for w in results["windows"] if w.get("valid", False)
-                        ]
-                        if valid_windows:
-                            best_window = max(
-                                valid_windows,
-                                key=lambda w: w["out_sample_performance"]["summary"][
-                                    "total_return_pct"
-                                ],
-                            )
-                            st.metric(
-                                "Best Window Return",
-                                f"{best_window['out_sample_performance']['summary']['total_return_pct']:.2f}%",
-                            )
-                        else:
-                            st.metric("Best Window Return", "N/A")
-
-                    # 2. Show parameter evolution
+                    # 2. Parameter evolution table
                     st.write("### ⚙️ Parameter Evolution Across Windows")
-                    param_data = []
-                    for i, window in enumerate(results["windows"]):
-                        if window.get("valid", False):
-                            params = window.get("best_params", {})
-                            param_data.append(
-                                {
-                                    "Window": i + 1,
-                                    **params,
-                                    "Return": window["out_sample_performance"][
-                                        "summary"
-                                    ]["total_return_pct"],
-                                }
+                    param_evolution_df = create_parameter_evolution_table(results)
+                    if not param_evolution_df.empty:
+                        styled_df = param_evolution_df.style.highlight_max(
+                            subset=["Return (%)"], color="lightgreen"
+                        ).format("{:.2f}", subset=["Return (%)", "Max Drawdown (%)"])
+                        st.dataframe(styled_df, use_container_width=True)
+
+                        if st.button("Export Parameter Evolution"):
+                            csv_data = param_evolution_df.to_csv(index=False)
+                            st.download_button(
+                                label="Download as CSV",
+                                data=csv_data,
+                                file_name=f"{ticker}_parameter_evolution.csv",
+                                mime="text/csv",
                             )
-                    param_df = pd.DataFrame(param_data)
-                    if not param_df.empty:
-                        st.dataframe(
-                            param_df.style.background_gradient(
-                                cmap="RdYlGn", subset=["Return"]
-                            ),
-                            use_container_width=True,
-                        )
+                    else:
+                        st.info("No parameter evolution data available")
 
                     # 3. Display each window in expanders
                     st.write("### 📅 Detailed Window Analysis")
                     for i, window in enumerate(results["windows"]):
                         if window.get("valid", False):
                             with st.expander(
-                                f"Window {i+1} ({window['out_sample_start']} to {window['out_sample_end']})",
+                                f"Window {i+1} (In: {window['in_sample_start']} to {window['in_sample_end']}, "
+                                f"Out: {window['out_sample_start']} to {window['out_sample_end']})",
                                 expanded=False,
                             ):
-                                # Window summary
                                 col1, col2 = st.columns(2)
 
                                 with col1:
@@ -3228,76 +3779,77 @@ def main():
                                     st.write(f"Start: {window['in_sample_start']}")
                                     st.write(f"End: {window['in_sample_end']}")
                                     st.write(f"Optimization Trials: {n_trials}")
+                                    st.write("**Best Parameters**")
+                                    if window.get("best_params"):
+                                        for param, value in window[
+                                            "best_params"
+                                        ].items():
+                                            st.code(f"{param}: {value}")
 
                                 with col2:
                                     st.write("**Out-Sample Performance**")
                                     st.metric(
                                         "Return",
-                                        f"{window['out_sample_performance']['summary']['total_return_pct']:.2f}%",
+                                        f"{window['summary']['total_return_pct']:.2f}%",
                                     )
+                                    sharpe_val = window["risk_metrics"]["sharpe_ratio"]
+                                    sharpe_str = (
+                                        f"{sharpe_val:.2f}"
+                                        if isinstance(sharpe_val, (int, float))
+                                        else str(sharpe_val)
+                                    )
+                                    st.metric("Sharpe Ratio", sharpe_str)
                                     st.metric(
-                                        "Sharpe Ratio",
-                                        f"{window['out_sample_performance']['risk_metrics']['sharpe_ratio']:.2f}",
+                                        "Max Drawdown",
+                                        f"{window['summary']['max_drawdown_pct']:.2f}%",
                                     )
 
-                                # Show best parameters
-                                st.write("**🎯 Best Parameters**")
                                 if window.get("best_params"):
-                                    for param, value in window["best_params"].items():
-                                        st.code(f"{param}: {value}")
+                                    st.write("### 🎯 Best Parameters")
+                                    params_df = pd.DataFrame(
+                                        list(window["best_params"].items()),
+                                        columns=["Parameter", "Value"],
+                                    )
+                                    st.dataframe(params_df, use_container_width=True)
 
-                                # Plot out-sample equity curve
                                 st.write("### 📈 Out-Sample Equity Curve")
-                                equity_data = window["out_sample_performance"].get(
-                                    "timereturn", {}
-                                )
+                                equity_data = window.get("timereturn", {})
                                 equity_fig = plot_equity_curve(equity_data)
                                 if equity_fig:
                                     st.plotly_chart(
                                         equity_fig, use_container_width=True
                                     )
 
-                                # Show trades table for out-sample period
-                                st.write("### 💰 Out-Sample Trades")
+                                st.write("### 💰 Detailed Trades Table")
                                 try:
-                                    # Get strategy and data for this window
-                                    strategy_obj = window.get("out_sample_strategy")
                                     out_sample_data = get_data_sync(
                                         ticker,
                                         window["out_sample_start"],
                                         window["out_sample_end"],
                                         interval=timeframe,
                                     )
-
-                                    if strategy_obj and not out_sample_data.empty:
-                                        trades_df, trades_error = create_trades_table(
-                                            strategy_obj, out_sample_data
+                                    trades_df, trades_error = create_trades_table(
+                                        window["out_sample_strategy"], out_sample_data
+                                    )
+                                    if trades_error:
+                                        st.warning(
+                                            f"Could not create trades table: {trades_error}"
                                         )
-                                        if trades_error:
-                                            st.warning(
-                                                f"Could not create trades table: {trades_error}"
-                                            )
-                                        elif not trades_df.empty:
-                                            st.dataframe(
-                                                trades_df, use_container_width=True
-                                            )
-                                        else:
-                                            st.info(
-                                                "No trades executed in this out-sample period"
-                                            )
+                                    elif not trades_df.empty:
+                                        st.dataframe(
+                                            trades_df, use_container_width=True
+                                        )
                                     else:
-                                        st.warning("Missing data for trades table")
+                                        st.info(
+                                            "No trades executed in this out-sample period"
+                                        )
                                 except Exception as e:
                                     st.error(f"Error creating trades table: {str(e)}")
 
-                                # Trade analysis summary
                                 st.write("### 📊 Trade Statistics")
-                                if "trade_analysis" in window["out_sample_performance"]:
-                                    ta = window["out_sample_performance"][
-                                        "trade_analysis"
-                                    ]
+                                if "trade_analysis" in window:
+                                    ta = window["trade_analysis"]
                                     col1, col2, col3 = st.columns(3)
-
                                     with col1:
                                         st.metric(
                                             "Total Trades", ta.get("total_trades", 0)
@@ -3306,7 +3858,6 @@ def main():
                                             "Win Rate",
                                             f"{ta.get('win_rate_percent', 0):.1f}%",
                                         )
-
                                     with col2:
                                         st.metric(
                                             "Profit Factor",
@@ -3316,7 +3867,6 @@ def main():
                                             "Avg Win/Avg Loss",
                                             f"{ta.get('avg_win_avg_loss_ratio', 0):.2f}",
                                         )
-
                                     with col3:
                                         st.metric(
                                             "Max Consecutive Wins",
@@ -3327,27 +3877,90 @@ def main():
                                             ta.get("consecutive_losses", 0),
                                         )
 
+                                if (
+                                    i > 0
+                                    and "out_sample_strategy"
+                                    in results["windows"][i - 1]
+                                ):
+                                    st.write(
+                                        "### 🔄 Strategy Comparison with Previous Window"
+                                    )
+                                    prev_window = results["windows"][i - 1]
+                                    if prev_window.get("valid", False):
+                                        comparison_data = [
+                                            {
+                                                "Window": f"Current (Window {i+1})",
+                                                "Return (%)": window["summary"].get(
+                                                    "total_return_pct", 0
+                                                ),
+                                                "Sharpe Ratio": window[
+                                                    "risk_metrics"
+                                                ].get("sharpe_ratio", 0),
+                                                "Max Drawdown (%)": window[
+                                                    "summary"
+                                                ].get("max_drawdown_pct", 0),
+                                            },
+                                            {
+                                                "Window": f"Previous (Window {i})",
+                                                "Return (%)": prev_window[
+                                                    "summary"
+                                                ].get("total_return_pct", 0),
+                                                "Sharpe Ratio": prev_window[
+                                                    "risk_metrics"
+                                                ].get("sharpe_ratio", 0),
+                                                "Max Drawdown (%)": prev_window[
+                                                    "summary"
+                                                ].get("max_drawdown_pct", 0),
+                                            },
+                                        ]
+                                        comparison_df = pd.DataFrame(comparison_data)
+                                        st.dataframe(
+                                            comparison_df, use_container_width=True
+                                        )
+
+                                        fig = go.Figure()
+                                        for row in comparison_df.to_dict("records"):
+                                            fig.add_trace(
+                                                go.Bar(
+                                                    x=[
+                                                        "Return (%)",
+                                                        "Sharpe Ratio",
+                                                        "Max Drawdown (%)",
+                                                    ],
+                                                    y=[
+                                                        row["Return (%)"],
+                                                        row["Sharpe Ratio"],
+                                                        row["Max Drawdown (%)"],
+                                                    ],
+                                                    name=row["Window"],
+                                                    text=[
+                                                        f"{row['Return (%)']:.2f}%",
+                                                        f"{row['Sharpe Ratio']:.2f}",
+                                                        f"{row['Max Drawdown (%)']:.2f}%",
+                                                    ],
+                                                )
+                                            )
+                                        fig.update_layout(
+                                            title="Window Performance Comparison",
+                                            barmode="group",
+                                            height=500,
+                                        )
+                                        st.plotly_chart(fig, use_container_width=True)
+
                     # 4. Combined equity curve visualization
                     st.write("### 📈 Combined Equity Curve")
                     cumulative_return = 100
                     equity_points = [cumulative_return]
                     dates = []
-
                     for window in results["windows"]:
                         if window.get("valid", False):
-                            equity = window["out_sample_performance"].get(
-                                "timereturn", {}
-                            )
+                            equity = window.get("timereturn", {})
                             if equity:
-                                # Calculate cumulative returns
                                 returns = list(equity.values())
                                 for ret in returns:
                                     cumulative_return *= 1 + ret / 100
                                     equity_points.append(cumulative_return)
-
-                                # Add dates for plotting
                                 dates.extend(sorted(equity.keys()))
-
                     if len(equity_points) > 1:
                         fig = go.Figure()
                         fig.add_trace(
@@ -3375,8 +3988,6 @@ def main():
                             file_name=f"{ticker}_walkforward_report.json",
                             mime="application/json",
                         )
-                else:
-                    st.warning("No valid walk-forward windows available")
 
             elif analysis_type == "Complete Backtest":
                 complete_backtest()

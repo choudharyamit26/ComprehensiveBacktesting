@@ -13,7 +13,7 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
 
 
-async def get_data(ticker, start_date, end_date, interval="5m"):
+async def get_data(ticker, start_date, end_date, interval):
     """
     Fetch historical stock data from Yahoo Finance asynchronously.
 
@@ -40,21 +40,33 @@ async def get_data(ticker, start_date, end_date, interval="5m"):
                 start_date = (end_dt - pd.Timedelta(days=max_days)).strftime("%Y-%m-%d")
 
         # Download data from Yahoo Finance asynchronously
-        # df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
-        ticker_obj = yf.Ticker(ticker)
-        df = await asyncio.to_thread(ticker_obj.history, period="60d", interval="5m")
+        logger.info(
+            f"Fetching data for {ticker} from {start_date} to {end_date} with interval {interval}"
+        )
+        if interval == "1d":
+            df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
+        else:
+            ticker_obj = yf.Ticker(ticker)
+            df = await asyncio.to_thread(
+                ticker_obj.history, period="60d", interval=interval
+            )
         # Check if DataFrame is empty
         if df.empty:
             raise ValueError(
                 f"No data found for ticker {ticker} between {start_date} and {end_date} (interval={interval})"
             )
 
-        # Reset index to make Date a column
+        # Reset index to make Date/Datetime a column if needed
         df.reset_index(inplace=True)
 
-        # Handle the case where Date might be in the index
-        if "Datetime" not in df.columns and df.index.name == "Datetime":
-            df.reset_index(inplace=True)
+        # Accept both 'Date' and 'Datetime' as index names, and always rename to 'Datetime' for consistency
+        if "Datetime" not in df.columns and "Date" not in df.columns:
+            index_name = str(df.index.name).lower()
+            if index_name in ["datetime", "date"]:
+                df.reset_index(inplace=True)
+                df.rename(columns={df.columns[0]: "Datetime"}, inplace=True)
+            else:
+                raise ValueError("No Date column found in the data")
 
         # Handle MultiIndex columns (common with yfinance)
         if isinstance(df.columns, pd.MultiIndex):
@@ -91,15 +103,20 @@ async def get_data(ticker, start_date, end_date, interval="5m"):
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
 
-        # Ensure Date column exists and is properly formatted
+        # Ensure there is a 'Datetime' column (rename 'Date' if needed)
         if "Datetime" not in df.columns:
-            if df.index.name == "Datetime" or "datetime" in str(df.index.name).lower():
-                df.reset_index(inplace=True)
-                df.rename(columns={df.columns[0]: "Datetime"}, inplace=True)
+            if "Date" in df.columns:
+                df.rename(columns={"Date": "Datetime"}, inplace=True)
             else:
-                raise ValueError("No Date column found in the data")
+                # Try to reset index if index is 'date' or 'datetime'
+                index_name = str(df.index.name).lower()
+                if index_name in ["datetime", "date"]:
+                    df.reset_index(inplace=True)
+                    df.rename(columns={df.columns[0]: "Datetime"}, inplace=True)
+                else:
+                    raise ValueError("No Date column found in the data")
 
-        # Convert Date to datetime if it's not already
+        # Convert 'Datetime' to datetime if it's not already
         if not pd.api.types.is_datetime64_any_dtype(df["Datetime"]):
             df["Datetime"] = pd.to_datetime(df["Datetime"])
 
@@ -107,7 +124,9 @@ async def get_data(ticker, start_date, end_date, interval="5m"):
         df.set_index("Datetime", inplace=True)
 
         # Convert index to IST (Asia/Kolkata)
-        if df.index.tz is None or str(df.index.tz) != "Asia/Kolkata":
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("Asia/Kolkata")
+        elif str(df.index.tz) != "Asia/Kolkata":
             df.index = df.index.tz_convert("Asia/Kolkata")
 
         # Sort by date to ensure chronological order
@@ -308,7 +327,7 @@ def preview_data_sync(ticker, start_date, end_date, rows=5):
     return asyncio.run(preview_data(ticker, start_date, end_date, rows))
 
 
-def get_data_sync(ticker, start_date, end_date, interval="5m"):
+def get_data_sync(ticker, start_date, end_date, interval):
     """
     Fetch historical stock data from Yahoo Finance synchronously (wrapper for async function).
 
