@@ -69,12 +69,15 @@ def run_parameter_optimization(
         analyzer_optimized.print_report()
         return optimization_results
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         logger.error(f"Parameter optimization failed: {str(e)}")
         raise
 
 
 def run_insample_outsample_analysis(
-    strategy_name, ticker, start_date, end_date, interval
+    strategy_name, ticker, start_date, end_date, interval, n_trials
 ):
     """Run in-sample/out-of-sample validation analysis."""
     logger.info(f"Running in-sample/out-of-sample analysis for {ticker}")
@@ -84,7 +87,10 @@ def run_insample_outsample_analysis(
             strategy_name=strategy_name, ticker=ticker
         )
         results = validation_analyzer.in_sample_out_sample_analysis(
-            start_date=start_date, end_date=end_date, interval=interval
+            start_date=start_date,
+            end_date=end_date,
+            interval=interval,
+            n_trials=n_trials,
         )
         print("\nIn-Sample Performance:")
         print("-" * 60)
@@ -179,7 +185,12 @@ def run_walkforward_analysis(
         traceback.print_exc()
         logger.error(f"Walk-forward analysis failed: {str(e)}")
         return run_parameter_optimization(
-            strategy_name, ticker, start_date, end_date, n_trials=10, interval=interval
+            strategy_class=strategy_name,
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            n_trials=n_trials,
+            interval=interval,
         )
 
 
@@ -260,7 +271,7 @@ def run_basic_comparison_analysis(
 
 
 def run_complete_backtest(
-    ticker, start_date, end_date, strategy_class, analyzers, interval
+    ticker, start_date, end_date, strategy_class, analyzers, interval, n_trials
 ):
     """Run a complete demonstration of all analyses."""
     logger.info(f"Running complete backtest for {ticker}")
@@ -289,11 +300,11 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         opt_results = run_parameter_optimization(
-            strategy_class,
-            ticker,
-            start_date,
-            end_date,
-            n_trials=10,
+            strategy_class=strategy_class,
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            n_trials=n_trials,
             interval=interval,
             analyzers=analyzers,
         )
@@ -304,7 +315,12 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         validation_results = run_insample_outsample_analysis(
-            strategy_class, ticker, start_date, end_date, interval=interval
+            strategy_class,
+            ticker,
+            start_date,
+            end_date,
+            interval=interval,
+            n_trials=n_trials,
         )
         results["validation"] = validation_results
     except Exception as e:
@@ -340,7 +356,7 @@ def run_complete_backtest(
             in_sample_days=in_sample,
             out_sample_days=out_sample,
             step_days=step,
-            n_trials=20,
+            n_trials=n_trials,
             min_trades=1,
             interval=interval,
         )

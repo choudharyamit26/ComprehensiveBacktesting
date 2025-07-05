@@ -144,7 +144,7 @@ class OptimizationObjective:
                 logger.error("Backtest returned invalid strategy object")
                 return -999
 
-            # Extract performance metrics
+            # Extract performance metrics with robust fallbacks
             try:
                 # Access analyzers with defensive checks
                 returns_analyzer = getattr(strategy.analyzers, "returns", None)
@@ -181,8 +181,8 @@ class OptimizationObjective:
                         sortino_ratio, (int, float)
                     ):
                         sortino_ratio = 0
+
                 # Calculate composite objective
-                # objective_value = sharpe_ratio + (sortino_ratio * 0.5)
                 objective_value = (
                     total_return * 10
                 )  # Prioritize returns over risk metrics
@@ -281,21 +281,26 @@ def optimize_strategy(
 
         # Run final backtest with best parameters
         print("Running final backtest with best parameters...")
-        results, cerebro = run_backtest(
-            strategy_class=strategy_class,
-            ticker=ticker,
-            start_date=start_date,
-            end_date=end_date,
-            initial_cash=initial_cash,
-            commission=commission,
-            interval=interval,
-            **best_params,
-        )
+        try:
+            results, cerebro = run_backtest(
+                strategy_class=strategy_class,
+                ticker=ticker,
+                start_date=start_date,
+                end_date=end_date,
+                initial_cash=initial_cash,
+                commission=commission,
+                interval=interval,
+                **best_params,
+            )
+        except Exception as e:
+            logger.error(f"Final backtest failed: {str(e)}")
+            results = None
+            cerebro = None
 
         return {
             "best_params": best_params,
             "best_value": best_value,
-            "study": study,
+            "study": study,  # Always return study object
             "cerebro": cerebro,
             "results": results,
         }
@@ -329,6 +334,9 @@ def analyze_optimization_results(study, save_plots=False):
     Returns:
         dict: Analysis results.
     """
+    if study is None:
+        return {"error": "No study available for analysis"}
+
     logger.info("Analyzing optimization results...")
     try:
         trials_df = study.trials_dataframe()
@@ -345,8 +353,16 @@ def analyze_optimization_results(study, save_plots=False):
             "mean_objective": trials_df["value"].mean(),
             "std_objective": trials_df["value"].std(),
             "median_objective": trials_df["value"].median(),
-            "parameter_importance": optuna.importance.get_param_importances(study),
         }
+
+        # Add parameter importance if possible
+        try:
+            analysis["parameter_importance"] = optuna.importance.get_param_importances(
+                study
+            )
+        except Exception as e:
+            logger.warning(f"Could not calculate parameter importance: {str(e)}")
+            analysis["parameter_importance"] = {}
 
         param_stats = {}
         for param in study.best_params.keys():

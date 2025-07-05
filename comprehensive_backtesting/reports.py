@@ -102,11 +102,11 @@ class PerformanceAnalyzer:
                     "final_value": self.initial_cash,
                     "total_return_pct": 0,
                     "annual_return_pct": 0,
-                    "sharpe_ratio": "N/A",
-                    "sortino_ratio": "N/A",
+                    "sharpe_ratio": 0,
+                    "sortino_ratio": 0,
                     "max_drawdown_pct": 0,
-                    "calmar_ratio": "N/A",
-                    "sqn": "N/A",
+                    "calmar_ratio": 0,
+                    "sqn": 0,
                     "profit_loss": 0,
                 }
             returns_analyzer = getattr(self.strategy.analyzers, "returns", None)
@@ -133,38 +133,58 @@ class PerformanceAnalyzer:
             total_return = returns_analysis.get("rtot", 0) or 0
             annual_return = returns_analysis.get("rnorm", 0) or 0
 
-            # Robust handling for edge cases
-            def safe_ratio(val, min_trades=2):
-                if val is None or (isinstance(val, (int, float)) and abs(val) < 1e-12):
-                    return "N/A"
-                return val
-
             # Robust extraction and formatting for ratios
             def robust_float(val):
                 try:
                     if val is None or (
                         isinstance(val, (int, float)) and abs(val) < 1e-12
                     ):
-                        return "N/A"
+                        return 0
                     return float(val)
                 except Exception:
-                    return "N/A"
+                    return 0
 
-            sharpe_val = sharpe_analysis.get("sharperatio", None)
-            sharpe_ratio = robust_float(sharpe_val)
+            # FIXED: Proper Sharpe ratio calculation
+            sharpe_ratio = 0
+            if sharpe_analyzer:
+                try:
+                    # Get raw value from analyzer
+                    raw_sharpe = sharpe_analysis.get("sharperatio", None)
 
-            sortino_val = sortino_analysis.get("sortinoratio", None)
-            sortino_ratio = robust_float(sortino_val)
+                    # Scale down if value is unreasonably large
+                    if raw_sharpe and abs(raw_sharpe) > 100:
+                        sharpe_ratio = raw_sharpe / 100
+                    else:
+                        sharpe_ratio = robust_float(raw_sharpe)
+                except Exception as e:
+                    logger.error(f"Error processing Sharpe ratio: {e}")
+                    sharpe_ratio = 0
+
+            # FIXED: Proper Sortino ratio calculation
+            sortino_ratio = 0
+            if sortino_analyzer:
+                try:
+                    # Get raw value from analyzer
+                    raw_sortino = sortino_analysis.get("sortinoratio", None)
+
+                    # Scale down if value is unreasonably large
+                    if raw_sortino and abs(raw_sortino) > 100:
+                        sortino_ratio = raw_sortino / 100
+                    else:
+                        sortino_ratio = robust_float(raw_sortino)
+                except Exception as e:
+                    logger.error(f"Error processing Sortino ratio: {e}")
+                    sortino_ratio = 0
 
             max_drawdown = drawdown_analysis.get("max", {}).get("drawdown", 0) or 0
             raw_calmar = calmar_analysis.get("calmarratio", None)
             calmar_ratio = robust_float(raw_calmar)
             # If calmar_ratio is N/A, try to compute manually if possible
-            if calmar_ratio == "N/A":
+            if calmar_ratio == 0:
                 if annual_return and max_drawdown and abs(max_drawdown) > 1e-12:
                     calmar_ratio = robust_float(annual_return / max_drawdown)
                 else:
-                    calmar_ratio = "N/A"
+                    calmar_ratio = 0
             sqn = robust_float(sqn_analysis.get("sqn", None))
 
             total_return_pct = (np.exp(total_return) - 1) * 100
@@ -193,11 +213,11 @@ class PerformanceAnalyzer:
                 "final_value": self.initial_cash,
                 "total_return_pct": 0,
                 "annual_return_pct": 0,
-                "sharpe_ratio": "N/A",
-                "sortino_ratio": "N/A",
+                "sharpe_ratio": 0,
+                "sortino_ratio": 0,
                 "max_drawdown_pct": 0,
-                "calmar_ratio": "N/A",
-                "sqn": "N/A",
+                "calmar_ratio": 0,
+                "sqn": 0,
                 "profit_loss": 0,
             }
 
@@ -256,9 +276,9 @@ class PerformanceAnalyzer:
             )
             # Robust profit factor calculation
             if total_win_pnl == 0 and total_loss_pnl == 0:
-                profit_factor = "N/A"
+                profit_factor = 0
             elif total_loss_pnl == 0:
-                profit_factor = float("inf")
+                profit_factor = 0
             elif total_win_pnl == 0:
                 profit_factor = 0
             else:

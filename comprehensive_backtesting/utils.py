@@ -31,9 +31,9 @@ DEFAULT_TICKERS = [
 def run_backtest(
     strategy_class,
     interval,
-    ticker="AAPL",
-    start_date="2022-01-01",
-    end_date="2025-06-01",
+    ticker,
+    start_date,
+    end_date,
     initial_cash=100000.0,
     commission=0.001,
     **strategy_params,
