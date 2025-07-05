@@ -129,7 +129,7 @@ def run_walkforward_analysis(
     n_trials,
     min_trades,
     strategy_name,
-    interval,  # Default to 5-minute interval for Indian equities
+    interval,
 ):
     """Run walk-forward analysis."""
     logger.info(f"Running walk-forward analysis for {ticker}")
@@ -139,14 +139,20 @@ def run_walkforward_analysis(
             strategy_name=strategy_name, ticker=ticker
         )
 
-        # Calculate maximum available days (60 days for intraday)
+        # Calculate maximum available days (60 days limit only for intraday)
         max_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
-        max_days = min(max_days, 60)  # Enforce 60-day limit
 
-        # Set defaults based on available data
-        default_window = min(30, max_days // 2)
-        default_out = min(15, max_days // 4)
-        default_step = min(15, max_days // 4)
+        # Only enforce 60-day limit for intraday intervals
+        if interval != "1d":
+            max_days = min(max_days, 60)
+        if interval == "1d":
+            default_window = min(60, max_days // 2)
+            default_out = min(30, max_days // 4)
+            default_step = min(30, max_days // 4)
+        else:
+            default_window = min(30, max_days // 2)
+            default_out = min(15, max_days // 4)
+            default_step = min(15, max_days // 4)
 
         # Use provided values or defaults
         window_days = window_days if window_days is not None else default_window
@@ -247,7 +253,7 @@ def run_basic_comparison_analysis(
         print(f"\nRunning {name} strategy...")
         try:
             results, _ = run_backtest(
-                strategy_class=strategy_name,  # Use get_strategy
+                strategy_class=strategy_name,
                 ticker=ticker,
                 start_date=start_date,
                 end_date=end_date,
@@ -259,14 +265,8 @@ def run_basic_comparison_analysis(
             logger.error(f"Failed to run {name} strategy: {str(e)}")
             continue
 
-    # if results_comparison:
-    #     try:
     comparison_df = compare_strategies(results_comparison)
-    # if not comparison_df.empty:
-    # print("\nStrategy Comparison:")
     print(comparison_df.round(3))
-    # except Exception as e:
-    #     logger.error(f"Strategy comparison failed: {str(e)}")
     return results_comparison
 
 
@@ -343,7 +343,10 @@ def run_complete_backtest(
 
         # Calculate maximum available days
         max_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
-        max_days = min(max_days, 60)
+
+        # Only enforce 60-day limit for intraday intervals
+        if interval != "1d":
+            max_days = min(max_days, 60)
 
         # Set defaults based on available data
         in_sample = min(30, max_days // 2)

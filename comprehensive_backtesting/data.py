@@ -16,19 +16,11 @@ if not logger.hasHandlers():
 async def get_data(ticker, start_date, end_date, interval):
     """
     Fetch historical stock data from Yahoo Finance asynchronously.
-
-    Parameters:
-    ticker (str): Stock ticker symbol.
-    start_date (str): Start date in 'YYYY-MM-DD' format.
-    end_date (str): End date in 'YYYY-MM-DD' format.
-    interval (str): Data interval (e.g., '1d', '5m'). Default is '5m'.
-
-    Returns:
-    pd.DataFrame: DataFrame containing the stock data with proper column names.
     """
     try:
-        # Handle yfinance 60-day limit for intraday data
         intraday_intervals = ["1m", "2m", "5m", "15m", "30m", "60m", "90m"]
+
+        # Handle yfinance 60-day limit for intraday data only
         if interval in intraday_intervals:
             start_dt = pd.to_datetime(start_date)
             end_dt = pd.to_datetime(end_date)
@@ -43,6 +35,8 @@ async def get_data(ticker, start_date, end_date, interval):
         logger.info(
             f"Fetching data for {ticker} from {start_date} to {end_date} with interval {interval}"
         )
+
+        # Use different method for daily vs intraday
         if interval == "1d":
             df = yf.download(ticker, start=start_date, end=end_date, interval=interval)
         else:
@@ -50,10 +44,14 @@ async def get_data(ticker, start_date, end_date, interval):
             df = await asyncio.to_thread(
                 ticker_obj.history, period="60d", interval=interval
             )
+
         # Check if DataFrame is empty
+        logger.info(
+            f"Data fetched for {ticker} between {start_date} and {end_date} interval={interval} {len(df)} rows"
+        )
         if df.empty:
             raise ValueError(
-                f"No data found for ticker {ticker} between {start_date} and {end_date} (interval={interval})"
+                f"No data found for ticker {ticker} between {start_date} and {end_date} interval={interval})"
             )
 
         # Reset index to make Date/Datetime a column if needed
@@ -166,10 +164,6 @@ async def get_data(ticker, start_date, end_date, interval):
 def validate_data(df, strict=False):
     """
     Validate the data format for backtesting with tolerance options.
-
-    Parameters:
-    df (pd.DataFrame): DataFrame to validate
-    strict (bool): If True, use strict validation. If False, allow minor issues.
     """
     required_columns = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -233,14 +227,6 @@ def validate_data(df, strict=False):
 async def get_multiple_tickers_data(tickers, start_date, end_date):
     """
     Fetch data for multiple tickers asynchronously.
-
-    Parameters:
-    tickers (list): List of ticker symbols
-    start_date (str): Start date in 'YYYY-MM-DD' format
-    end_date (str): End date in 'YYYY-MM-DD' format
-
-    Returns:
-    dict: Dictionary with ticker as key and DataFrame as value
     """
     data_dict = {}
 
@@ -266,14 +252,6 @@ async def get_multiple_tickers_data(tickers, start_date, end_date):
 def get_multiple_tickers_data_sync(tickers, start_date, end_date):
     """
     Fetch data for multiple tickers synchronously (wrapper for async function).
-
-    Parameters:
-    tickers (list): List of ticker symbols
-    start_date (str): Start date in 'YYYY-MM-DD' format
-    end_date (str): End date in 'YYYY-MM-DD' format
-
-    Returns:
-    dict: Dictionary with ticker as key and DataFrame as value
     """
     return asyncio.run(get_multiple_tickers_data(tickers, start_date, end_date))
 
@@ -281,12 +259,6 @@ def get_multiple_tickers_data_sync(tickers, start_date, end_date):
 async def preview_data(ticker, start_date, end_date, rows=5):
     """
     Preview data for a ticker.
-
-    Parameters:
-    ticker (str): Stock ticker symbol
-    start_date (str): Start date in 'YYYY-MM-DD' format
-    end_date (str): End date in 'YYYY-MM-DD' format
-    rows (int): Number of rows to display
     """
     try:
         df = await get_data(ticker, start_date, end_date)
@@ -317,27 +289,12 @@ async def preview_data(ticker, start_date, end_date, rows=5):
 def preview_data_sync(ticker, start_date, end_date, rows=5):
     """
     Preview data for a ticker synchronously (wrapper for async function).
-
-    Parameters:
-    ticker (str): Stock ticker symbol
-    start_date (str): Start date in 'YYYY-MM-DD' format
-    end_date (str): End date in 'YYYY-MM-DD' format
-    rows (int): Number of rows to display
     """
     return asyncio.run(preview_data(ticker, start_date, end_date, rows))
 
 
 def get_data_sync(ticker, start_date, end_date, interval):
     """
-    Fetch historical stock data from Yahoo Finance synchronously (wrapper for async function).
-
-    Parameters:
-    ticker (str): Stock ticker symbol.
-    start_date (str): Start date in 'YYYY-MM-DD' format.
-    end_date (str): End date in 'YYYY-MM-DD' format.
-    interval (str): Data interval (e.g., '1d', '5m'). Default is '5m'.
-
-    Returns:
-    pd.DataFrame: DataFrame containing the stock data with proper column names.
+    Fetch historical stock data from Yahoo Finance synchronously.
     """
     return asyncio.run(get_data(ticker, start_date, end_date, interval))

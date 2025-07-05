@@ -15,8 +15,8 @@ class EMARSI(bt.Strategy):
         ("fast_ema_period", 12),
         ("slow_ema_period", 26),
         ("rsi_period", 14),
-        ("rsi_upper", 65),  # Relaxed from 70
-        ("rsi_lower", 35),  # Relaxed from 30
+        ("rsi_upper", 60),  # Relaxed from 70
+        ("rsi_lower", 40),  # Relaxed from 30
     )
 
     def __init__(self, tickers=None, analyzers=None, **kwargs):
@@ -27,6 +27,7 @@ class EMARSI(bt.Strategy):
         self.ready = False
         self.stable_count = 0
         logger.debug(f"Initialized EMARSI with params: {self.params}")
+        self.is_intraday = self.data._timeframe != bt.TimeFrame.Days
 
     def next(self):
         # Skip processing until indicators are stable
@@ -57,7 +58,7 @@ class EMARSI(bt.Strategy):
         # )
 
         # Force close all positions at 15:15 IST
-        if current_time >= datetime.time(15, 15):
+        if self.is_intraday and current_time >= datetime.time(15, 15):
             if self.position:
                 self.close()
                 # logger.info("Force closed all positions at 15:15 IST")
@@ -121,30 +122,23 @@ class EMARSI(bt.Strategy):
         return params
 
     @classmethod
-    def get_min_data_points(cls, params):
-        """Calculate minimum data points required for the strategy."""
-        try:
-            fast_ema_period = params.get("fast_ema_period", 12)
-            slow_ema_period = params.get("slow_ema_period", 26)
-            rsi_period = params.get("rsi_period", 14)
+    def get_min_data_points(cls, params, interval=None):
+        """Calculate minimum data points required with dynamic buffer."""
+        # Get parameters or use defaults
+        fast_ema = params.get("fast_ema_period", 12)
+        slow_ema = params.get("slow_ema_period", 26)
+        rsi_period = params.get("rsi_period", 14)
 
-            # Ensure slow_ema_period > fast_ema_period
-            if slow_ema_period <= fast_ema_period:
-                # logger.warning(
-                #     f"Adjusting slow_ema_period ({slow_ema_period}) to be "
-                #     f"greater than fast_ema_period ({fast_ema_period})"
-                # )
-                slow_ema_period = fast_ema_period + 5
+        # Ensure slow EMA > fast EMA
+        slow_ema = max(slow_ema, fast_ema + 5)
 
-            # Calculate minimum data points with reduced buffer
-            max_period = max(fast_ema_period, slow_ema_period, rsi_period)
-            min_data_points = max_period + 20  # Reduced buffer
-            # logger.debug(
-            #     f"Min data points: {min_data_points} (fast:{fast_ema_period} "
-            #     f"slow:{slow_ema_period} rsi:{rsi_period})"
-            # )
-            return min_data_points
+        # Determine the longest indicator period
+        max_period = max(fast_ema, slow_ema, rsi_period)
 
-        except Exception as e:
-            logger.error(f"Error calculating min_data_points: {str(e)}")
-            return 50  # Conservative fallback
+        # Calculate buffer dynamically (20% of max period but at least 5)
+        buffer = max(5, int(max_period * 0.2))
+
+        # For daily data, cap at 20 to prevent excessive requirements
+        if interval == "1d":
+            return min(max_period + buffer, 20)
+        return max_period + buffer

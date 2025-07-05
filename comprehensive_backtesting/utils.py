@@ -4,10 +4,8 @@ import logging
 from .data import get_data_sync, validate_data
 from .registry import get_strategy
 
-
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
-
 
 DEFAULT_TICKERS = [
     "RELIANCE.NS",
@@ -52,23 +50,39 @@ def run_backtest(
     # Get data with proper timezone handling
     data_df = get_data_sync(ticker, start_date, end_date, interval=interval)
 
-    if not validate_data(data_df, strict=False):  # Added strict mode
+    if not validate_data(data_df, strict=False):
         logger.warning(f"Data validation warnings for {ticker}. Proceeding anyway.")
 
     # Calculate min data points
     min_data_points = (
-        strategy_class.get_min_data_points(strategy_params)
+        strategy_class.get_min_data_points(strategy_params, interval)
         if hasattr(strategy_class, "get_min_data_points")
-        else 50
+        else 20
     )
 
-    if len(data_df) < min_data_points:
+    # DEBUG: Show data details
+    logger.info(f"Data range: {data_df.index.min()} to {data_df.index.max()}")
+    logger.info(f"Total bars: {len(data_df)}")
+    logger.info(f"Required min bars: {min_data_points}")
+
+    # Add strict check to prevent EMA calculation errors
+    max_period = max(
+        strategy_params.get("fast_ema_period", 12),
+        strategy_params.get("slow_ema_period", 26),
+        strategy_params.get("rsi_period", 14),
+    )
+
+    if len(data_df) < max_period:
         logger.error(
-            f"Insufficient data: {len(data_df)} rows available, "
-            f"{min_data_points} required. Skipping backtest."
+            f"Insufficient data for EMA calculation: {len(data_df)} rows available, "
+            f"maximum period required {max_period}. Skipping backtest."
         )
-        # Return empty results and None cerebro to signal failure upstream
         return [], None
+    elif len(data_df) < min_data_points:
+        logger.warning(
+            f"Data might be insufficient: {len(data_df)} < {min_data_points} "
+            f"but proceeding with backtest"
+        )
 
     data = bt.feeds.PandasData(
         dataname=data_df,
@@ -86,30 +100,38 @@ def run_backtest(
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(commission=commission)
 
+    # Adjust timeframe and compression based on interval
+    if interval == "1d":
+        timeframe = bt.TimeFrame.Days
+        compression = 1
+    else:
+        timeframe = bt.TimeFrame.Minutes
+        compression = 5  # Default to 5-minute compression
+
     # CORRECTED: Add analyzer classes instead of instantiated objects
     from comprehensive_backtesting.parameter_optimization import SortinoRatio
 
     analyzer_classes = [
         (
             bt.analyzers.SharpeRatio,
-            {"_name": "sharpe", "timeframe": bt.TimeFrame.Minutes, "compression": 5},
+            {"_name": "sharpe", "timeframe": timeframe, "compression": compression},
         ),
         (bt.analyzers.DrawDown, {"_name": "drawdown"}),
         (
             bt.analyzers.Returns,
-            {"_name": "returns", "timeframe": bt.TimeFrame.Minutes, "compression": 5},
+            {"_name": "returns", "timeframe": timeframe, "compression": compression},
         ),
         (bt.analyzers.TradeAnalyzer, {"_name": "trades"}),
         (
             bt.analyzers.Calmar,
-            {"_name": "calmar", "timeframe": bt.TimeFrame.Minutes, "compression": 5},
+            {"_name": "calmar", "timeframe": timeframe, "compression": compression},
         ),
         (
             bt.analyzers.TimeReturn,
             {
                 "_name": "timereturn",
-                "timeframe": bt.TimeFrame.Minutes,
-                "compression": 5,
+                "timeframe": timeframe,
+                "compression": compression,
             },
         ),
         (bt.analyzers.SQN, {"_name": "sqn"}),
@@ -119,7 +141,7 @@ def run_backtest(
     for analyzer_class, params in analyzer_classes:
         cerebro.addanalyzer(analyzer_class, **params)
 
-    # Add 5-minute data
+    # Add main data
     cerebro.adddata(data, name=interval)
 
     print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")

@@ -101,22 +101,22 @@ class OptimizationObjective:
         )
 
     def __call__(self, trial):
-        """Objective function for Optuna optimization with robust error handling."""
+        """Objective function for Optuna optimization with dynamic strategy support."""
         try:
             logger.info(f"Starting trial {trial.number} for {self.ticker}")
 
-            # Get parameters from strategy class
+            # Get parameters using strategy's parameter space method
             if hasattr(self.strategy_class, "get_param_space"):
                 params = self.strategy_class.get_param_space(trial)
             else:
-                logger.warning("Using default parameter space")
-                params = {
-                    "fast_ema_period": trial.suggest_int("fast_ema_period", 5, 20),
-                    "slow_ema_period": trial.suggest_int("slow_ema_period", 21, 50),
-                    "rsi_period": trial.suggest_int("rsi_period", 10, 20),
-                    "rsi_upper": trial.suggest_int("rsi_upper", 60, 75),
-                    "rsi_lower": trial.suggest_int("rsi_lower", 25, 40),
-                }
+                # Fallback to generic parameter space if not defined
+                logger.warning(
+                    f"Using generic parameter space for {self.strategy_class.__name__}"
+                )
+                generic_params = self._get_generic_param_space(trial)
+                params = generic_params.get(
+                    self.strategy_class.__name__, generic_params["default"]
+                )
 
             logger.info(f"Trial parameters: {params}")
 

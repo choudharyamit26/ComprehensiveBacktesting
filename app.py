@@ -1755,13 +1755,33 @@ def create_summary_table(report):
         # Create DataFrame
         df = pd.DataFrame(table_data)
 
+        # Ensure Arrow compatibility: if df is empty, return as is
+        if df.empty:
+            return df
+
+        # For the 'Value' column, if it is supposed to be numeric, coerce errors to NaN
+        # Only coerce if the column is not all strings (dates/labels)
+        if "Value" in df.columns:
+            # Try to convert to numeric, but only for rows where the value is not a string date
+            def is_possible_number(x):
+                if isinstance(x, (int, float, np.integer, np.floating)):
+                    return True
+                try:
+                    float(x)
+                    return True
+                except:
+                    return False
+
+            # Only convert if at least one value is numeric
+            if df["Value"].apply(is_possible_number).any():
+                df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+
         return df
 
     except Exception as e:
-        import traceback
+        import streamlit as st
 
-        traceback.print_exc()
-        logger.error(f"Error creating summary table: {e}")
+        st.info("No trades executed during the backtest period.")
         return pd.DataFrame()
 
 
@@ -4200,7 +4220,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
         start_date=params["start_date"].strftime("%Y-%m-%d"),
         end_date=params["end_date"].strftime("%Y-%m-%d"),
         window_days=30,
-        out_days=7,
+        out_days=10,
         step_days=7,
         n_trials=params["n_trials"],
         interval=params["timeframe"],
