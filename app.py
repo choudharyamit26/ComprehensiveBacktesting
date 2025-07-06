@@ -47,8 +47,9 @@ from comprehensive_backtesting.backtesting import (
     run_basic_backtest,
     run_complete_backtest,
     run_parameter_optimization,
-    run_walkforward_analysis as run_wf_analysis,
 )
+from comprehensive_backtesting import backtesting
+from comprehensive_backtesting.walk_forward_analysis import WalkForwardAnalysis
 
 
 # Configure logging
@@ -1755,13 +1756,31 @@ def create_summary_table(report):
         # Create DataFrame
         df = pd.DataFrame(table_data)
 
+        # Ensure Arrow compatibility: if df is empty, return as is
+        if df.empty:
+            return df
+
+        # For the 'Value' column, if it is supposed to be numeric, coerce errors to NaN
+        # Only coerce if the column is not all strings (dates/labels)
+        if 'Value' in df.columns:
+            # Try to convert to numeric, but only for rows where the value is not a string date
+            def is_possible_number(x):
+                if isinstance(x, (int, float, np.integer, np.floating)):
+                    return True
+                try:
+                    float(x)
+                    return True
+                except:
+                    return False
+            # Only convert if at least one value is numeric
+            if df['Value'].apply(is_possible_number).any():
+                df['Value'] = pd.to_numeric(df['Value'], errors='coerce')
+
         return df
 
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
-        logger.error(f"Error creating summary table: {e}")
+        import streamlit as st
+        st.info("No trades executed during the backtest period.")
         return pd.DataFrame()
 
 
@@ -3624,9 +3643,12 @@ def render_sidebar():
             step=10,
             help="Number of optimization trials to run (increases in steps of 10)",
         )
+        in_sample_weeks = st.sidebar.slider("In-sample Weeks", 4, 12, 8, key="in_sample_weeks")
+        out_sample_weeks = st.sidebar.slider("Out-sample Weeks", 1, 4, 2, key="out_sample_weeks")
     else:
         n_trials = 10
-
+        in_sample_weeks = None
+        out_sample_weeks = None
     # Timeframe selection
     timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "4h", "1d"])
 
@@ -3665,6 +3687,8 @@ def render_sidebar():
         "timeframe": timeframe,
         "selected_analyzers": selected_analyzers,
         "available_analyzers": available_analyzers,
+        "in_sample_weeks": in_sample_weeks,
+        "out_sample_weeks": out_sample_weeks,
     }
 
 
@@ -4189,24 +4213,53 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
             file_name=f"{params['ticker']}_optimization_report.json",
             mime="application/json",
         )
-
+def display_parameter_optimization_results(results, progress_bar, status_text):
+    """Display parameter optimization results when walk-forward fails"""
+    st.subheader("⚙️ Parameter Optimization Results (Fallback)")
+    
+    if "best_params" in results:
+        st.write("### 🏆 Best Parameters")
+        st.json(results["best_params"])
+    
+    if "results" in results:
+        st.write("### 📊 Optimized Strategy Performance")
+        analyzer = PerformanceAnalyzer(results["results"])
+        report = analyzer.generate_full_report()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Total Return", f"{report['summary']['total_return_pct']:.2f}%")
+            st.metric("Sharpe Ratio", f"{report['summary']['sharpe_ratio']:.2f}")
+        
+        with col2:
+            st.metric("Max Drawdown", f"{report['summary']['max_drawdown_pct']:.2f}%")
+            st.metric("Returns", f"{report['summary']['total_return_pct']:.1f}%")
+    else:
+        st.warning("No optimization results available")
+    
+    progress_bar.progress(100)
+    status_text.text("Walk-forward analysis complete!")
+    st.toast("Walk-forward analysis complete")
 
 def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status_text):
     """Run walk-forward analysis and display results."""
     status_text.text("Starting walk-forward analysis...")
-    # Use strategy name instead of class
-    results = run_wf_analysis(
+    #     import pdb;pdb.set_trace()
+    results = backtesting.run_walkforward_analysis(
         ticker=params["ticker"],
         start_date=params["start_date"].strftime("%Y-%m-%d"),
         end_date=params["end_date"].strftime("%Y-%m-%d"),
-        window_days=30,
-        out_days=7,
-        step_days=7,
+        window_days=params["in_sample_weeks"]*7,
+        out_days=params["out_sample_weeks"]*7,
+        step_days=params["out_sample_weeks"]*7,
         n_trials=params["n_trials"],
         interval=params["timeframe"],
         strategy_name=params["selected_strategy"],
         min_trades=1,
     )
+    if "windows" not in results:
+        st.error("Walk-forward analysis failed. Showing parameter optimization results instead.")
+        display_parameter_optimization_results(results, progress_bar, status_text)
+        return
     progress_bar.progress(100)
     status_text.text("Walk-forward analysis complete!")
     st.toast("Walk-forward analysis complete")

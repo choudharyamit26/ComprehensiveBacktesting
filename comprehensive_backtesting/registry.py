@@ -66,7 +66,9 @@ def get_strategy(strategy_name: str):
 # Register default strategies
 try:
     from .ema_rsi import EMARSI
+    from .sma_bollinger_band import SMABollinger
 
     register_strategy("EMARSI", EMARSI)
+    register_strategy("SMABollinger", SMABollinger)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")

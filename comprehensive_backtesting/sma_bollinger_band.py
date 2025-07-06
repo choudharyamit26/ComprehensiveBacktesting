@@ -15,7 +15,7 @@ if not os.path.exists("logs"):
     os.makedirs("logs")
 
 # Create file handler for trade logging
-fh = logging.FileHandler("logs/trade_executions_ema_rsi.log")
+fh = logging.FileHandler("logs/trade_executions_sma_bollinger.log")
 fh.setLevel(logging.INFO)
 formatter = logging.Formatter("%(asctime)s - %(message)s")
 fh.setFormatter(formatter)
@@ -24,40 +24,39 @@ trade_logger.addHandler(fh)
 logger = logging.getLogger(__name__)
 
 
-class EMARSI(bt.Strategy):
-    """EMA and RSI combined trading strategy with detailed trade logging"""
+class SMABollinger(bt.Strategy):
+    """SMA Crossover and Bollinger Bands trading strategy with lenient entry/exit conditions"""
 
     params = (
-        ("fast_ema_period", 12),
-        ("slow_ema_period", 36),
-        ("rsi_period", 14),
-        ("rsi_upper", 70),
-        ("rsi_lower", 30),
+        ("fast_sma_period", 10),  # Fast SMA period
+        ("slow_sma_period", 20),  # Slow SMA period
+        ("bb_period", 20),  # Bollinger Bands period
+        ("bb_dev", 2.0),
         ("verbose", False),
     )
 
     # Define optimization parameters for WalkForwardAnalysis
     optimization_params = {
-        "fast_ema_period": {"type": "int", "low": 5, "high": 15, "step": 1},
-        "slow_ema_period": {"type": "int", "low": 16, "high": 30, "step": 1},
-        "rsi_period": {"type": "int", "low": 8, "high": 20, "step": 1},
-        "rsi_upper": {"type": "int", "low": 60, "high": 80, "step": 5},
-        "rsi_lower": {"type": "int", "low": 20, "high": 40, "step": 5},
+        "fast_sma_period": {"type": "int", "low": 5, "high": 15, "step": 1},
+        "slow_sma_period": {"type": "int", "low": 16, "high": 30, "step": 1},
+        "bb_period": {"type": "int", "low": 15, "high": 25, "step": 1},
+        "bb_dev": {"type": "float", "low": 1.5, "high": 2.5, "step": 0.1},
     }
 
     def __init__(self, tickers=None, analyzers=None, **kwargs):
-        self.fast_ema = btind.EMA(self.data.close, period=self.params.fast_ema_period)
-        self.slow_ema = btind.EMA(self.data.close, period=self.params.slow_ema_period)
-        self.rsi = btind.RSI(self.data.close, period=self.params.rsi_period)
+        self.fast_sma = btind.SMA(self.data.close, period=self.params.fast_sma_period)
+        self.slow_sma = btind.SMA(self.data.close, period=self.params.slow_sma_period)
+        self.bbands = btind.BollingerBands(
+            self.data.close, period=self.params.bb_period, devfactor=self.params.bb_dev
+        )
         self.order = None
         self.ready = False
-        self.stable_count = 0
         self.trade_count = 0
         self.warmup_period = (
             max(
-                self.params.fast_ema_period,
-                self.params.slow_ema_period,
-                self.params.rsi_period,
+                self.params.fast_sma_period,
+                self.params.slow_sma_period,
+                self.params.bb_period,
             )
             + 2
         )
@@ -67,7 +66,7 @@ class EMARSI(bt.Strategy):
         self.completed_trades = []
         self.open_positions = []  # Track open positions manually
 
-        logger.debug(f"Initialized EMARSI with params: {self.params}")
+        logger.debug(f"Initialized SMABollinger with params: {self.params}")
 
     def next(self):
         # Warmup check
@@ -77,7 +76,7 @@ class EMARSI(bt.Strategy):
             )
             return
 
-        # Set ready flag after warmup period
+        # Set ready flag after warmup
         if not self.ready:
             self.ready = True
             logger.info(f"Strategy ready at bar {len(self)}")
@@ -87,31 +86,21 @@ class EMARSI(bt.Strategy):
         bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
         current_time = bar_time_ist.time()
 
-        # Force close all positions at 15:15 IST
-        if current_time >= datetime.time(15, 15):
-            if self.position:
-                self.close()
-                trade_logger.info("Force closed all positions at 15:15 IST")
-            return
-
-        # Only allow new trades between 09:15 and 15:05 IST
-        if not (datetime.time(9, 15) <= current_time <= datetime.time(15, 5)):
-            return
-
         if self.order:
             logger.debug(f"Order pending at bar {len(self)}")
             return
 
         # Check for valid indicator values
         if (
-            np.isnan(self.fast_ema[0])
-            or np.isnan(self.slow_ema[0])
-            or np.isnan(self.rsi[0])
+            np.isnan(self.fast_sma[0])
+            or np.isnan(self.slow_sma[0])
+            or np.isnan(self.bbands.mid[0])
+            or np.isnan(self.bbands.top[0])
         ):
             logger.debug(
                 f"Invalid indicator values at bar {len(self)}: "
-                f"FastEMA={self.fast_ema[0]}, SlowEMA={self.slow_ema[0]}, "
-                f"RSI={self.rsi[0]}"
+                f"FastSMA={self.fast_sma[0]}, SlowSMA={self.slow_sma[0]}, "
+                f"BB_Mid={self.bbands.mid[0]}, BB_Top={self.bbands.top[0]}"
             )
             return
 
@@ -120,55 +109,45 @@ class EMARSI(bt.Strategy):
             {
                 "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
                 "close": self.data.close[0],
-                "fast_ema": self.fast_ema[0],
-                "slow_ema": self.slow_ema[0],
-                "rsi": self.rsi[0],
+                "fast_sma": self.fast_sma[0],
+                "slow_sma": self.slow_sma[0],
+                "bb_mid": self.bbands.mid[0],
+                "bb_top": self.bbands.top[0],
+                "bb_bot": self.bbands.bot[0],
             }
         )
 
-        # Entry conditions
+        # Entry conditions (relaxed)
         if not self.position:
             if (
-                self.fast_ema[0] > self.slow_ema[0]
-                and self.rsi[0] < self.params.rsi_lower
-            ):
+                self.fast_sma[0] > self.slow_sma[0]
+            ):  # Removed close < bbands.mid condition
                 self.order = self.buy()
                 trade_logger.info(
                     f"BUY SIGNAL | Bar: {len(self)} | "
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
-                    f"FastEMA: {self.fast_ema[0]:.2f} > SlowEMA: {self.slow_ema[0]:.2f} | "
-                    f"RSI: {self.rsi[0]:.2f} < {self.params.rsi_lower}"
+                    f"FastSMA: {self.fast_sma[0]:.2f} > SlowSMA: {self.slow_sma[0]:.2f}"
                 )
             else:
                 logger.debug(
                     f"No buy at bar {len(self)}: "
-                    f"FastEMA {self.fast_ema[0]:.2f} > SlowEMA {self.slow_ema[0]:.2f}: "
-                    f"{self.fast_ema[0] > self.slow_ema[0]} | "
-                    f"RSI {self.rsi[0]:.2f} < {self.params.rsi_lower}: "
-                    f"{self.rsi[0] < self.params.rsi_lower}"
+                    f"FastSMA {self.fast_sma[0]:.2f} <= SlowSMA {self.slow_sma[0]:.2f}"
                 )
         else:
-            # Exit conditions
-            if (
-                self.fast_ema[0] < self.slow_ema[0]
-                or self.rsi[0] > self.params.rsi_upper
-            ):
+            # Exit conditions (relaxed)
+            if self.fast_sma[0] < self.slow_sma[0]:
                 self.order = self.sell()
                 trade_logger.info(
                     f"SELL SIGNAL | Bar: {len(self)} | "
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
-                    f"FastEMA: {self.fast_ema[0]:.2f} < SlowEMA: {self.slow_ema[0]:.2f} | "
-                    f"RSI: {self.rsi[0]:.2f} > {self.params.rsi_upper}"
+                    f"FastSMA: {self.fast_sma[0]:.2f} < SlowSMA: {self.slow_sma[0]:.2f}"
                 )
             else:
                 logger.debug(
                     f"No sell at bar {len(self)}: "
-                    f"FastEMA {self.fast_ema[0]:.2f} < SlowEMA {self.slow_ema[0]:.2f}: "
-                    f"{self.fast_ema[0] < self.slow_ema[0]} | "
-                    f"RSI {self.rsi[0]:.2f} > {self.params.rsi_upper}: "
-                    f"{self.rsi[0] > self.params.rsi_upper}"
+                    f"FastSMA {self.fast_sma[0]:.2f} >= SlowSMA {self.slow_sma[0]:.2f}"
                 )
 
     def notify_order(self, order):
@@ -260,31 +239,19 @@ class EMARSI(bt.Strategy):
         return self.completed_trades.copy()
 
     @classmethod
-    def get_param_space(cls, trial):
-        """Define the parameter space for optimization with smaller ranges."""
-        params = {
-            "fast_ema_period": trial.suggest_int("fast_ema_period", 5, 12),
-            "slow_ema_period": trial.suggest_int("slow_ema_period", 15, 25),
-            "rsi_period": trial.suggest_int("rsi_period", 8, 15),
-            "rsi_upper": trial.suggest_int("rsi_upper", 65, 75),
-            "rsi_lower": trial.suggest_int("rsi_lower", 25, 35),
-        }
-        return params
-
-    @classmethod
     def get_min_data_points(cls, params):
         """Calculate minimum data points required for the strategy."""
         try:
-            fast_ema_period = params.get("fast_ema_period", 5)
-            slow_ema_period = params.get("slow_ema_period", 10)
-            rsi_period = params.get("rsi_period", 10)
+            fast_sma_period = params.get("fast_sma_period", 10)
+            slow_sma_period = params.get("slow_sma_period", 20)
+            bb_period = params.get("bb_period", 20)
 
-            # Ensure slow EMA is always larger than fast EMA
-            if slow_ema_period <= fast_ema_period:
-                slow_ema_period = fast_ema_period + 5
+            # Ensure slow SMA is always larger than fast SMA
+            if slow_sma_period <= fast_sma_period:
+                slow_sma_period = fast_sma_period + 5
 
             # Use the largest period plus a small buffer
-            max_period = max(fast_ema_period, slow_ema_period, rsi_period)
+            max_period = max(fast_sma_period, slow_sma_period, bb_period)
             min_data_points = max_period + 2
             return min_data_points
 

@@ -1,3 +1,4 @@
+from datetime import timedelta, datetime
 import backtrader as bt
 import logging
 
@@ -62,12 +63,40 @@ def run_backtest(
         else 50
     )
 
+    # Convert start_date to datetime if it's a string
+    if isinstance(start_date, str):
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        start_dt = start_date
+
+    # Extend date range if insufficient data
+    max_attempts = 10  # Prevent infinite loop
+    attempts = 0
+
+    while len(data_df) < min_data_points and attempts < max_attempts:
+        attempts += 1
+        # Extend the start date backwards to get more historical data
+        start_dt -= timedelta(days=30)  # Go back 30 days each attempt (was 5 days)
+        extended_start = start_dt.strftime("%Y-%m-%d")
+
+        logger.info(
+            f"Insufficient data ({len(data_df)} < {min_data_points}). "
+            f"Extending start date to {extended_start}"
+        )
+
+        data_df = get_data_sync(ticker, extended_start, end_date, interval=interval)
+
     if len(data_df) < min_data_points:
         logger.error(
             f"Insufficient data: {len(data_df)} rows available, "
             f"{min_data_points} required. Skipping backtest."
         )
         # Return empty results and None cerebro to signal failure upstream
+        return [], None
+
+    # Check if data_df is empty or has insufficient data
+    if data_df.empty:
+        logger.error(f"No data available for {ticker} in the specified date range.")
         return [], None
 
     data = bt.feeds.PandasData(
@@ -86,7 +115,7 @@ def run_backtest(
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(commission=commission)
 
-    # CORRECTED: Add analyzer classes instead of instantiated objects
+    # Add analyzer classes instead of instantiated objects
     from comprehensive_backtesting.parameter_optimization import SortinoRatio
 
     analyzer_classes = [
@@ -119,7 +148,7 @@ def run_backtest(
     for analyzer_class, params in analyzer_classes:
         cerebro.addanalyzer(analyzer_class, **params)
 
-    # Add 5-minute data
+    # Add data to cerebro
     cerebro.adddata(data, name=interval)
 
     print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")

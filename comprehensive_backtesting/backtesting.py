@@ -1,11 +1,6 @@
-import datetime
-import asyncio
-import backtrader as bt
 import pandas as pd
 
 from comprehensive_backtesting.utils import run_backtest
-from .data import get_data_sync, validate_data, preview_data_sync
-from .registry import get_strategy
 from .parameter_optimization import optimize_strategy
 from .reports import PerformanceAnalyzer, compare_strategies
 from .validation import ValidationAnalyzer
@@ -129,7 +124,7 @@ def run_walkforward_analysis(
     n_trials,
     min_trades,
     strategy_name,
-    interval,  # Default to 5-minute interval for Indian equities
+    interval,
 ):
     """Run walk-forward analysis."""
     logger.info(f"Running walk-forward analysis for {ticker}")
@@ -138,20 +133,6 @@ def run_walkforward_analysis(
         validation_analyzer = ValidationAnalyzer(
             strategy_name=strategy_name, ticker=ticker
         )
-
-        # Calculate maximum available days (60 days for intraday)
-        max_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
-        max_days = min(max_days, 60)  # Enforce 60-day limit
-
-        # Set defaults based on available data
-        default_window = min(30, max_days // 2)
-        default_out = min(15, max_days // 4)
-        default_step = min(15, max_days // 4)
-
-        # Use provided values or defaults
-        window_days = window_days if window_days is not None else default_window
-        out_days = out_days if out_days is not None else default_out
-        step_days = step_days if step_days is not None else default_step
 
         results = validation_analyzer.walk_forward_analysis(
             start_date=start_date,
@@ -259,14 +240,8 @@ def run_basic_comparison_analysis(
             logger.error(f"Failed to run {name} strategy: {str(e)}")
             continue
 
-    # if results_comparison:
-    #     try:
     comparison_df = compare_strategies(results_comparison)
-    # if not comparison_df.empty:
-    # print("\nStrategy Comparison:")
     print(comparison_df.round(3))
-    # except Exception as e:
-    #     logger.error(f"Strategy comparison failed: {str(e)}")
     return results_comparison
 
 
@@ -346,9 +321,9 @@ def run_complete_backtest(
         max_days = min(max_days, 60)
 
         # Set defaults based on available data
-        in_sample = min(30, max_days // 2)
-        out_sample = min(15, max_days // 4)
-        step = min(15, max_days // 4)
+        in_sample = min(60, max_days // 2)
+        out_sample = min(20, max_days // 4)
+        step = min(20, max_days // 4)
 
         wf_results = validation_analyzer.walk_forward_analysis(
             start_date=start_date,
