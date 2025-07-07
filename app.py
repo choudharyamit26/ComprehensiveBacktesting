@@ -207,16 +207,10 @@ def plot_walkforward_summary(wf_results):
         fig.update_yaxes(title_text="Equity Value", row=1, col=1)
         fig.update_yaxes(title_text="Parameter Value", row=2, col=1)
         fig.update_xaxes(title_text="Window Number", row=2, col=1)
-        import pdb
-
-        pdb.set_trace()
 
         return fig
 
     except Exception as e:
-        import pdb
-
-        pdb.set_trace()
         import traceback
 
         traceback.print_exc()
@@ -251,9 +245,6 @@ def plot_composite_backtest_results(results, data):
 
         # Basic strategy equity
         if "basic" in results and results["basic"]:
-            import pdb
-
-            pdb.set_trace()
             strategy = get_strategy(results["basic"])
             if hasattr(strategy, "analyzers") and hasattr(
                 strategy.analyzers, "timereturn"
