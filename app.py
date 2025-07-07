@@ -113,18 +113,28 @@ def plot_walkforward_summary(wf_results):
     Returns:
         go.Figure: Plotly figure showing the walk-forward summary
     """
-    # import pdb;pdb.set_trace()
     try:
-        if not wf_results or "windows" not in wf_results["walk_forward"]:
-            return None
+        import pdb
 
-        windows = wf_results["walk_forward"]["windows"]
+        pdb.set_trace()
+        # Validate input structure
+        if (
+            not wf_results
+            or "walk_forward" not in wf_results
+            or "windows" not in wf_results["walk_forward"]
+        ):
+            return None
+        windows = None
+        if "walk_forward" in wf_results:
+            windows = wf_results["walk_forward"]["windows"]
+        else:
+            windows = wf_results["windows"]
         valid_windows = [w for w in windows if w.get("valid", False)]
 
         if not valid_windows:
             return None
 
-        # Create subplots: Equity curve + Parameter evolution
+        # Create subplots
         fig = make_subplots(
             rows=2,
             cols=1,
@@ -133,80 +143,88 @@ def plot_walkforward_summary(wf_results):
             row_heights=[0.7, 0.3],
         )
 
-        # 1. Combined equity curve
-        cumulative = 100  # Starting at 100%
-        equity_points = [cumulative]
+        # ===== FIX 1: Handle missing time-series data =====
         dates = []
-        window_labels = []
+        equity_points = [100.0]  # Start with initial equity
+        current_equity = 100.0
+
+        # Sort windows by out-of-sample start date
+        valid_windows.sort(key=lambda w: w["periods"]["out_sample_start"])
+
+        # Add starting point for the first window
+        first_start = valid_windows[0]["periods"]["out_sample_start"]
+        dates.append(first_start)
 
         for i, window in enumerate(valid_windows):
-            if (
-                "out_sample_performance" in window
-                and "timereturn" in window["out_sample_performance"]
-            ):
-                equity_data = window["out_sample_performance"]["timereturn"]
-                if isinstance(equity_data, dict):
-                    sorted_dates = sorted(equity_data.keys())
-                    for date in sorted_dates:
-                        ret = equity_data[date]
-                        cumulative *= 1 + ret / 100  # Convert percentage to decimal
-                        equity_points.append(cumulative)
-                        dates.append(date)
-                        window_labels.append(f"Window {i+1}")
+            out_start = window["periods"]["out_sample_start"]
+            out_end = window["periods"]["out_sample_end"]
+            total_return = window["out_sample_performance"]["summary"][
+                "total_return_pct"
+            ]
 
-        if len(equity_points) > 1:
-            fig.add_trace(
-                go.Scatter(
-                    x=dates,
-                    y=equity_points,
-                    mode="lines",
-                    name="Combined Equity",
-                    line=dict(color="royalblue", width=3),
-                    text=window_labels,
-                    hovertemplate="<b>%{text}</b><br>Date: %{x}<br>Equity: %{y:.2f}<extra></extra>",
-                ),
-                row=1,
-                col=1,
-            )
+            # Add bridge point between windows (if needed)
+            if i > 0:
+                dates.append(out_start)
+                equity_points.append(current_equity)
 
-        # 2. Parameter evolution
-        param_data = {}
-        param_names = set()
+            # Calculate equity at end of window
+            window_return = 1 + (float(total_return) / 100.0)
+            current_equity *= window_return
+            dates.append(out_end)
+            equity_points.append(current_equity)
 
-        for i, window in enumerate(valid_windows):
-            params = window.get("best_params", {})
-            for param, value in params.items():
-                if param not in param_data:
-                    param_data[param] = []
-                param_data[param].append(value)
-                param_names.add(param)
-
-        param_names = sorted(param_names)
-        window_numbers = list(range(1, len(valid_windows) + 1))
-
-        for param in param_names:
-            if param in param_data and len(param_data[param]) == len(valid_windows):
-                fig.add_trace(
-                    go.Scatter(
-                        x=window_numbers,
-                        y=param_data[param],
-                        mode="lines+markers",
-                        name=param,
-                    ),
-                    row=2,
-                    col=1,
-                )
-
-        # Add window annotations
-        for i in range(len(valid_windows)):
-            fig.add_vline(x=i + 1, line_dash="dot", line_color="gray", row=2, col=1)
-
-        fig.update_layout(
-            title="Walk-Forward Analysis Summary", height=800, showlegend=True
+        # Add equity curve trace
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=equity_points,
+                mode="lines+markers",
+                name="Combined Equity",
+                line=dict(color="royalblue", width=2),
+                marker=dict(size=8),
+                hovertemplate="Date: %{x}<br>Equity: %{y:.2f}<extra></extra>",
+            ),
+            row=1,
+            col=1,
         )
 
-        fig.update_yaxes(title_text="Equity Value", row=1, col=1)
+        # ===== FIX 2: Parameter evolution =====
+        param_data = {}
+        window_numbers = []
+
+        for i, window in enumerate(valid_windows):
+            # Only include windows with trades
+            if window["out_sample_performance"]["trade_analysis"]["total_trades"] > 0:
+                window_numbers.append(i + 1)
+                params = window.get("best_params", {})
+                for param, value in params.items():
+                    if param not in param_data:
+                        param_data[param] = []
+                    param_data[param].append(value)
+
+        # Add parameter traces (if valid windows with trades exist)
+        if window_numbers:
+            for param, values in param_data.items():
+                if len(values) == len(window_numbers):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=window_numbers,
+                            y=values,
+                            mode="lines+markers",
+                            name=param,
+                            showlegend=True,
+                        ),
+                        row=2,
+                        col=1,
+                    )
+
+        # Final layout adjustments
+        fig.update_layout(
+            title="Walk-Forward Analysis Summary", height=800, hovermode="x unified"
+        )
+        fig.update_yaxes(title_text="Equity Value ($)", row=1, col=1, type="log")
         fig.update_yaxes(title_text="Parameter Value", row=2, col=1)
+        fig.update_xaxes(title_text="Date", row=1, col=1)
         fig.update_xaxes(title_text="Window Number", row=2, col=1)
 
         return fig
@@ -215,8 +233,8 @@ def plot_walkforward_summary(wf_results):
         import traceback
 
         traceback.print_exc()
-        logger.error(f"Error creating walk-forward summary plot: {e}")
-        return e
+        logger.error(f"Error creating walk-forward summary plot: {str(e)}")
+        return None
 
 
 def plot_composite_backtest_results(results, data):
@@ -1825,11 +1843,10 @@ def create_parameters_table(best_params_info):
         return pd.DataFrame()
 
 
-def create_trades_table(results, data=None, strategy=None):
+def create_trades_table(results, data=None):
     """Create a comprehensive trades table with all trade details including indicator values."""
     try:
-        if not strategy:
-            strategy = get_strategy(results)
+        strategy = get_strategy(results)
         logger.info(
             f"[create_trades_table] Using strategy: {strategy.__class__.__name__}"
         )
@@ -2907,7 +2924,7 @@ def display_optimized_results(results, data, ticker, timeframe):
         st.write("### 📊 Optimized Strategy - Detailed Trades Table")
         try:
             opt_trades_df, opt_trades_error = create_trades_table(
-                results["optimization"]["results"]
+                results["optimization"]["results"], data
             )
             if opt_trades_error:
                 st.warning(
@@ -3054,7 +3071,6 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
 
     # Walk-Forward Summary Visualization
     st.subheader("📊 Walk-Forward Analysis Summary")
-
     # 1. Combined equity curve and parameter evolution
     wf_summary_fig = plot_walkforward_summary(results)
     if wf_summary_fig:
@@ -3165,9 +3181,8 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                     interval=params["timeframe"],
                 )
                 trades_df, trades_error = create_trades_table(
-                    window.get("out_sample_performance"),
-                    out_sample_data,
                     params["selected_strategy"],
+                    out_sample_data,
                 )
                 if trades_error:
                     st.warning(f"Could not create trades table: {trades_error}")
@@ -4029,7 +4044,7 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
     # Comprehensive Trades Table
     st.write("### 📊 Detailed Trades Table")
     try:
-        trades_df, trades_error = create_trades_table(results)
+        trades_df, trades_error = create_trades_table(results, data)
         if trades_error:
             st.warning(f"Could not create trades table: {trades_error}")
         elif not trades_df.empty:
@@ -4301,7 +4316,7 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
     # Comprehensive Trades Table for Optimized Strategy
     st.write("### 📊 Optimized Strategy - Detailed Trades Table")
     try:
-        opt_trades_df, opt_trades_error = create_trades_table(results["results"])
+        opt_trades_df, opt_trades_error = create_trades_table(results["results"], data)
         if opt_trades_error:
             st.warning(f"Could not create optimized trades table: {opt_trades_error}")
         elif not opt_trades_df.empty:
@@ -4476,7 +4491,6 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
 
     # Walk-Forward Summary Visualization
     st.subheader("📊 Walk-Forward Analysis Summary")
-
     # 1. Combined equity curve and parameter evolution
     wf_summary_fig = plot_walkforward_summary(results)
     if wf_summary_fig:
