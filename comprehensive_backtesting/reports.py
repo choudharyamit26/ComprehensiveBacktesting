@@ -284,7 +284,6 @@ class PerformanceAnalyzer:
             else:
                 profit_factor = abs(total_win_pnl / total_loss_pnl)
 
-            # Extract detailed trade list if available (Backtrader 1.9+)
             trades_list = []
             closed_trades = trade_analyzer.get("closed", []) or trade_analyzer.get(
                 "trades", []

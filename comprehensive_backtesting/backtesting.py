@@ -246,7 +246,16 @@ def run_basic_comparison_analysis(
 
 
 def run_complete_backtest(
-    ticker, start_date, end_date, strategy_class, analyzers, interval, n_trials
+    ticker,
+    start_date,
+    end_date,
+    window_days,
+    out_days,
+    step_days,
+    strategy_class,
+    analyzers,
+    interval,
+    n_trials,
 ):
     """Run a complete demonstration of all analyses."""
     logger.info(f"Running complete backtest for {ticker}")
@@ -316,21 +325,12 @@ def run_complete_backtest(
             strategy_name=strategy_class, ticker=ticker
         )
 
-        # Calculate maximum available days
-        max_days = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
-        max_days = min(max_days, 60)
-
-        # Set defaults based on available data
-        in_sample = min(60, max_days // 2)
-        out_sample = min(20, max_days // 4)
-        step = min(20, max_days // 4)
-
         wf_results = validation_analyzer.walk_forward_analysis(
             start_date=start_date,
             end_date=end_date,
-            in_sample_days=in_sample,
-            out_sample_days=out_sample,
-            step_days=step,
+            in_sample_days=window_days,
+            out_sample_days=out_days,
+            step_days=step_days,
             n_trials=n_trials,
             min_trades=1,
             interval=interval,
