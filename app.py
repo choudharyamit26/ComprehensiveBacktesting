@@ -113,11 +113,12 @@ def plot_walkforward_summary(wf_results):
     Returns:
         go.Figure: Plotly figure showing the walk-forward summary
     """
+    # import pdb;pdb.set_trace()
     try:
-        if not wf_results or "windows" not in wf_results:
+        if not wf_results or "windows" not in wf_results["walk_forward"]:
             return None
 
-        windows = wf_results["windows"]
+        windows = wf_results["walk_forward"]["windows"]
         valid_windows = [w for w in windows if w.get("valid", False)]
 
         if not valid_windows:
@@ -1824,10 +1825,11 @@ def create_parameters_table(best_params_info):
         return pd.DataFrame()
 
 
-def create_trades_table(results, data=None):
+def create_trades_table(results, data=None, strategy=None):
     """Create a comprehensive trades table with all trade details including indicator values."""
     try:
-        strategy = get_strategy(results)
+        if not strategy:
+            strategy = get_strategy(results)
         logger.info(
             f"[create_trades_table] Using strategy: {strategy.__class__.__name__}"
         )
@@ -3055,9 +3057,6 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
 
     # 1. Combined equity curve and parameter evolution
     wf_summary_fig = plot_walkforward_summary(results)
-    print("<<<<<================================>>>>")
-    print(wf_summary_fig)
-    print("<<<<<================================>>>>>")
     if wf_summary_fig:
         st.plotly_chart(wf_summary_fig, use_container_width=True)
     else:
@@ -3166,7 +3165,9 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                     interval=params["timeframe"],
                 )
                 trades_df, trades_error = create_trades_table(
-                    window.get("out_sample_strategy"), out_sample_data
+                    window.get("out_sample_performance"),
+                    out_sample_data,
+                    params["selected_strategy"],
                 )
                 if trades_error:
                     st.warning(f"Could not create trades table: {trades_error}")
@@ -4584,7 +4585,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                     interval=params["timeframe"],
                 )
                 trades_df, trades_error = create_trades_table(
-                    window.get("out_sample_strategy"), out_sample_data
+                    window.get("out_sample_performance"), out_sample_data
                 )
                 if trades_error:
                     st.warning(f"Could not create trades table: {trades_error}")
