@@ -114,9 +114,6 @@ def plot_walkforward_summary(wf_results):
         go.Figure: Plotly figure showing the walk-forward summary
     """
     try:
-        import pdb
-
-        pdb.set_trace()
         # Validate input structure
         if (
             not wf_results
@@ -3109,17 +3106,16 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         "out_sample_end",
     ]
 
+    # Use the correct windows variable from walk_forward_data
     windows = walk_forward_data["windows"]
-    for i, window in enumerate(windows):
-        # Check if window is valid and has required periods data
-        if (
-            not window.get("valid", False)
-            or "periods" not in window
-            or not all(key in window["periods"] for key in required_period_keys)
-        ):
-            st.warning(f"Window {i+1} is invalid or missing period data. Skipping.")
-            continue
-
+    valid_windows = [
+        w
+        for w in windows
+        if w.get("valid", False)
+        and "periods" in w
+        and all(key in w["periods"] for key in required_period_keys)
+    ]
+    for i, window in enumerate(valid_windows):
         with st.expander(
             f"Window {i+1} (In: {window['periods']['in_sample_start']} to {window['periods']['in_sample_end']}, Out: {window['periods']['out_sample_start']} to {window['periods']['out_sample_end']})",
             expanded=False,
@@ -3174,24 +3170,14 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
             # Detailed Trades Table for this window
             st.write("### 💰 Detailed Trades Table")
             try:
-                out_sample_data = get_data_sync(
-                    params["ticker"],
-                    window["periods"]["out_sample_start"],
-                    window["periods"]["out_sample_end"],
-                    interval=params["timeframe"],
-                )
-                trades_df, trades_error = create_trades_table(
-                    params["selected_strategy"],
-                    out_sample_data,
-                )
-                if trades_error:
-                    st.warning(f"Could not create trades table: {trades_error}")
-                elif not trades_df.empty:
+                trades = window.get("out_sample_performance", {}).get("trades", [])
+                if trades and isinstance(trades, list) and len(trades) > 0:
+                    trades_df = pd.DataFrame(trades)
                     st.dataframe(trades_df, use_container_width=True)
                 else:
                     st.info("No trades executed in this out-sample period")
             except Exception as e:
-                st.error(f"Error creating trades table: {str(e)}")
+                st.error(f"Error displaying trades: {e}")
 
             # Trade Statistics Summary
             st.write("### 📊 Trade Statistics")
@@ -3213,9 +3199,9 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                 st.metric("Max Consecutive Losses", ta.get("consecutive_losses", 0))
 
             # Strategy Comparison with Previous Window
-            if i > 0 and "out_sample_strategy" in windows[i - 1]:
+            if i > 0 and "out_sample_strategy" in valid_windows[i - 1]:
                 st.write("### 🔄 Strategy Comparison with Previous Window")
-                prev_window = windows[i - 1]
+                prev_window = valid_windows[i - 1]
                 if prev_window.get("valid", False):
                     comparison_data = []
                     curr_perf = window.get("out_sample_performance", {}).get(
@@ -3262,12 +3248,12 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                                 ],
                             )
                         )
-                        fig.update_layout(
-                            title="Window Performance Comparison",
-                            barmode="group",
-                            height=500,
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
+                    fig.update_layout(
+                        title="Window Performance Comparison",
+                        barmode="group",
+                        height=500,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
     # 4. Combined equity curve visualization
     st.write("### 📈 Combined Equity Curve")

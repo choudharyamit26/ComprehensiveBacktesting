@@ -13,6 +13,87 @@ logger = logging.getLogger(__name__)
 
 
 class PerformanceAnalyzer:
+    def get_trades(self):
+        """Return the list of trades as a list of dicts (for walk-forward saving/UI)."""
+        if self.is_dict_input:
+            # Try to get from processed results if available
+            trade_analysis = self.processed_results.get("trade_analysis", {})
+            return trade_analysis.get("trades", [])
+
+        try:
+            if self.strategy is None:
+                return []
+            trades_analyzer = getattr(self.strategy.analyzers, "trades", None)
+            if trades_analyzer is None:
+                return []
+            trade_analyzer = trades_analyzer.get_analysis()
+            closed_trades = trade_analyzer.get("closed", []) or trade_analyzer.get(
+                "trades", []
+            )
+            trades_list = []
+            if (
+                isinstance(closed_trades, list)
+                and closed_trades
+                and isinstance(closed_trades[0], dict)
+            ):
+                for i, trade in enumerate(closed_trades):
+                    try:
+                        entry_date = trade.get("datein", None)
+                        exit_date = trade.get("dateout", None)
+                        if entry_date is not None:
+                            entry_date = pd.to_datetime(entry_date, unit="s")
+                        if exit_date is not None:
+                            exit_date = pd.to_datetime(exit_date, unit="s")
+                        trade_info = {
+                            "trade_id": i + 1,
+                            "entry_date": entry_date,
+                            "exit_date": exit_date,
+                            "size": trade.get("size", 0),
+                            "price_in": trade.get("pricein", 0),
+                            "price_out": trade.get("priceout", 0),
+                            "pnl": trade.get("pnl", 0),
+                            "pnl_comm": trade.get("pnlcomm", 0),
+                            "direction": (
+                                "long" if trade.get("size", 0) > 0 else "short"
+                            ),
+                        }
+                        trades_list.append(trade_info)
+                    except Exception:
+                        continue
+            return trades_list
+        except Exception:
+            return []
+
+    def get_timereturn(self):
+        """Return the timereturn series as a dict (date: return) for equity curve plotting."""
+        if self.is_dict_input:
+            # Try to get from processed results if available
+            risk_metrics = self.processed_results.get("risk_metrics", {})
+            # Not always present, so fallback to timereturn extraction
+            timereturn = self.processed_results.get("timereturn", None)
+            if timereturn is not None:
+                return timereturn
+            # Try to extract from resampled_returns if present
+            resampled = self.processed_results.get("resampled_returns", {})
+            if "resampled_returns_pct" in resampled:
+                return resampled["resampled_returns_pct"]
+            return {}
+
+        try:
+            if self.strategy is None:
+                return {}
+            timereturn_analyzer = getattr(self.strategy.analyzers, "timereturn", None)
+            if timereturn_analyzer is None:
+                return {}
+            returns = pd.Series(timereturn_analyzer.get_analysis())
+            if returns.empty:
+                return {}
+            # Convert index to string for JSON serialization
+            returns.index = returns.index.map(str)
+            return returns.to_dict()
+        except Exception:
+            return {}
+
     """Comprehensive performance analysis and reporting for backtesting results."""
 
     def __init__(self, strategy_results, initial_cash=100000.0):

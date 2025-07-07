@@ -892,6 +892,33 @@ class ValidationAnalyzer:
             in_sample_perf = in_sample_analyzer.generate_full_report()
             out_sample_perf = out_sample_analyzer.generate_full_report()
 
+            # --- PATCH: Add trades and timereturn to out_sample_perf ---
+            try:
+                out_sample_perf["trades"] = (
+                    out_sample_analyzer.get_trades()
+                )  # Should be a list of dicts
+            except Exception as e:
+                out_sample_perf["trades"] = []
+                logger.warning(f"Could not extract trades: {e}")
+
+            try:
+                out_sample_perf["timereturn"] = (
+                    out_sample_analyzer.get_timereturn()
+                )  # Should be a dict or pd.Series
+            except Exception as e:
+                out_sample_perf["timereturn"] = {}
+                logger.warning(f"Could not extract timereturn: {e}")
+
+            # Optionally, do the same for in_sample_perf if needed
+            try:
+                in_sample_perf["trades"] = in_sample_analyzer.get_trades()
+            except Exception as e:
+                in_sample_perf["trades"] = []
+            try:
+                in_sample_perf["timereturn"] = in_sample_analyzer.get_timereturn()
+            except Exception as e:
+                in_sample_perf["timereturn"] = {}
+
             # Add benchmark alpha
             in_sample_perf["summary"]["alpha"] = (
                 in_sample_perf["summary"].get("total_return_pct", 0)

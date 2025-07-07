@@ -10,9 +10,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def run_basic_backtest(
-    strategy_class, ticker, start_date, end_date, interval, analyzers=None
-):
+def run_basic_backtest(strategy_class, ticker, start_date, end_date, interval):
     """Run a basic backtest with default parameters."""
     logger.info(f"Running basic backtest for {ticker}")
     print(f"\n=== BASIC BACKTEST: {ticker} ===")
@@ -23,7 +21,6 @@ def run_basic_backtest(
             start_date=start_date,
             end_date=end_date,
             interval=interval,
-            analyzer=analyzers,
         )
         analyzer = PerformanceAnalyzer(results)
         analyzer.print_report()
@@ -43,7 +40,6 @@ def run_parameter_optimization(
     end_date,
     interval,
     n_trials,
-    analyzers=None,
 ):
     """Run parameter optimization analysis."""
     logger.info(f"Running parameter optimization for {ticker}")
@@ -57,7 +53,6 @@ def run_parameter_optimization(
             end_date=end_date,
             n_trials=n_trials,
             interval=interval,
-            analyzers=analyzers,
         )
         print("\nOptimized Strategy Performance:")
         analyzer_optimized = PerformanceAnalyzer(optimization_results["results"])
@@ -144,6 +139,13 @@ def run_walkforward_analysis(
             min_trades=min_trades,
             interval=interval,
         )
+        # Confirm trades extraction for each window if present
+        if "windows" in results:
+            for idx, window in enumerate(results["windows"]):
+                trades = window.get("out_sample_performance", {}).get("trades", [])
+                logger.info(
+                    f"[Walk-Forward] Window {idx+1}: {len(trades)} trades extracted."
+                )
         summary = results.get("summary_stats", {})
         print(f"\nWalk-Forward Analysis Summary:")
         print(
@@ -270,7 +272,6 @@ def run_complete_backtest(
             start_date,
             end_date,
             interval=interval,
-            analyzers=analyzers,
         )
         results["basic"] = basic_results
         results["basic_cerebro"] = basic_cerebro
@@ -290,7 +291,6 @@ def run_complete_backtest(
             end_date=end_date,
             n_trials=n_trials,
             interval=interval,
-            analyzers=analyzers,
         )
         results["optimization"] = opt_results
     except Exception as e:
