@@ -142,10 +142,37 @@ def run_walkforward_analysis(
         # Confirm trades extraction for each window if present
         if "windows" in results:
             for idx, window in enumerate(results["windows"]):
-                trades = window.get("out_sample_performance", {}).get("trades", [])
+                # Prefer completed_trades if available, else fallback to trades
+                completed_trades = None
+                out_perf = window.get("out_sample_performance", {})
+                if isinstance(out_perf, dict):
+                    completed_trades = out_perf.get("completed_trades")
+                    trades = (
+                        completed_trades
+                        if completed_trades is not None
+                        else out_perf.get("trades", [])
+                    )
+                else:
+                    trades = []
                 logger.info(
                     f"[Walk-Forward] Window {idx+1}: {len(trades)} trades extracted."
                 )
+                # Print trade details for UI (or you can format as needed)
+                if trades:
+                    print(f"\nWindow {idx+1} Completed Trades:")
+                    print("-" * 120)
+                    print(
+                        f"{'Ref':>4} {'Entry Time':>20} {'Exit Time':>20} {'Entry Px':>10} {'Exit Px':>10} {'Size':>5} {'PnL':>10} {'PnL Net':>10} {'Comm':>8} {'Status':>8} {'Dir':>6} {'Bars':>5}"
+                    )
+                    print("-" * 120)
+                    for t in trades:
+                        print(
+                            f"{t.get('ref', '-')!s:>4} {str(t.get('entry_time', '-')):>20} {str(t.get('exit_time', '-')):>20} "
+                            f"{t.get('entry_price', '-'):>10.2f} {t.get('exit_price', '-'):>10.2f} {t.get('size', '-'):>5} "
+                            f"{t.get('pnl', '-'):>10.2f} {t.get('pnl_net', '-'):>10.2f} {t.get('commission', '-'):>8.2f} "
+                            f"{t.get('status', '-'):>8} {t.get('direction', '-'):>6} {t.get('bars_held', '-'):>5}"
+                        )
+                    print("-" * 120)
         summary = results.get("summary_stats", {})
         print(f"\nWalk-Forward Analysis Summary:")
         print(

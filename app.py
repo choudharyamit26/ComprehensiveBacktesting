@@ -2484,7 +2484,11 @@ def display_composite_results(results, data, ticker, timeframe):
     st.subheader("Strategy Comparison")
     composite_fig = plot_composite_backtest_results(results, data)
     if composite_fig:
-        st.plotly_chart(composite_fig, use_container_width=True)
+        st.plotly_chart(
+            composite_fig,
+            use_container_width=True,
+            key=f"composite_fig_{ticker}_{timeframe}",
+        )
     else:
         st.warning("Could not generate composite strategy comparison")
 
@@ -2522,9 +2526,6 @@ def display_strategy_comparison(results):
     if "basic" in results and "optimization" in results and "walk_forward" in results:
         basic_analyzer = PerformanceAnalyzer(results["basic"])
         opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
-
-        # Debug: Check the structure of walk_forward results
-        print("Walk-forward structure:", results["walk_forward"])
 
         if results["walk_forward"]["windows"]:
             wf_window = results["walk_forward"]["windows"][-1]
@@ -2734,7 +2735,9 @@ def display_strategy_comparison(results):
                 barmode="group",
                 height=500,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(
+                fig, use_container_width=True, key="basic_vs_optimized_comparison"
+            )
     else:
         st.warning("Incomplete results for strategy comparison")
 
@@ -2763,7 +2766,7 @@ def display_basic_results(results, data, ticker):
             data, results["basic"], "Basic Strategy Results"
         )
         if fig:
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=f"basic_chart_{ticker}")
 
         # Trades table for basic strategy
         st.write("### 💰 Basic Strategy Trades")
@@ -2812,7 +2815,11 @@ def display_optimized_results(results, data, ticker, timeframe):
         st.write("### 🗺️ Parameter Optimization Landscape")
         contour_fig = plot_contour(results["optimization"]["study"])
         if contour_fig:
-            st.plotly_chart(contour_fig, use_container_width=True)
+            st.plotly_chart(
+                contour_fig,
+                use_container_width=True,
+                key=f"contour_fig_{ticker}_{timeframe}",
+            )
             if st.button("Export Contour Plot"):
                 buf = BytesIO()
                 contour_fig.write_image(buf, format="png")
@@ -2831,7 +2838,11 @@ def display_optimized_results(results, data, ticker, timeframe):
             data, results["optimization"]["results"], "Optimized Strategy Results"
         )
         if plotly_fig:
-            st.plotly_chart(plotly_fig, use_container_width=True)
+            st.plotly_chart(
+                plotly_fig,
+                use_container_width=True,
+                key=f"optimized_chart_{ticker}_{timeframe}",
+            )
             if st.button("Export Optimized Strategy Chart"):
                 buf = BytesIO()
                 plotly_fig.write_image(buf, format="png")
@@ -3025,7 +3036,11 @@ def display_optimized_results(results, data, ticker, timeframe):
         st.write("### 📊 Optimized Strategy - Trading Time Analysis")
         time_chart = plot_time_analysis(time_analysis)
         if time_chart:
-            st.plotly_chart(time_chart, use_container_width=True)
+            st.plotly_chart(
+                time_chart,
+                use_container_width=True,
+                key=f"optimized_time_chart_{ticker}_{timeframe}",
+            )
     else:
         st.warning(
             "Could not analyze time ranges: "
@@ -3096,7 +3111,6 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
             )
     else:
         st.info("No parameter evolution data available")
-
     # 3. Display each window in expanders
     st.write("### 📅 Detailed Window Analysis")
     required_period_keys = [
@@ -3106,7 +3120,6 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         "out_sample_end",
     ]
 
-    # Use the correct windows variable from walk_forward_data
     windows = walk_forward_data["windows"]
     valid_windows = [
         w
@@ -3116,6 +3129,36 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         and all(key in w["periods"] for key in required_period_keys)
     ]
     for i, window in enumerate(valid_windows):
+        periods = window["periods"]
+        out_perf = window.get("out_sample_performance", {})
+        # Prefer completed_trades if available, else fallback to trades
+        completed_trades = (
+            out_perf.get("completed_trades") if isinstance(out_perf, dict) else None
+        )
+        trades = (
+            completed_trades
+            if completed_trades is not None
+            else (out_perf.get("trades", []) if isinstance(out_perf, dict) else [])
+        )
+        with st.expander(
+            f"Window {i+1}: {periods['out_sample_start']} to {periods['out_sample_end']} ({len(trades)} trades)",
+            expanded=False,
+        ):
+            st.write(
+                f"**In-Sample:** {periods['in_sample_start']} to {periods['in_sample_end']}"
+            )
+            st.write(
+                f"**Out-of-Sample:** {periods['out_sample_start']} to {periods['out_sample_end']}"
+            )
+            if trades:
+                trade_df = pd.DataFrame(trades)
+                # Format datetime columns if present
+                for col in ["entry_time", "exit_time", "entry_date", "exit_date"]:
+                    if col in trade_df.columns:
+                        trade_df[col] = pd.to_datetime(trade_df[col], errors="coerce")
+                st.dataframe(trade_df)
+            else:
+                st.info("No trades in this window.")
         with st.expander(
             f"Window {i+1} (In: {window['periods']['in_sample_start']} to {window['periods']['in_sample_end']}, Out: {window['periods']['out_sample_start']} to {window['periods']['out_sample_end']})",
             expanded=False,
@@ -3165,12 +3208,53 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
             equity_data = window.get("out_sample_performance", {}).get("timereturn", {})
             equity_fig = plot_equity_curve(equity_data)
             if equity_fig:
-                st.plotly_chart(equity_fig, use_container_width=True)
+                st.plotly_chart(
+                    equity_fig,
+                    use_container_width=True,
+                    key=f"walkforward_equity_{i}_{ticker}_{timeframe}",
+                )
 
             # Detailed Trades Table for this window
-            st.write("### 💰 Detailed Trades Table")
+            st.write("### 💰 Detailed Out Sample Trades Table")
             try:
-                trades = window.get("out_sample_performance", {}).get("trades", [])
+                trades = (
+                    window.get("out_sample_performance", {})
+                    .get("trade_analysis")
+                    .get("trades", [])
+                )
+                total_trades = (
+                    window.get("out_sample_performance", {})
+                    .get("trade_analysis", {})
+                    .get("total_trades", 0)
+                )
+                if total_trades > 0 and (not trades or len(trades) == 0):
+                    st.warning(
+                        "Total trades > 0 but trade details are missing. This may indicate a data extraction or serialization issue. Please check logs and trade analyzer output."
+                    )
+                if trades and isinstance(trades, list) and len(trades) > 0:
+                    trades_df = pd.DataFrame(trades)
+                    st.dataframe(trades_df, use_container_width=True)
+                else:
+                    st.info("No trades executed in this out-sample period")
+            except Exception as e:
+                st.error(f"Error displaying trades: {e}")
+
+            st.write("### 💰 Detailed In Sample Trades Table")
+            try:
+                trades = (
+                    window.get("in_sample_performance", {})
+                    .get("trade_analysis")
+                    .get("trades", [])
+                )
+                total_trades = (
+                    window.get("in_sample_performance", {})
+                    .get("trade_analysis", {})
+                    .get("total_trades", 0)
+                )
+                if total_trades > 0 and (not trades or len(trades) == 0):
+                    st.warning(
+                        "Total trades > 0 but trade details are missing. This may indicate a data extraction or serialization issue. Please check logs and trade analyzer output."
+                    )
                 if trades and isinstance(trades, list) and len(trades) > 0:
                     trades_df = pd.DataFrame(trades)
                     st.dataframe(trades_df, use_container_width=True)
@@ -3448,7 +3532,7 @@ def display_complete_backtest_summary(results, ticker, timeframe):
             fig.update_layout(
                 title="Trade Statistics Comparison", height=400, showlegend=False
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="trade_stats_comparison")
 
         # Combined Best Trading Times
         st.write("### ⏰ Combined Best Trading Times")
@@ -3935,7 +4019,6 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
         start_date=params["start_date"].strftime("%Y-%m-%d"),
         end_date=params["end_date"].strftime("%Y-%m-%d"),
         interval=params["timeframe"],
-        analyzers=analyzer_config,
     )
     progress_bar.progress(100)
     status_text.text("Backtest complete!")
@@ -4160,7 +4243,6 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
         end_date=params["end_date"].strftime("%Y-%m-%d"),
         n_trials=params["n_trials"],
         interval=params["timeframe"],
-        analyzers=analyzer_config,
     )
 
     progress_bar.progress(100)
@@ -4480,7 +4562,11 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
     # 1. Combined equity curve and parameter evolution
     wf_summary_fig = plot_walkforward_summary(results)
     if wf_summary_fig:
-        st.plotly_chart(wf_summary_fig, use_container_width=True)
+        st.plotly_chart(
+            wf_summary_fig,
+            use_container_width=True,
+            key=f"wf_summary_fig_{params['ticker']}_{params['start_date']}_{params['end_date']}",
+        )
     else:
         st.warning("Could not generate walk-forward summary visualization")
 
@@ -4573,7 +4659,11 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             equity_data = window.get("out_sample_performance", {}).get("timereturn", {})
             equity_fig = plot_equity_curve(equity_data)
             if equity_fig:
-                st.plotly_chart(equity_fig, use_container_width=True)
+                st.plotly_chart(
+                    equity_fig,
+                    use_container_width=True,
+                    key=f"wf_equity_{i}_{params['ticker']}_{params['start_date']}_{params['end_date']}",
+                )
 
             # Detailed Trades Table for this window
             st.write("### 💰 Detailed Trades Table")
@@ -4670,7 +4760,11 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                             barmode="group",
                             height=500,
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(
+                        fig,
+                        use_container_width=True,
+                        key=f"wf_window_comparison_{i}_{params['ticker']}_{params['start_date']}_{params['end_date']}",
+                    )
 
     # 4. Combined equity curve visualization
     st.write("### 📈 Combined Equity Curve")
@@ -4707,7 +4801,11 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             yaxis_title="Cumulative Value",
             showlegend=True,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key=f"wf_combined_equity_{params['ticker']}_{params['start_date']}_{params['end_date']}",
+        )
 
     # 5. Export option
     if st.button("Export Full Walk-Forward Report", key="export_wf"):

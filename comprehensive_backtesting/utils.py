@@ -118,6 +118,7 @@ def run_backtest(
     # Add analyzer classes instead of instantiated objects
     from comprehensive_backtesting.parameter_optimization import SortinoRatio
 
+    print(bt.analyzers.Transactions)
     analyzer_classes = [
         (
             bt.analyzers.SharpeRatio,
@@ -143,6 +144,7 @@ def run_backtest(
         ),
         (bt.analyzers.SQN, {"_name": "sqn"}),
         (SortinoRatio, {"_name": "sortino"}),
+        (bt.analyzers.Transactions, {"_name": "trade_history"}),
     ]
 
     for analyzer_class, params in analyzer_classes:

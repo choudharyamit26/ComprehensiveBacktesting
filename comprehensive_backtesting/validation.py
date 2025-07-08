@@ -892,11 +892,12 @@ class ValidationAnalyzer:
             in_sample_perf = in_sample_analyzer.generate_full_report()
             out_sample_perf = out_sample_analyzer.generate_full_report()
 
-            # --- PATCH: Add trades and timereturn to out_sample_perf ---
             try:
-                out_sample_perf["trades"] = (
-                    out_sample_analyzer.get_trades()
-                )  # Should be a list of dicts
+                if "trade_analysis" not in out_sample_perf:
+                    out_sample_perf["trade_analysis"] = {}
+                out_sample_perf["trade_analysis"][
+                    "trades"
+                ] = out_sample_analyzer.get_trades()
             except Exception as e:
                 out_sample_perf["trades"] = []
                 logger.warning(f"Could not extract trades: {e}")
