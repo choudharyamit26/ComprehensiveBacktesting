@@ -334,61 +334,60 @@ class PerformanceAnalyzer:
                 logger.warning("No strategy available for trade analysis")
                 return default_analysis
 
-            # Get trades analyzer
-            analyzers = getattr(self.strategy, "analyzers", None)
-            if analyzers is None:
-                logger.warning("No analyzers found on strategy")
-                return default_analysis
-
-            trades_analyzer = getattr(analyzers, "trades", None)
-            if trades_analyzer is None:
-                logger.warning("Trade analyzer not available on strategy instance")
-                return default_analysis
-
-            trade_analyzer = trades_analyzer.get_analysis()
-            total_trades = trade_analyzer.get("total", {}).get("total", 0) or 0
-
+            trades_list = self.get_trades()
+            total_trades = len(trades_list)
             if total_trades == 0:
                 logger.warning("No trades executed")
                 return {**default_analysis, "message": "No trades executed"}
 
-            # Get trade details
-            trades_list = self.get_trades()
-
-            # Extract trade statistics
-            won_trades = trade_analyzer.get("won", {}).get("total", 0) or 0
-            lost_trades = trade_analyzer.get("lost", {}).get("total", 0) or 0
+            # Calculate trade statistics from trades_list
+            winning_trades = [t for t in trades_list if t.get("pnl", 0) > 0]
+            losing_trades = [t for t in trades_list if t.get("pnl", 0) < 0]
+            won_trades = len(winning_trades)
+            lost_trades = len(losing_trades)
             win_rate = (won_trades / total_trades * 100) if total_trades > 0 else 0
-
             avg_win = (
-                trade_analyzer.get("won", {}).get("pnl", {}).get("average", 0) or 0
+                np.mean([t["pnl"] for t in winning_trades]) if winning_trades else 0
             )
             avg_loss = (
-                trade_analyzer.get("lost", {}).get("pnl", {}).get("average", 0) or 0
+                np.mean([t["pnl"] for t in losing_trades]) if losing_trades else 0
             )
-
             total_win_pnl = (
-                trade_analyzer.get("won", {}).get("pnl", {}).get("total", 0) or 0
+                np.sum([t["pnl"] for t in winning_trades]) if winning_trades else 0
             )
             total_loss_pnl = (
-                trade_analyzer.get("lost", {}).get("pnl", {}).get("total", 0) or 0
+                np.sum([t["pnl"] for t in losing_trades]) if losing_trades else 0
             )
-
-            # Calculate profit factor
+            # Profit factor
             profit_factor = 0
             if total_win_pnl > 0 and total_loss_pnl < 0:
                 profit_factor = abs(total_win_pnl / total_loss_pnl)
             elif total_win_pnl > 0 and total_loss_pnl == 0:
                 profit_factor = float("inf")
 
-            # Get additional metrics
-            avg_trade_duration = trade_analyzer.get("len", {}).get("average", 0) or 0
-            max_winning_streak = (
-                trade_analyzer.get("streak", {}).get("won", {}).get("longest", 0) or 0
-            )
-            max_losing_streak = (
-                trade_analyzer.get("streak", {}).get("lost", {}).get("longest", 0) or 0
-            )
+            # Average trade duration (in bars, if available)
+            durations = [
+                t["bar_held"] for t in trades_list if t.get("bar_held") is not None
+            ]
+            avg_trade_duration = np.mean(durations) if durations else 0
+
+            # Max winning/losing streaks (by consecutive wins/losses)
+            max_winning_streak = 0
+            max_losing_streak = 0
+            current_win_streak = 0
+            current_loss_streak = 0
+            for t in trades_list:
+                if t.get("pnl", 0) > 0:
+                    current_win_streak += 1
+                    max_winning_streak = max(max_winning_streak, current_win_streak)
+                    current_loss_streak = 0
+                elif t.get("pnl", 0) < 0:
+                    current_loss_streak += 1
+                    max_losing_streak = max(max_losing_streak, current_loss_streak)
+                    current_win_streak = 0
+                else:
+                    current_win_streak = 0
+                    current_loss_streak = 0
 
             # Process orders if available
             orders_list = []
@@ -430,7 +429,9 @@ class PerformanceAnalyzer:
                 "trades": trades_list,
                 "orders": orders_list,
             }
-            logger.info("Generated trade analysis with detailed trade and order list")
+            logger.info(
+                "Generated trade analysis with detailed trade and order list (from trades_list)"
+            )
             return analysis
 
         except Exception as e:
