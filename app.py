@@ -115,12 +115,12 @@ def plot_walkforward_summary(wf_results):
     """
     try:
         # Validate input structure
-        if (
-            not wf_results
-            or "walk_forward" not in wf_results
-            or "windows" not in wf_results["walk_forward"]
-        ):
-            return None
+        # if (
+        #     not wf_results
+        #     or "walk_forward" not in wf_results
+        #     or "windows" not in wf_results["walk_forward"]
+        # ):
+        #     return None
         windows = None
         if "walk_forward" in wf_results:
             windows = wf_results["walk_forward"]["windows"]
@@ -491,16 +491,16 @@ def analyze_best_trades(results):
             trade_list = []
             for t in trades:
                 try:
-                    entry_date = t["entry_date"]
-                    exit_date = t["exit_date"]
+                    entry_time = t["entry_time"]
+                    exit_time = t["exit_time"]
                     pnl = t.get("pnl", 0)
                     size = t.get("size", 1)
                     trade_info = {
                         "trade_id": t.get("trade_id", None),
-                        "entry_date": (
-                            str(entry_date) if entry_date is not None else "-"
+                        "entry_time": (
+                            str(entry_time) if entry_time is not None else "-"
                         ),
-                        "exit_date": str(exit_date) if exit_date is not None else "-",
+                        "exit_time": str(exit_time) if exit_time is not None else "-",
                         "entry_price": t.get("price_in", 0),
                         "exit_price": t.get("price_out", 0),
                         "pnl": pnl,
@@ -566,12 +566,12 @@ def analyze_best_trades(results):
         ):
             for i, trade in enumerate(closed_trades):
                 try:
-                    entry_date = (
+                    entry_time = (
                         pd.to_datetime(trade["datein"], unit="s")
                         .tz_localize("UTC")
                         .tz_convert(IST)
                     )
-                    exit_date = (
+                    exit_time = (
                         pd.to_datetime(trade["dateout"], unit="s")
                         .tz_localize("UTC")
                         .tz_convert(IST)
@@ -580,12 +580,12 @@ def analyze_best_trades(results):
 
                     trade_info = {
                         "trade_id": i + 1,
-                        "entry_date": entry_date,
-                        "exit_date": exit_date,
+                        "entry_time": entry_time,
+                        "exit_time": exit_time,
                         "entry_price": trade["pricein"],
                         "exit_price": trade["priceout"],
                         "pnl": pnl,
-                        "duration_hours": (exit_date - entry_date).total_seconds()
+                        "duration_hours": (exit_time - entry_time).total_seconds()
                         / 3600,
                         "return_pct": (
                             (pnl / (trade["pricein"] * trade.get("size", 1))) * 100
@@ -643,8 +643,8 @@ def analyze_best_trades(results):
             best_trades = [
                 {
                     "trade_id": 1,
-                    "entry_date": None,
-                    "exit_date": None,
+                    "entry_time": None,
+                    "exit_time": None,
                     "entry_price": None,
                     "exit_price": None,
                     "pnl": best_trade_pnl,
@@ -1049,12 +1049,12 @@ def create_candlestick_chart_with_trades(
             if isinstance(closed_trades, list):
                 for i, trade in enumerate(closed_trades):
                     try:
-                        entry_date = (
+                        entry_time = (
                             pd.to_datetime(trade["datein"], unit="s")
                             .tz_localize("UTC")
                             .tz_convert(IST)
                         )
-                        exit_date = (
+                        exit_time = (
                             pd.to_datetime(trade["dateout"], unit="s")
                             .tz_localize("UTC")
                             .tz_convert(IST)
@@ -1063,16 +1063,16 @@ def create_candlestick_chart_with_trades(
                         exit_price = trade["priceout"]
                         pnl = trade.get("pnl", 0)
 
-                        buy_dates.append(entry_date)
+                        buy_dates.append(entry_time)
                         buy_prices.append(entry_price)
-                        sell_dates.append(exit_date)
+                        sell_dates.append(exit_time)
                         sell_prices.append(exit_price)
 
                         # Add trade connection line
                         line_color = "green" if pnl > 0 else "red"
                         fig.add_trace(
                             go.Scatter(
-                                x=[entry_date, exit_date],
+                                x=[entry_time, exit_time],
                                 y=[entry_price, exit_price],
                                 mode="lines",
                                 line=dict(color=line_color, width=2, dash="dot"),
@@ -1636,6 +1636,34 @@ def extract_trades(
             except Exception as e:
                 logger.debug(f"Error accessing analyzers: {e}")
 
+        # # Method 4: Fallback to summary trade analysis if available
+        if not trades and strategy_result.get("trade_analysis"):
+            trades = strategy_result.get("trade_analysis").get("trades", [])
+            for i, trade in enumerate(trades):
+                pnl = trade.get("pnl", 0)
+                commission = trade.get("commission", 0)
+                pnl_comm = (
+                    pnl - commission
+                    if pnl is not None and commission is not None
+                    else pnl
+                )
+                trade_info = {
+                    "trade_id": trade.get("ref", i),
+                    "entry_time": trade.get("entry_time"),
+                    "exit_time": trade.get("exit_time"),
+                    "size": trade.get("size", 0),
+                    "entry_price": trade.get("entry_price", 0),
+                    "exit_price": trade.get("exit_price", 0),
+                    "pnl": pnl,
+                    "pnl_net": pnl_comm,
+                    "direction": trade.get("direction"),
+                    "commission": commission,
+                    "status": trade.get("status"),
+                    "bar_held": trade.get("bar_held", None),
+                }
+                if len(trades) < 100:
+                    trades.append(trade_info)
+
         # Add regime information with robust timezone handling
         if data is not None and "vol_regime" in data.columns and trades:
             for trade in trades:
@@ -1845,80 +1873,97 @@ def create_trades_table(results, data=None):
     try:
         strategy = get_strategy(results)
         logger.info(
-            f"[create_trades_table] Using strategy: {strategy.__class__.__name__}"
+            f"[create_trades_table] Using strategy: {getattr(strategy, '__class__', type(strategy)).__name__}"
         )
 
         # Extract trades using the robust method
         trades_df = extract_trades(strategy, data)
-
         if trades_df.empty:
             logger.warning(
                 "[create_trades_table] No trades extracted using extract_trades"
             )
             return pd.DataFrame(), "No trades executed during the period"
 
-        # Convert to IST timezone for display
-        trades_df["entry_time"] = pd.to_datetime(trades_df["entry_time"]).dt.tz_convert(
-            IST
-        )
-        trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"]).dt.tz_convert(
-            IST
-        )
+        numeric_cols = [
+            "entry_price",
+            "exit_price",
+            "size",
+            "pnl",
+            "pnl_net",
+            "commission",
+        ]
+        for col in numeric_cols:
+            if col in trades_df.columns:
+                trades_df[col] = pd.to_numeric(trades_df[col], errors="coerce")
 
-        # Format trade details
-        formatted_trades = []
-        for i, trade in trades_df.iterrows():
-            duration = trade["exit_time"] - trade["entry_time"]
-            duration_hours = duration.total_seconds() / 3600
-            duration_days = duration.days
-            return_pct = (
-                (trade["pnl_net"] / (trade["entry_price"] * trade["size"])) * 100
-                if trade["entry_price"] * trade["size"] != 0
-                else 0
+        # Only convert if not already tz-aware and in IST
+        for col in ["entry_time", "exit_time"]:
+            if col in trades_df.columns:
+                trades_df[col] = pd.to_datetime(trades_df[col], errors="coerce")
+                if trades_df[col].dt.tz is None:
+                    trades_df[col] = (
+                        trades_df[col].dt.tz_localize("UTC").dt.tz_convert(IST)
+                    )
+                else:
+                    trades_df[col] = trades_df[col].dt.tz_convert(IST)
+
+        trades_df["duration"] = trades_df["exit_time"] - trades_df["entry_time"]
+        trades_df["duration_hours"] = trades_df["duration"].dt.total_seconds() / 3600
+        trades_df["duration_days"] = trades_df["duration"].dt.days
+        # Avoid division by zero
+        with pd.option_context("mode.use_inf_as_na", True):
+            trades_df["return_pct"] = np.where(
+                (trades_df["entry_price"] * trades_df["size"] != 0),
+                (trades_df["pnl_net"] / (trades_df["entry_price"] * trades_df["size"]))
+                * 100,
+                0,
             )
 
-            # Create base trade info
-            trade_info = {
-                "Trade #": i + 1,
-                "Entry Date": trade["entry_time"].strftime("%Y-%m-%d"),
-                "Entry Time": trade["entry_time"].strftime("%H:%M:%S"),
-                "Entry Price": f"{trade['entry_price']:.2f}",
-                "Exit Date": trade["exit_time"].strftime("%Y-%m-%d"),
-                "Exit Time": trade["exit_time"].strftime("%H:%M:%S"),
-                "Exit Price": f"{trade['exit_price']:.2f}",
-                "Size": int(trade["size"]),
-                "Direction": trade["direction"],
-                "P&L": f"{trade['pnl_net']:.2f}",
-                "Return %": f"{return_pct:.2f}%",
-                "Duration (Hours)": f"{duration_hours:.1f}",
-                "Duration (Days)": duration_days,
-                "Status": trade["status"],
+        # --- Vectorized formatting for trade details ---
+        base_info = pd.DataFrame(
+            {
+                "Trade #": np.arange(1, len(trades_df) + 1),
+                "Entry Date": trades_df["entry_time"].dt.strftime("%Y-%m-%d"),
+                "Entry Time": trades_df["entry_time"].dt.strftime("%H:%M:%S"),
+                "Entry Price": trades_df["entry_price"].round(2).astype(str),
+                "Exit Date": trades_df["exit_time"].dt.strftime("%Y-%m-%d"),
+                "Exit Time": trades_df["exit_time"].dt.strftime("%H:%M:%S"),
+                "Exit Price": trades_df["exit_price"].round(2).astype(str),
+                "Size": trades_df["size"].astype(int),
+                "Direction": trades_df["direction"].astype(str),
+                "P&L": trades_df["pnl_net"].round(2).astype(str),
+                "Return %": trades_df["return_pct"].round(2).astype(str) + "%",
+                "Duration (Hours)": trades_df["duration_hours"].round(1).astype(str),
+                "Duration (Days)": trades_df["duration_days"],
+                "Status": trades_df["status"].astype(str),
             }
+        )
 
-            # Add indicator values
-            for col in trades_df.columns:
-                if col.endswith("_entry") or col.endswith("_exit"):
-                    indicator_name = col.rsplit("_", 1)[
-                        0
-                    ]  # Extract base indicator name
-                    value = trade[col]
-                    # Add both the indicator name and its value to the table
-                    if pd.notnull(value):
-                        # Format indicator name and context
-                        context = "Entry" if col.endswith("_entry") else "Exit"
-                        display_name = f"{indicator_name} ({context})"
-                        trade_info[display_name] = (
-                            f"{value:.2f}"
-                            if isinstance(value, (int, float))
-                            else str(value)
-                        )
+        # --- Indicator columns (entry/exit) ---
+        indicator_cols = [
+            col
+            for col in trades_df.columns
+            if col.endswith("_entry") or col.endswith("_exit")
+        ]
+        indicator_info = {}
+        for col in indicator_cols:
+            indicator_name = col.rsplit("_", 1)[0]
+            context = "Entry" if col.endswith("_entry") else "Exit"
+            display_name = f"{indicator_name} ({context})"
+            # Format as string with 2 decimals if numeric
+            vals = trades_df[col]
+            if np.issubdtype(vals.dtype, np.number):
+                indicator_info[display_name] = vals.round(2).astype(str)
+            else:
+                indicator_info[display_name] = vals.astype(str)
 
-            formatted_trades.append(trade_info)
+        # --- Combine all columns ---
+        df = pd.concat(
+            [base_info] + ([pd.DataFrame(indicator_info)] if indicator_info else []),
+            axis=1,
+        )
 
-        # Create DataFrame and sort columns
-        df = pd.DataFrame(formatted_trades)
-
-        # Order columns: Trade details first, then entry indicators, then exit indicators
+        # Order columns: base first, then entry indicators, then exit indicators
         base_columns = [
             "Trade #",
             "Entry Date",
@@ -1935,19 +1980,12 @@ def create_trades_table(results, data=None):
             "Duration (Days)",
             "Status",
         ]
-
-        # Separate indicator columns
         indicator_columns = [col for col in df.columns if col not in base_columns]
-
-        # Sort indicators: entry first, then exit
         entry_indicators = sorted([col for col in indicator_columns if "Entry" in col])
         exit_indicators = sorted([col for col in indicator_columns if "Exit" in col])
-
-        # Combine all columns in desired order
         ordered_columns = base_columns + entry_indicators + exit_indicators
 
         return df[ordered_columns], None
-
     except Exception as e:
         logger.error(f"Error creating trades table: {e}", exc_info=True)
         return pd.DataFrame(), f"Error creating trades table: {str(e)}"
@@ -3153,7 +3191,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
             if trades:
                 trade_df = pd.DataFrame(trades)
                 # Format datetime columns if present
-                for col in ["entry_time", "exit_time", "entry_date", "exit_date"]:
+                for col in ["entry_time", "exit_time", "entry_time", "exit_time"]:
                     if col in trade_df.columns:
                         trade_df[col] = pd.to_datetime(trade_df[col], errors="coerce")
                 st.dataframe(trade_df)
@@ -3264,9 +3302,9 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                 st.error(f"Error displaying trades: {e}")
 
             # Trade Statistics Summary
-            st.write("### 📊 Trade Statistics")
+            st.write("### 📊 Out Sample Trade Statistics")
             ta = window.get("out_sample_performance", {}).get("trade_analysis", {})
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
 
             with col1:
                 st.metric("Total Trades", ta.get("total_trades", 0))
@@ -3275,13 +3313,22 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
             with col2:
                 st.metric("Profit Factor", f"{ta.get('profit_factor', 0):.2f}")
                 st.metric(
-                    "Avg Win/Avg Loss", f"{ta.get('avg_win_avg_loss_ratio', 0):.2f}"
+                    "Avg Win/Avg Loss",
+                    f"{ta.get('average_win', 0)/ta.get('average_loss', 1):.2f}",
                 )
 
             with col3:
-                st.metric("Max Consecutive Wins", ta.get("consecutive_wins", 0))
-                st.metric("Max Consecutive Losses", ta.get("consecutive_losses", 0))
-
+                st.metric("Max Consecutive Wins", ta.get("max_winning_streak", 0))
+                st.metric("Max Consecutive Losses", ta.get("max_losing_streak", 0))
+            with col4:
+                st.metric(
+                    "Winning Trades",
+                    ta.get("winning_trades", 0),
+                )
+                st.metric(
+                    "Losing Trades",
+                    ta.get("losing_trades", 0),
+                )
             # Strategy Comparison with Previous Window
             if i > 0 and "out_sample_strategy" in valid_windows[i - 1]:
                 st.write("### 🔄 Strategy Comparison with Previous Window")
@@ -4553,9 +4600,6 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
         )
         display_parameter_optimization_results(results, progress_bar, status_text)
         return
-    progress_bar.progress(100)
-    status_text.text("Walk-forward analysis complete!")
-    st.toast("Walk-forward analysis complete")
 
     # Walk-Forward Summary Visualization
     st.subheader("📊 Walk-Forward Analysis Summary")
@@ -4666,7 +4710,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 )
 
             # Detailed Trades Table for this window
-            st.write("### 💰 Detailed Trades Table")
+            st.write("### 💰 Detailed Out Sample Trades Table")
             try:
                 out_sample_data = get_data_sync(
                     params["ticker"],
@@ -4687,9 +4731,9 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 st.error(f"Error creating trades table: {str(e)}")
 
             # Trade Statistics Summary
-            st.write("### 📊 Trade Statistics")
-            ta = window.get("out_sample_performance", {}).get("trade_analysis", {})
-            col1, col2, col3 = st.columns(3)
+            st.write("### 📊 In Sample Trade Statistics")
+            ta = window.get("in_sample_performance", {}).get("trade_analysis", {})
+            col1, col2, col3, col4 = st.columns(4)
 
             with col1:
                 st.metric("Total Trades", ta.get("total_trades", 0))
@@ -4698,13 +4742,71 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             with col2:
                 st.metric("Profit Factor", f"{ta.get('profit_factor', 0):.2f}")
                 st.metric(
-                    "Avg Win/Avg Loss", f"{ta.get('avg_win_avg_loss_ratio', 0):.2f}"
+                    "Avg Win/Avg Loss",
+                    f"{ta.get('average_win', 0)/ta.get('average_loss', 1):.2f}",
                 )
 
             with col3:
-                st.metric("Max Consecutive Wins", ta.get("consecutive_wins", 0))
-                st.metric("Max Consecutive Losses", ta.get("consecutive_losses", 0))
+                st.metric("Max Consecutive Wins", ta.get("max_winning_streak", 0))
+                st.metric("Max Consecutive Losses", ta.get("max_losing_streak", 0))
+            with col4:
+                st.metric(
+                    "Winning Trades",
+                    ta.get("winning_trades", 0),
+                )
+                st.metric(
+                    "Losing Trades",
+                    ta.get("losing_trades", 0),
+                )
+            # Detailed Trades Table for this window
+            st.write("### 💰 Detailed In Sample Trades Table")
+            try:
+                out_sample_data = get_data_sync(
+                    params["ticker"],
+                    window["periods"]["out_sample_start"],
+                    window["periods"]["out_sample_end"],
+                    interval=params["timeframe"],
+                )
+                trades_df, trades_error = create_trades_table(
+                    window.get("out_sample_performance"), out_sample_data
+                )
+                if trades_error:
+                    st.warning(f"Could not create trades table: {trades_error}")
+                elif not trades_df.empty:
+                    st.dataframe(trades_df, use_container_width=True)
+                else:
+                    st.info("No trades executed in this out-sample period")
+            except Exception as e:
+                st.error(f"Error creating trades table: {str(e)}")
 
+            # Trade Statistics Summary
+            st.write("### 📊 Out Sample Trade Statistics")
+            ta = window.get("out_sample_performance", {}).get("trade_analysis", {})
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric("Total Trades", ta.get("total_trades", 0))
+                st.metric("Win Rate", f"{ta.get('win_rate_percent', 0):.1f}%")
+
+            with col2:
+                st.metric("Profit Factor", f"{ta.get('profit_factor', 0):.2f}")
+                st.metric(
+                    "Avg Win/Avg Loss",
+                    f"{ta.get('average_win', 0)/ta.get('average_loss', 1):.2f}",
+                )
+
+            with col3:
+                st.metric("Max Consecutive Wins", ta.get("max_winning_streak", 0))
+                st.metric("Max Consecutive Losses", ta.get("max_losing_streak", 0))
+            with col4:
+                st.metric(
+                    "Winning Trades",
+                    ta.get("winning_trades", 0),
+                )
+                st.metric(
+                    "Losing Trades",
+                    ta.get("losing_trades", 0),
+                )
             # Strategy Comparison with Previous Window
             if i > 0 and "out_sample_strategy" in results["windows"][i - 1]:
                 st.write("### 🔄 Strategy Comparison with Previous Window")
@@ -4816,6 +4918,10 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             file_name=f"{params['ticker']}_walkforward_report.json",
             mime="application/json",
         )
+
+    progress_bar.progress(100)
+    status_text.text("Walk-forward analysis complete!")
+    st.toast("Walk-forward analysis complete")
 
 
 def run_analysis(params):

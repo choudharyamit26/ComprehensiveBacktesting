@@ -33,6 +33,52 @@ class PerformanceAnalyzer:
             self.processed_results = strategy_results
             self.strategy = None
             logger.info("Initialized PerformanceAnalyzer with dictionary input")
+
+            if (
+                "windows" in strategy_results
+                and isinstance(strategy_results["windows"], list)
+                and (
+                    "summary_stats" in strategy_results
+                    or "summary" not in strategy_results
+                )
+            ):
+                # Aggregate summary from summary_stats if present
+                summary_stats = strategy_results.get("summary_stats", {})
+                if summary_stats:
+                    self.processed_results["summary"] = summary_stats
+                # Aggregate all trades from valid windows
+                trades = []
+                for w in strategy_results["windows"]:
+                    if w.get("valid", False) and "trades" in w:
+                        trades.extend(w["trades"])
+                # Patch trade_analysis if not present
+                if "trade_analysis" not in self.processed_results:
+                    self.processed_results["trade_analysis"] = {}
+                self.processed_results["trade_analysis"]["trades"] = trades
+                # Optionally, add total_trades etc. for UI
+                self.processed_results["trade_analysis"]["total_trades"] = len(trades)
+                # Add win/loss stats if possible
+                winning_trades = [t for t in trades if t.get("pnl", 0) > 0]
+                losing_trades = [t for t in trades if t.get("pnl", 0) < 0]
+                self.processed_results["trade_analysis"]["winning_trades"] = len(
+                    winning_trades
+                )
+                self.processed_results["trade_analysis"]["losing_trades"] = len(
+                    losing_trades
+                )
+                self.processed_results["trade_analysis"]["win_rate_percent"] = (
+                    (len(winning_trades) / len(trades) * 100) if trades else 0
+                )
+                self.processed_results["trade_analysis"]["average_win"] = (
+                    np.mean([t["pnl"] for t in winning_trades]) if winning_trades else 0
+                )
+                self.processed_results["trade_analysis"]["average_loss"] = (
+                    np.mean([t["pnl"] for t in losing_trades]) if losing_trades else 0
+                )
+                # Add message for UI clarity
+                self.processed_results["trade_analysis"][
+                    "message"
+                ] = "Aggregated from walk-forward windows"
         elif isinstance(strategy_results, list) and strategy_results:
             # Input is a list of strategy results
             self.strategy = strategy_results[0] if len(strategy_results) > 0 else None
@@ -47,7 +93,20 @@ class PerformanceAnalyzer:
     def get_trades(self) -> List[Dict[str, Any]]:
         """Return the list of trades as a list of dicts (for walk-forward saving/UI)."""
         if self.is_dict_input:
-            return self.processed_results.get("trade_analysis", {}).get("trades", [])
+            # For walk-forward, ensure we aggregate all trades from windows if not present
+            if (
+                "trade_analysis" in self.processed_results
+                and "trades" in self.processed_results["trade_analysis"]
+            ):
+                return self.processed_results["trade_analysis"].get("trades", [])
+            # Fallback: aggregate from windows if present
+            if "windows" in self.processed_results:
+                trades = []
+                for w in self.processed_results["windows"]:
+                    if w.get("valid", False) and "trades" in w:
+                        trades.extend(w["trades"])
+                return trades
+            return []
 
         if self.strategy is None:
             return []
@@ -70,13 +129,13 @@ class PerformanceAnalyzer:
 
                 trade_dict = {
                     "trade_id": trade.get("ref", i),
-                    "entry_date": trade.get("entry_time"),
-                    "exit_date": trade.get("exit_time"),
+                    "entry_time": trade.get("entry_time"),
+                    "exit_time": trade.get("exit_time"),
                     "size": trade.get("size", 0),
-                    "price_in": trade.get("entry_price", 0),
-                    "price_out": trade.get("exit_price", 0),
+                    "entry_price": trade.get("entry_price", 0),
+                    "exit_price": trade.get("exit_price", 0),
                     "pnl": pnl,
-                    "pnl_comm": pnl_comm,
+                    "pnl_net": pnl_comm,
                     "direction": trade.get("direction", "unknown"),
                     "commission": commission,
                     "status": trade.get("status", "unknown"),
@@ -721,29 +780,6 @@ class PerformanceAnalyzer:
 
                 # Print detailed trade list
                 trades = trade_analysis.get("trades", [])
-                if trades:
-                    print("\nDetailed Trades")
-                    print("-" * 90)
-                    print(
-                        f"{'ID':>3} {'Entry':>12} {'Exit':>12} {'Size':>6} {'In':>8} {'Out':>8} {'PnL':>10} {'PnL+Comm':>10} {'Dir':>6}"
-                    )
-                    print("-" * 90)
-                    for t in trades:
-                        entry = (
-                            t["entry_date"].strftime("%Y-%m-%d")
-                            if t["entry_date"]
-                            else "-"
-                        )
-                        exit = (
-                            t["exit_date"].strftime("%Y-%m-%d")
-                            if t["exit_date"]
-                            else "-"
-                        )
-                        pnl_comm = t.get("pnl_comm", t.get("pnl", 0))
-                        print(
-                            f"{t['trade_id']:>3} {entry:>12} {exit:>12} {t['size']:>6} {t['price_in']:>8.2f} {t['price_out']:>8.2f} {t['pnl']:>10.2f} {pnl_comm:>10.2f} {t['direction']:>6}"
-                        )
-                    print("-" * 90)
 
             risk_metrics = report.get("risk_metrics", {})
             if (
