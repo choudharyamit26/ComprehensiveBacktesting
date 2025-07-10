@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class EMARSI(bt.Strategy):
-    """EMA and RSI combined trading strategy with detailed trade logging"""
+    """EMA and RSI combined trading strategy with shorting logic"""
 
     params = (
         ("fast_ema_period", 12),
@@ -36,7 +36,6 @@ class EMARSI(bt.Strategy):
         ("verbose", False),
     )
 
-    # Define optimization parameters for WalkForwardAnalysis
     optimization_params = {
         "fast_ema_period": {"type": "int", "low": 5, "high": 15, "step": 1},
         "slow_ema_period": {"type": "int", "low": 16, "high": 30, "step": 1},
@@ -50,6 +49,7 @@ class EMARSI(bt.Strategy):
         self.slow_ema = btind.EMA(self.data.close, period=self.params.slow_ema_period)
         self.rsi = btind.RSI(self.data.close, period=self.params.rsi_period)
         self.order = None
+        self.order_type = None  # Track order type for shorting logic
         self.ready = False
         self.stable_count = 0
         self.trade_count = 0
@@ -61,40 +61,38 @@ class EMARSI(bt.Strategy):
             )
             + 2
         )
-        self.indicator_data = []  # For visualization
-
-        # NEW: Track completed trades properly
+        self.indicator_data = []
         self.completed_trades = []
-        self.open_positions = []  # Track open positions manually
+        self.open_positions = []
 
         logger.debug(f"Initialized EMARSI with params: {self.params}")
+        logger.info(
+            f"EMARSI initialized with fast_ema_period={self.p.fast_ema_period}, "
+            f"slow_ema_period={self.p.slow_ema_period}, rsi_period={self.p.rsi_period}, "
+            f"rsi_upper={self.p.rsi_upper}, rsi_lower={self.p.rsi_lower}"
+        )
 
     def next(self):
-        # Warmup check
         if len(self) < self.warmup_period:
             logger.debug(
                 f"Skipping bar {len(self)}: still in warmup period (need {self.warmup_period} bars)"
             )
             return
 
-        # Set ready flag after warmup period
         if not self.ready:
             self.ready = True
             logger.info(f"Strategy ready at bar {len(self)}")
 
-        # Get current bar time in IST
         bar_time = self.datas[0].datetime.datetime(0)
         bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
         current_time = bar_time_ist.time()
 
-        # Force close all positions at 15:15 IST
         if current_time >= datetime.time(15, 15):
             if self.position:
                 self.close()
                 trade_logger.info("Force closed all positions at 15:15 IST")
             return
 
-        # Only allow new trades between 09:15 and 15:05 IST
         if not (datetime.time(9, 15) <= current_time <= datetime.time(15, 5)):
             return
 
@@ -102,7 +100,6 @@ class EMARSI(bt.Strategy):
             logger.debug(f"Order pending at bar {len(self)}")
             return
 
-        # Check for valid indicator values
         if (
             np.isnan(self.fast_ema[0])
             or np.isnan(self.slow_ema[0])
@@ -115,7 +112,6 @@ class EMARSI(bt.Strategy):
             )
             return
 
-        # Log indicator values for visualization
         self.indicator_data.append(
             {
                 "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
@@ -126,98 +122,120 @@ class EMARSI(bt.Strategy):
             }
         )
 
-        # Entry conditions
+        # Position management with shorting
         if not self.position:
             if (
                 self.fast_ema[0] > self.slow_ema[0]
                 and self.rsi[0] < self.params.rsi_lower
             ):
                 self.order = self.buy()
+                self.order_type = "enter_long"
                 trade_logger.info(
-                    f"BUY SIGNAL | Bar: {len(self)} | "
+                    f"BUY SIGNAL (Enter Long) | Bar: {len(self)} | "
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
                     f"FastEMA: {self.fast_ema[0]:.2f} > SlowEMA: {self.slow_ema[0]:.2f} | "
                     f"RSI: {self.rsi[0]:.2f} < {self.params.rsi_lower}"
                 )
-            else:
-                logger.debug(
-                    f"No buy at bar {len(self)}: "
-                    f"FastEMA {self.fast_ema[0]:.2f} > SlowEMA {self.slow_ema[0]:.2f}: "
-                    f"{self.fast_ema[0] > self.slow_ema[0]} | "
-                    f"RSI {self.rsi[0]:.2f} < {self.params.rsi_lower}: "
-                    f"{self.rsi[0] < self.params.rsi_lower}"
-                )
-        else:
-            # Exit conditions
-            if (
+            elif (
                 self.fast_ema[0] < self.slow_ema[0]
-                or self.rsi[0] > self.params.rsi_upper
+                and self.rsi[0] > self.params.rsi_upper
             ):
                 self.order = self.sell()
+                self.order_type = "enter_short"
                 trade_logger.info(
-                    f"SELL SIGNAL | Bar: {len(self)} | "
+                    f"SELL SIGNAL (Enter Short) | Bar: {len(self)} | "
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
                     f"FastEMA: {self.fast_ema[0]:.2f} < SlowEMA: {self.slow_ema[0]:.2f} | "
                     f"RSI: {self.rsi[0]:.2f} > {self.params.rsi_upper}"
                 )
-            else:
-                logger.debug(
-                    f"No sell at bar {len(self)}: "
-                    f"FastEMA {self.fast_ema[0]:.2f} < SlowEMA {self.slow_ema[0]:.2f}: "
-                    f"{self.fast_ema[0] < self.slow_ema[0]} | "
-                    f"RSI {self.rsi[0]:.2f} > {self.params.rsi_upper}: "
-                    f"{self.rsi[0] > self.params.rsi_upper}"
+        elif self.position.size > 0:  # Long position
+            if (
+                self.fast_ema[0] < self.slow_ema[0]
+                or self.rsi[0] > self.params.rsi_upper
+            ):
+                self.order = self.sell()
+                self.order_type = "exit_long"
+                trade_logger.info(
+                    f"SELL SIGNAL (Exit Long) | Bar: {len(self)} | "
+                    f"Time: {bar_time_ist} | "
+                    f"Price: {self.data.close[0]:.2f} | "
+                    f"FastEMA: {self.fast_ema[0]:.2f} < SlowEMA: {self.slow_ema[0]:.2f} | "
+                    f"RSI: {self.rsi[0]:.2f} > {self.params.rsi_upper}"
+                )
+        elif self.position.size < 0:  # Short position
+            if (
+                self.fast_ema[0] > self.slow_ema[0]
+                or self.rsi[0] < self.params.rsi_lower
+            ):
+                self.order = self.buy()
+                self.order_type = "exit_short"
+                trade_logger.info(
+                    f"BUY SIGNAL (Exit Short) | Bar: {len(self)} | "
+                    f"Time: {bar_time_ist} | "
+                    f"Price: {self.data.close[0]:.2f} | "
+                    f"FastEMA: {self.fast_ema[0]:.2f} > SlowEMA: {self.slow_ema[0]:.2f} | "
+                    f"RSI: {self.rsi[0]:.2f} < {self.params.rsi_lower}"
                 )
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
-            # Get execution time
             exec_dt = bt.num2date(order.executed.dt)
             if exec_dt.tzinfo is None:
                 exec_dt = exec_dt.replace(tzinfo=pytz.UTC)
 
-            if order.isbuy():
-                # NEW: Track position opening
+            if self.order_type == "enter_long" and order.isbuy():
                 position_info = {
                     "entry_time": exec_dt,
                     "entry_price": order.executed.price,
                     "size": order.executed.size,
                     "commission": order.executed.comm,
                     "ref": order.ref,
+                    "direction": "long",
                 }
                 self.open_positions.append(position_info)
-
                 trade_logger.info(
-                    f"BUY EXECUTED | Ref: {order.ref} | "
+                    f"BUY EXECUTED (Enter Long) | Ref: {order.ref} | "
                     f"Price: {order.executed.price:.2f} | "
                     f"Size: {order.executed.size} | "
                     f"Cost: {order.executed.value:.2f} | "
                     f"Comm: {order.executed.comm:.2f}"
                 )
-            elif order.issell():
-                # NEW: Track position closing
+            elif self.order_type == "enter_short" and order.issell():
+                position_info = {
+                    "entry_time": exec_dt,
+                    "entry_price": order.executed.price,
+                    "size": order.executed.size,  # Negative for short
+                    "commission": order.executed.comm,
+                    "ref": order.ref,
+                    "direction": "short",
+                }
+                self.open_positions.append(position_info)
+                trade_logger.info(
+                    f"SELL EXECUTED (Enter Short) | Ref: {order.ref} | "
+                    f"Price: {order.executed.price:.2f} | "
+                    f"Size: {order.executed.size} | "
+                    f"Cost: {order.executed.value:.2f} | "
+                    f"Comm: {order.executed.comm:.2f}"
+                )
+            elif self.order_type == "exit_long" and order.issell():
                 if self.open_positions:
-                    entry_info = self.open_positions.pop(0)  # FIFO
-
-                    # Calculate trade metrics
+                    entry_info = self.open_positions.pop(0)
                     pnl = (order.executed.price - entry_info["entry_price"]) * abs(
-                        order.executed.size
+                        entry_info["size"]
                     )
                     total_commission = entry_info["commission"] + abs(
                         order.executed.comm
                     )
                     pnl_net = pnl - total_commission
-
-                    # Store completed trade
                     trade_info = {
                         "ref": order.ref,
                         "entry_time": entry_info["entry_time"],
                         "exit_time": exec_dt,
                         "entry_price": entry_info["entry_price"],
                         "exit_price": order.executed.price,
-                        "size": abs(order.executed.size),
+                        "size": abs(entry_info["size"]),
                         "pnl": pnl,
                         "pnl_net": pnl_net,
                         "commission": total_commission,
@@ -227,14 +245,48 @@ class EMARSI(bt.Strategy):
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
-
-                trade_logger.info(
-                    f"SELL EXECUTED | Ref: {order.ref} | "
-                    f"Price: {order.executed.price:.2f} | "
-                    f"Size: {order.executed.size} | "
-                    f"Cost: {order.executed.value:.2f} | "
-                    f"Comm: {order.executed.comm:.2f}"
-                )
+                    trade_logger.info(
+                        f"SELL EXECUTED (Exit Long) | Ref: {order.ref} | "
+                        f"Price: {order.executed.price:.2f} | "
+                        f"Size: {order.executed.size} | "
+                        f"Cost: {order.executed.value:.2f} | "
+                        f"Comm: {order.executed.comm:.2f} | "
+                        f"PnL: {pnl:.2f}"
+                    )
+            elif self.order_type == "exit_short" and order.isbuy():
+                if self.open_positions:
+                    entry_info = self.open_positions.pop(0)
+                    pnl = (entry_info["entry_price"] - order.executed.price) * abs(
+                        entry_info["size"]
+                    )
+                    total_commission = entry_info["commission"] + abs(
+                        order.executed.comm
+                    )
+                    pnl_net = pnl - total_commission
+                    trade_info = {
+                        "ref": order.ref,
+                        "entry_time": entry_info["entry_time"],
+                        "exit_time": exec_dt,
+                        "entry_price": entry_info["entry_price"],
+                        "exit_price": order.executed.price,
+                        "size": abs(entry_info["size"]),
+                        "pnl": pnl,
+                        "pnl_net": pnl_net,
+                        "commission": total_commission,
+                        "status": "Won" if pnl > 0 else "Lost",
+                        "direction": "Short",
+                        "bars_held": (exec_dt - entry_info["entry_time"]).days,
+                    }
+                    self.completed_trades.append(trade_info)
+                    self.trade_count += 1
+                    trade_logger.info(
+                        f"BUY EXECUTED (Exit Short) | Ref: {order.ref} | "
+                        f"Price: {order.executed.price:.2f} | "
+                        f"Size: {order.executed.size} | "
+                        f"Cost: {order.executed.value:.2f} | "
+                        f"Comm: {order.executed.comm:.2f} | "
+                        f"PnL: {pnl:.2f}"
+                    )
 
         if order.status in [
             order.Completed,
@@ -243,9 +295,9 @@ class EMARSI(bt.Strategy):
             order.Rejected,
         ]:
             self.order = None
+            self.order_type = None
 
     def notify_trade(self, trade):
-        """This is called by BackTrader for completed trades"""
         if trade.isclosed:
             trade_logger.info(
                 f"TRADE CLOSED | Ref: {trade.ref} | "
@@ -256,12 +308,10 @@ class EMARSI(bt.Strategy):
             )
 
     def get_completed_trades(self):
-        """NEW: Method to get completed trades for analysis"""
         return self.completed_trades.copy()
 
     @classmethod
     def get_param_space(cls, trial):
-        """Define the parameter space for optimization with smaller ranges."""
         params = {
             "fast_ema_period": trial.suggest_int("fast_ema_period", 5, 12),
             "slow_ema_period": trial.suggest_int("slow_ema_period", 15, 25),
@@ -273,21 +323,14 @@ class EMARSI(bt.Strategy):
 
     @classmethod
     def get_min_data_points(cls, params):
-        """Calculate minimum data points required for the strategy."""
         try:
             fast_ema_period = params.get("fast_ema_period", 5)
             slow_ema_period = params.get("slow_ema_period", 10)
             rsi_period = params.get("rsi_period", 10)
-
-            # Ensure slow EMA is always larger than fast EMA
             if slow_ema_period <= fast_ema_period:
                 slow_ema_period = fast_ema_period + 5
-
-            # Use the largest period plus a small buffer
             max_period = max(fast_ema_period, slow_ema_period, rsi_period)
-            min_data_points = max_period + 2
-            return min_data_points
-
+            return max_period + 2
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
             return 30
