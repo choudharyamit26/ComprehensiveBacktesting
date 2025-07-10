@@ -488,6 +488,41 @@ class WalkForwardAnalysis:
         }
         return overall
 
+    def get_window_summary(self):
+        """Return a DataFrame summarizing each walk-forward window"""
+        rows = []
+        for result in self.results:
+            row = {
+                "window": result["walk_forward"],
+                "train_start": result["train_start"],
+                "train_end": result["train_end"],
+                "test_start": result["test_start"],
+                "test_end": result["test_end"],
+                "best_params": str(result["best_params"]),  # Convert dict to string
+                # In-sample metrics
+                "in_sample_total_return": result["in_sample_metrics"].get(
+                    "total_return", 0
+                ),
+                "in_sample_sharpe_ratio": result["in_sample_metrics"].get(
+                    "sharpe_ratio", None
+                ),
+                "in_sample_max_drawdown": result["in_sample_metrics"].get(
+                    "max_drawdown", 0
+                ),
+                # Out-of-sample metrics
+                "out_sample_total_return": result["out_sample_metrics"].get(
+                    "total_return", 0
+                ),
+                "out_sample_sharpe_ratio": result["out_sample_metrics"].get(
+                    "sharpe_ratio", None
+                ),
+                "out_sample_max_drawdown": result["out_sample_metrics"].get(
+                    "max_drawdown", 0
+                ),
+            }
+            rows.append(row)
+        return pd.DataFrame(rows)
+
     def generate_trade_statistics(self):
         """Generate comprehensive trade statistics for all windows"""
         # Aggregate all trades
@@ -568,7 +603,6 @@ class WalkForwardAnalysis:
                     out_sample_stats.get("num_long_trades", 0),
                     out_sample_stats.get("num_short_trades", 0),
                 ],
-                "Best-Params": "",
             }
         )
 
@@ -627,6 +661,11 @@ def run_walkforward_example():
 
     # Generate trade statistics summary
     stats_summary, all_in_sample, all_out_sample = wf.generate_trade_statistics()
+
+    # Save window summary with parameters
+    window_summary = wf.get_window_summary()
+    window_summary.to_csv("window_parameters_summary.csv", index=False)
+    print("\nSaved window parameters summary to 'window_parameters_summary.csv'")
 
     # Save aggregated trades
     if all_in_sample:
