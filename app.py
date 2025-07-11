@@ -27,6 +27,7 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objs as go
 from plotly.subplots import make_subplots
+import plotly.express as px
 import optuna
 import optuna.visualization
 import backtrader as bt
@@ -108,126 +109,146 @@ def create_parameter_evolution_table(wf_results):
     return pd.DataFrame(rows)
 
 
-def plot_walkforward_summary(wf_results):
-    """Visualize walk-forward analysis summary with equity curve and parameter evolution.
-
-    Args:
-        wf_results (dict): Walk-forward analysis results containing windows data
-
-    Returns:
-        go.Figure: Plotly figure showing the walk-forward summary
-    """
+def plot_walkforward_summary(results):
+    """Create a comprehensive plot showing walk-forward performance and parameter evolution."""
     try:
-
-        windows = None
-        if isinstance(wf_results, dict) and "walk_forward" in wf_results:
-            windows = wf_results["walk_forward"]["windows"]
-        else:
-            windows = wf_results  # wf_results is already a list of windows
-        valid_windows = [w for w in windows if w.get("valid", False)]
-
-        if not valid_windows:
+        windows = results["walk_forward"].get("windows", [])
+        if not windows:
             return None
 
-        # Create subplots
+        # Create subplots with secondary y-axis for parameters
         fig = make_subplots(
             rows=2,
             cols=1,
-            subplot_titles=("Combined Equity Curve", "Parameter Evolution"),
+            shared_xaxes=True,
             vertical_spacing=0.1,
             row_heights=[0.7, 0.3],
+            specs=[[{"type": "scatter"}], [{"type": "table"}]],
         )
 
-        # ===== FIX 1: Handle missing time-series data =====
+        # 1. Equity Curve and Returns
+        cumulative_return = 100
+        equity_points = [cumulative_return]
         dates = []
-        equity_points = [100.0]  # Start with initial equity
-        current_equity = 100.0
+        window_returns = []
+        window_labels = []
 
-        # Sort windows by out-of-sample start date
-        valid_windows.sort(key=lambda w: w["periods"]["out_sample_start"])
+        for i, window in enumerate(windows):
+            if window.get("valid", True):
+                equity = window["out_sample_performance"].get("timereturn", {})
+                if equity:
+                    # Calculate cumulative returns
+                    returns = list(equity.values())
+                    for ret in returns:
+                        cumulative_return *= 1 + ret / 100
+                        equity_points.append(cumulative_return)
 
-        # Add starting point for the first window
-        first_start = valid_windows[0]["periods"]["out_sample_start"]
-        dates.append(first_start)
+                    # Add dates for plotting
+                    dates.extend(sorted(equity.keys()))
 
-        for i, window in enumerate(valid_windows):
-            out_start = window["periods"]["out_sample_start"]
-            out_end = window["periods"]["out_sample_end"]
-            total_return = window["out_sample_performance"]["summary"][
-                "total_return_pct"
-            ]
+                    # Store window return
+                    summary = window["out_sample_performance"].get("summary", {})
+                    return_pct = summary.get("total_return_pct", 0)
+                    window_returns.append(return_pct)
+                    window_labels.append(f"Window {i+1}")
 
-            # Add bridge point between windows (if needed)
-            if i > 0:
-                dates.append(out_start)
-                equity_points.append(current_equity)
+        # Add equity curve
+        if len(equity_points) > 1:
+            fig.add_trace(
+                go.Scatter(
+                    x=dates,
+                    y=equity_points,
+                    mode="lines",
+                    name="Cumulative Equity",
+                    line=dict(color="#636EFA", width=3),
+                    fill="tozeroy",
+                    fillcolor="rgba(99, 110, 250, 0.1)",
+                ),
+                row=1,
+                col=1,
+            )
 
-            # Calculate equity at end of window
-            window_return = 1 + (float(total_return) / 100.0)
-            current_equity *= window_return
-            dates.append(out_end)
-            equity_points.append(current_equity)
+        # Add window returns as bars
+        if window_returns:
+            fig.add_trace(
+                go.Bar(
+                    x=window_labels,
+                    y=window_returns,
+                    name="Window Return",
+                    marker_color=[
+                        "#00CC96" if r >= 0 else "#EF553B" for r in window_returns
+                    ],
+                    text=[f"{r:.2f}%" for r in window_returns],
+                    textposition="auto",
+                ),
+                row=2,
+                col=1,
+            )
 
-        # Add equity curve trace
-        fig.add_trace(
-            go.Scatter(
-                x=dates,
-                y=equity_points,
-                mode="lines+markers",
-                name="Combined Equity",
-                line=dict(color="royalblue", width=2),
-                marker=dict(size=8),
-                hovertemplate="Date: %{x}<br>Equity: %{y:.2f}<extra></extra>",
-            ),
-            row=1,
-            col=1,
-        )
+        # 2. Parameter Evolution Table
+        param_data = []
+        param_columns = set()
 
-        # ===== FIX 2: Parameter evolution =====
-        param_data = {}
-        window_numbers = []
+        for i, window in enumerate(windows):
+            if window.get("valid", True):
+                param_row = {"Window": f"Window {i+1}"}
+                best_params = window.get("best_params", {})
 
-        for i, window in enumerate(valid_windows):
-            # Only include windows with trades
-            if window["out_sample_performance"]["trade_analysis"]["total_trades"] > 0:
-                window_numbers.append(i + 1)
-                params = window.get("best_params", {})
-                for param, value in params.items():
-                    if param not in param_data:
-                        param_data[param] = []
-                    param_data[param].append(value)
+                # Get summary metrics
+                summary = window["out_sample_performance"].get("summary", {})
+                param_row["Return (%)"] = summary.get("total_return_pct", 0)
+                param_row["Max Drawdown (%)"] = summary.get("max_drawdown_pct", 0)
+                param_row["Sharpe Ratio"] = summary.get("sharpe_ratio", "N/A")
 
-        # Add parameter traces (if valid windows with trades exist)
-        if window_numbers:
-            for param, values in param_data.items():
-                if len(values) == len(window_numbers):
-                    fig.add_trace(
-                        go.Scatter(
-                            x=window_numbers,
-                            y=values,
-                            mode="lines+markers",
-                            name=param,
-                            showlegend=True,
-                        ),
-                        row=2,
-                        col=1,
-                    )
+                # Add parameters
+                for param, value in best_params.items():
+                    param_row[param] = value
+                    param_columns.add(param)
 
-        # Final layout adjustments
+                param_data.append(param_row)
+
+        # Create table data
+        if param_data:
+            # Define column order
+            table_columns = [
+                "Window",
+                "Return (%)",
+                "Sharpe Ratio",
+                "Max Drawdown (%)",
+            ] + sorted(param_columns)
+            table_data = []
+
+            for row in param_data:
+                table_row = [row.get(col, "") for col in table_columns]
+                table_data.append(table_row)
+
+            # Add table to plot
+            fig.add_trace(
+                go.Table(
+                    header=dict(values=table_columns, font=dict(size=10), align="left"),
+                    cells=dict(values=list(zip(*table_data)), align="left"),
+                ),
+                row=2,
+                col=1,
+            )
+        else:
+            # Fallback if no parameter data
+            fig.add_trace(go.Scatter(x=[], y=[], showlegend=False), row=2, col=1)
+
+        # Update layout
         fig.update_layout(
-            title="Walk-Forward Analysis Summary", height=800, hovermode="x unified"
+            title="Walk-Forward Analysis Summary",
+            height=800,
+            showlegend=True,
+            hovermode="x unified",
         )
-        fig.update_yaxes(title_text="Equity Value ($)", row=1, col=1, type="log")
-        fig.update_yaxes(title_text="Parameter Value", row=2, col=1)
+
+        fig.update_yaxes(title_text="Equity Value", row=1, col=1)
         fig.update_xaxes(title_text="Date", row=1, col=1)
-        fig.update_xaxes(title_text="Window Number", row=2, col=1)
 
         return fig
 
     except Exception as e:
-        import traceback
-
-        traceback.print_exc()
         logger.error(f"Error creating walk-forward summary plot: {str(e)}")
         return None
 
@@ -2498,12 +2519,8 @@ def run_complete_backtest_UI(n_trials, ticker, params):
         start_date=params["start_date"],
         end_date=params["end_date"],
         strategy_class=params["selected_strategy"],
-        analyzers=params["available_analyzers"],
         interval=params["timeframe"],
         n_trials=n_trials,
-        window_days=params["in_sample_weeks"] * 7,
-        out_days=params["out_sample_weeks"] * 7,
-        step_days=params["out_sample_weeks"] * 7,
     )
     return results, params
 
@@ -3095,118 +3112,238 @@ def display_optimized_results(results, data, ticker, timeframe):
 
 
 def display_walkforward_results(results, ticker, timeframe, params, progress_bar):
-    """Display comprehensive results from walk-forward analysis with enhanced trade analysis."""
-
+    """Display comprehensive results from walk-forward analysis with enhanced trade analysis and time return analysis."""
     if "walk_forward" not in results:
         st.error("Walk-forward analysis failed.")
         return
 
-    # Check if walk-forward analysis has an error
     walk_forward_data = results["walk_forward"]
-    if "error" in walk_forward_data and walk_forward_data["error"]:
-        st.error(f"Walk-forward analysis failed: {walk_forward_data['error']}")
-        progress_bar.progress(100)
-        return
+    summary_stats = walk_forward_data.get("summary_stats", {})
 
-    # Check if windows exist and are not empty
-    if "windows" not in walk_forward_data or not walk_forward_data["windows"]:
+    # Handle both old and new window formats
+    windows = walk_forward_data.get("windows", [])
+    if not windows:
         st.error("No windows were generated in walk-forward analysis.")
         st.info("This might be due to insufficient data or incompatible parameters.")
-        progress_bar.progress(100)
         return
 
     progress_bar.progress(100)
 
     # Walk-Forward Summary Visualization
     st.subheader("📊 Walk-Forward Analysis Summary")
-    # 1. Combined equity curve and parameter evolution
-    wf_summary_fig = plot_walkforward_summary(results)
-    if wf_summary_fig:
-        st.plotly_chart(wf_summary_fig, use_container_width=True)
-    else:
-        st.warning("Could not generate walk-forward summary visualization")
 
-    # 2. Parameter evolution table
+    # Display overall summary statistics
+    if summary_stats:
+        st.write("### 📈 Overall Performance Summary")
+        col1, col2, col3 = st.columns(3)
+        col1.metric(
+            "Valid Windows",
+            f"{summary_stats.get('valid_windows', 0)}/{summary_stats.get('total_windows', 0)}",
+        )
+        col2.metric(
+            "Avg In-Sample Return",
+            f"{summary_stats.get('avg_in_sample_return', 0):.2f}%",
+        )
+        col3.metric(
+            "Avg Out-Sample Return",
+            f"{summary_stats.get('avg_out_sample_return', 0):.2f}%",
+        )
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric(
+            "Out-Sample Win Rate", f"{summary_stats.get('win_rate_out_sample', 0):.1f}%"
+        )
+        col2.metric("Return Correlation", f"{summary_stats.get('correlation', 0):.3f}")
+        col3.metric(
+            "Avg Degradation", f"{summary_stats.get('avg_degradation', 0):.2f}%"
+        )
+
+    # 1. Parameter evolution table
     st.write("### ⚙️ Parameter Evolution Across Windows")
-    param_evolution_df = create_parameter_evolution_table(results)
-    if not param_evolution_df.empty:
-        # Highlight best return in each window
-        styled_df = param_evolution_df.style.highlight_max(
-            subset=["Return (%)"], color="lightgreen"
-        ).format("{:.2f}", subset=["Return (%)", "Max Drawdown (%)"])
-        st.dataframe(styled_df, use_container_width=True)
+    param_evolution = []
 
-        # Export option
-        if st.button("Export Parameter Evolution"):
-            csv_data = param_evolution_df.to_csv(index=False)
-            st.download_button(
-                label="Download as CSV",
-                data=csv_data,
-                file_name=f"{params['ticker']}_parameter_evolution.csv",
-                mime="text/csv",
-            )
+    for i, window in enumerate(windows):
+        if not window.get("valid", True):
+            continue
+
+        periods = window.get("periods", {})
+        best_params = window.get("best_params", {})
+
+        # Get performance metrics
+        in_perf = window.get("in_sample_performance", {}).get("summary", {})
+        out_perf = window.get("out_sample_performance", {}).get("summary", {})
+
+        param_evolution.append(
+            {
+                "Window": i + 1,
+                "In-Sample Period": f"{periods.get('in_sample_start', '')} to {periods.get('in_sample_end', '')}",
+                "Out-Sample Period": f"{periods.get('out_sample_start', '')} to {periods.get('out_sample_end', '')}",
+                **best_params,
+                "In Return (%)": in_perf.get("total_return_pct", 0),
+                "In Sharpe": in_perf.get("sharpe_ratio", 0),
+                "Out Return (%)": out_perf.get("total_return_pct", 0),
+                "Out Sharpe": out_perf.get("sharpe_ratio", 0),
+            }
+        )
+
+    if param_evolution:
+        param_df = pd.DataFrame(param_evolution)
+        # Fill None/NaN with 0.0 for columns to be formatted
+        for col in ["In Return (%)", "Out Return (%)", "In Sharpe", "Out Sharpe"]:
+            if col in param_df.columns:
+                param_df[col] = param_df[col].fillna(0.0)
+        st.dataframe(
+            param_df.style.format(
+                {
+                    "In Return (%)": "{:.2f}%",
+                    "Out Return (%)": "{:.2f}%",
+                    "In Sharpe": "{:.2f}",
+                    "Out Sharpe": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
     else:
         st.info("No parameter evolution data available")
-    # 3. Display each window in expanders
-    st.write("### 📅 Detailed Window Analysis")
-    required_period_keys = [
-        "in_sample_start",
-        "in_sample_end",
-        "out_sample_start",
-        "out_sample_end",
-    ]
 
-    windows = walk_forward_data["windows"]
-    valid_windows = [
-        w
-        for w in windows
-        if w.get("valid", False)
-        and "periods" in w
-        and all(key in w["periods"] for key in required_period_keys)
-    ]
-    for i, window in enumerate(valid_windows):
-        periods = window["periods"]
+    # Time Return Analysis Section
+    st.subheader("⏱️ Time Return Analysis")
+    st.write("### Monthly Return Distribution")
+
+    # Aggregate all trades for monthly analysis
+    all_trades = []
+    for window in windows:
+        if not window.get("valid", True):
+            continue
+
+        # Get all trades (in-sample and out-sample)
+        in_perf = window.get("in_sample_performance", {})
         out_perf = window.get("out_sample_performance", {})
-        # Prefer completed_trades if available, else fallback to trades
-        completed_trades = (
-            out_perf.get("completed_trades") if isinstance(out_perf, dict) else None
-        )
-        trades = (
-            completed_trades
-            if completed_trades is not None
-            else (out_perf.get("trades", []) if isinstance(out_perf, dict) else [])
-        )
-        with st.expander(
-            f"Window {i+1}: {periods['out_sample_start']} to {periods['out_sample_end']} ({len(trades)} trades)",
-            expanded=False,
-        ):
-            st.write(
-                f"**In-Sample:** {periods['in_sample_start']} to {periods['in_sample_end']}"
+
+        in_trades = in_perf.get("trade_analysis", {}).get("completed_trades", [])
+        if not in_trades:
+            in_trades = in_perf.get("trade_analysis", {}).get("trades", [])
+
+        out_trades = out_perf.get("trade_analysis", {}).get("completed_trades", [])
+        if not out_trades:
+            out_trades = out_perf.get("trade_analysis", {}).get("trades", [])
+
+        all_trades.extend(in_trades)
+        all_trades.extend(out_trades)
+
+    if all_trades:
+        # Create DataFrame from trades
+        trade_df = pd.DataFrame(all_trades)
+
+        # Convert to datetime and extract month
+        if "entry_time" in trade_df.columns:
+            trade_df["entry_time"] = pd.to_datetime(trade_df["entry_time"])
+            trade_df["month"] = trade_df["entry_time"].dt.to_period("M")
+
+            # Calculate monthly P&L
+            monthly_pnl = trade_df.groupby("month")["pnl"].sum().reset_index()
+            monthly_pnl["month"] = monthly_pnl["month"].dt.to_timestamp()
+
+            # Calculate monthly return percentage
+            initial_cash = params.get("initial_cash", 10000)
+            monthly_pnl["return_pct"] = (monthly_pnl["pnl"] / initial_cash) * 100
+
+            # Create visualization
+            fig = px.bar(
+                monthly_pnl,
+                x="month",
+                y="return_pct",
+                labels={"return_pct": "Return (%)", "month": "Month"},
+                title="Monthly Returns Across All Periods",
+                color_discrete_sequence=["#1f77b4"],
             )
-            st.write(
-                f"**Out-of-Sample:** {periods['out_sample_start']} to {periods['out_sample_end']}"
+            fig.update_layout(xaxis_title="Month", yaxis_title="Return (%)", height=500)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Monthly return metrics
+            st.write("### Monthly Return Metrics")
+
+            def calculate_return_metrics(returns_series):
+                if returns_series.empty:
+                    return {}
+
+                metrics = {
+                    "Best Month": f"{returns_series.max():.2f}%",
+                    "Worst Month": f"{returns_series.min():.2f}%",
+                    "Avg Positive Month": f"{returns_series[returns_series > 0].mean():.2f}%",
+                    "Avg Negative Month": f"{returns_series[returns_series < 0].mean():.2f}%",
+                    "Win Rate": f"{len(returns_series[returns_series > 0]) / len(returns_series) * 100:.1f}%",
+                    "Std Dev": f"{returns_series.std():.2f}%",
+                }
+                return metrics
+
+            metrics = calculate_return_metrics(monthly_pnl["return_pct"])
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Best Month", metrics.get("Best Month", "N/A"))
+                st.metric("Worst Month", metrics.get("Worst Month", "N/A"))
+
+            with col2:
+                st.metric(
+                    "Avg Positive Month", metrics.get("Avg Positive Month", "N/A")
+                )
+                st.metric(
+                    "Avg Negative Month", metrics.get("Avg Negative Month", "N/A")
+                )
+
+            with col3:
+                st.metric("Win Rate", metrics.get("Win Rate", "N/A"))
+                st.metric("Std Dev", metrics.get("Std Dev", "N/A"))
+
+            # Display monthly returns table
+            st.write("### Monthly Return Details")
+            monthly_pnl["return_pct"] = monthly_pnl["return_pct"].apply(
+                lambda x: f"{x:.2f}%"
             )
-            if trades:
-                trade_df = pd.DataFrame(trades)
-                # Format datetime columns if present
-                for col in ["entry_time", "exit_time", "entry_time", "exit_time"]:
-                    if col in trade_df.columns:
-                        trade_df[col] = pd.to_datetime(trade_df[col], errors="coerce")
-                st.dataframe(trade_df)
-            else:
-                st.info("No trades in this window.")
+            st.dataframe(
+                monthly_pnl[["month", "return_pct"]].rename(
+                    columns={"month": "Month", "return_pct": "Return (%)"}
+                ),
+                use_container_width=True,
+            )
+        else:
+            st.warning("Trade data missing 'entry_time' field for time analysis")
+    else:
+        st.info("No trade data available for time return analysis")
+
+    # Detailed Window Analysis
+    st.write("### 📅 Detailed Window Analysis")
+
+    for i, window in enumerate(windows):
+        if not window.get("valid", True):
+            continue
+
+        periods = window.get("periods", {})
+        in_perf = window.get("in_sample_performance", {})
+        out_perf = window.get("out_sample_performance", {})
+
+        in_trades = in_perf.get("trade_analysis", {}).get("completed_trades", [])
+        if not in_trades:
+            in_trades = in_perf.get("trade_analysis", {}).get("trades", [])
+
+        out_trades = out_perf.get("trade_analysis", {}).get("completed_trades", [])
+        if not out_trades:
+            out_trades = out_perf.get("trade_analysis", {}).get("trades", [])
+
         with st.expander(
-            f"Window {i+1} (In: {window['periods']['in_sample_start']} to {window['periods']['in_sample_end']}, Out: {window['periods']['out_sample_start']} to {window['periods']['out_sample_end']})",
+            f"Window {i+1}: Train {periods.get('in_sample_start', '')} to {periods.get('in_sample_end', '')} | Test {periods.get('out_sample_start', '')} to {periods.get('out_sample_end', '')}",
             expanded=False,
         ):
             # Window summary
             col1, col2 = st.columns(2)
 
             with col1:
-                st.write("**In-Sample Period**")
-                st.write(f"Start: {window['periods']['in_sample_start']}")
-                st.write(f"End: {window['periods']['in_sample_end']}")
-                st.write(f"Optimization Trials: {params['n_trials']}")
+                st.write("**Training Period**")
+                st.write(f"Start: {periods.get('in_sample_start', '')}")
+                st.write(f"End: {periods.get('in_sample_end', '')}")
+                st.write(f"Optimization Trials: {params.get('n_trials', 0)}")
+
                 st.write("**Best Parameters**")
                 if window.get("best_params"):
                     for param, value in window["best_params"].items():
@@ -3215,221 +3352,498 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                     st.info("No best parameters available")
 
             with col2:
-                st.write("**Out-Sample Performance**")
-                summary = window.get("out_sample_performance", {}).get("summary", {})
+                st.write("**Performance Summary**")
+                in_summary = in_perf.get("summary", {})
+                out_summary = out_perf.get("summary", {})
+
+                # Handle None values for metrics
+                in_total_return = in_summary.get("total_return_pct", 0)
+                out_total_return = out_summary.get("total_return_pct", 0)
+
+                in_sharpe = in_summary.get("sharpe_ratio", 0)
+                out_sharpe = out_summary.get("sharpe_ratio", 0)
+
+                in_max_dd = in_summary.get("max_drawdown_pct", 0)
+                out_max_dd = out_summary.get("max_drawdown_pct", 0)
+
                 st.metric(
-                    "Return",
-                    f"{summary.get('total_return_pct', 0):.2f}%",
-                )
-                st.metric(
-                    "Sharpe Ratio",
-                    f"{window.get('out_sample_performance', {}).get('risk_metrics', {}).get('sharpe_ratio', 0):.2f}",
-                )
-                st.metric(
-                    "Max Drawdown",
-                    f"{summary.get('max_drawdown_pct', 0):.2f}%",
-                )
-
-            # Best Parameters Table
-            if window.get("best_params"):
-                st.write("### 🎯 Best Parameters")
-                params_df = pd.DataFrame(
-                    list(window["best_params"].items()),
-                    columns=["Parameter", "Value"],
-                )
-                st.dataframe(params_df, use_container_width=True)
-
-            # Plot out-sample equity curve
-            st.write("### 📈 Out-Sample Equity Curve")
-            equity_data = window.get("out_sample_performance", {}).get("timereturn", {})
-            equity_fig = plot_equity_curve(equity_data)
-            if equity_fig:
-                st.plotly_chart(
-                    equity_fig,
-                    use_container_width=True,
-                    key=f"walkforward_equity_{i}_{ticker}_{timeframe}",
-                )
-
-            # Detailed Trades Table for this window
-            st.write("### 💰 Detailed Out Sample Trades Table")
-            try:
-                trades = (
-                    window.get("out_sample_performance", {})
-                    .get("trade_analysis")
-                    .get("trades", [])
-                )
-                total_trades = (
-                    window.get("out_sample_performance", {})
-                    .get("trade_analysis", {})
-                    .get("total_trades", 0)
-                )
-                if total_trades > 0 and (not trades or len(trades) == 0):
-                    st.warning(
-                        "Total trades > 0 but trade details are missing. This may indicate a data extraction or serialization issue. Please check logs and trade analyzer output."
-                    )
-                if trades and isinstance(trades, list) and len(trades) > 0:
-                    trades_df = pd.DataFrame(trades)
-                    st.dataframe(trades_df, use_container_width=True)
-                else:
-                    st.info("No trades executed in this out-sample period")
-            except Exception as e:
-                st.error(f"Error displaying trades: {e}")
-
-            st.write("### 💰 Detailed In Sample Trades Table")
-            try:
-                trades = (
-                    window.get("in_sample_performance", {})
-                    .get("trade_analysis")
-                    .get("trades", [])
-                )
-                total_trades = (
-                    window.get("in_sample_performance", {})
-                    .get("trade_analysis", {})
-                    .get("total_trades", 0)
-                )
-                if total_trades > 0 and (not trades or len(trades) == 0):
-                    st.warning(
-                        "Total trades > 0 but trade details are missing. This may indicate a data extraction or serialization issue. Please check logs and trade analyzer output."
-                    )
-                if trades and isinstance(trades, list) and len(trades) > 0:
-                    trades_df = pd.DataFrame(trades)
-                    st.dataframe(trades_df, use_container_width=True)
-                else:
-                    st.info("No trades executed in this out-sample period")
-            except Exception as e:
-                st.error(f"Error displaying trades: {e}")
-
-            # Trade Statistics Summary
-            st.write("### 📊 Out Sample Trade Statistics")
-            ta = window.get("out_sample_performance", {}).get("trade_analysis", {})
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                st.metric("Total Trades", ta.get("total_trades", 0))
-                st.metric("Win Rate", f"{ta.get('win_rate_percent', 0):.1f}%")
-
-            with col2:
-                st.metric("Profit Factor", f"{ta.get('profit_factor', 0):.2f}")
-                st.metric(
-                    "Avg Win/Avg Loss",
-                    f"{ta.get('average_win', 0)/ta.get('average_loss', 1):.2f}",
-                )
-
-            with col3:
-                st.metric("Max Consecutive Wins", ta.get("max_winning_streak", 0))
-                st.metric("Max Consecutive Losses", ta.get("max_losing_streak", 0))
-            with col4:
-                st.metric(
-                    "Winning Trades",
-                    ta.get("winning_trades", 0),
+                    "In-Sample Return",
+                    f"{in_total_return:.2f}%" if in_total_return is not None else "N/A",
                 )
                 st.metric(
-                    "Losing Trades",
-                    ta.get("losing_trades", 0),
+                    "Out-Sample Return",
+                    (
+                        f"{out_total_return:.2f}%"
+                        if out_total_return is not None
+                        else "N/A"
+                    ),
                 )
-            # Strategy Comparison with Previous Window
-            if i > 0 and "out_sample_strategy" in valid_windows[i - 1]:
-                st.write("### 🔄 Strategy Comparison with Previous Window")
-                prev_window = valid_windows[i - 1]
-                if prev_window.get("valid", False):
-                    comparison_data = []
-                    curr_perf = window.get("out_sample_performance", {}).get(
-                        "summary", {}
-                    )
-                    comparison_data.append(
-                        {
-                            "Window": f"Current (Window {i+1})",
-                            "Return (%)": curr_perf.get("total_return_pct", 0),
-                            "Sharpe Ratio": curr_perf.get("sharpe_ratio", 0),
-                            "Max Drawdown (%)": curr_perf.get("max_drawdown_pct", 0),
-                        }
-                    )
-                    prev_perf = prev_window.get("out_sample_performance", {}).get(
-                        "summary", {}
-                    )
-                    comparison_data.append(
-                        {
-                            "Window": f"Previous (Window {i})",
-                            "Return (%)": prev_perf.get("total_return_pct", 0),
-                            "Sharpe Ratio": prev_perf.get("sharpe_ratio", 0),
-                            "Max Drawdown (%)": prev_perf.get("max_drawdown_pct", 0),
-                        }
-                    )
-                    comparison_df = pd.DataFrame(comparison_data)
-                    st.dataframe(comparison_df, use_container_width=True)
 
-                    # Create comparison chart
+                st.metric(
+                    "In-Sample Sharpe",
+                    f"{in_sharpe:.2f}" if in_sharpe is not None else "N/A",
+                )
+                st.metric(
+                    "Out-Sample Sharpe",
+                    f"{out_sharpe:.2f}" if out_sharpe is not None else "N/A",
+                )
+
+                st.metric(
+                    "In Max Drawdown",
+                    f"{in_max_dd:.2f}%" if in_max_dd is not None else "N/A",
+                )
+                st.metric(
+                    "Out Max Drawdown",
+                    f"{out_max_dd:.2f}%" if out_max_dd is not None else "N/A",
+                )
+
+            # Create tabs for detailed analysis
+            tab1, tab2, tab3, tab4 = st.tabs(
+                ["Equity Curves", "In-Sample", "Out-Sample", "Time Analysis"]
+            )
+
+            with tab1:  # Equity Curves
+                st.write("### 📈 Equity Curves Comparison")
+
+                # Get equity curves
+                in_equity = in_perf.get("equity_curve", {})
+                out_equity = out_perf.get("equity_curve", {})
+
+                if in_equity or out_equity:
                     fig = go.Figure()
-                    for row in comparison_df.to_dict("records"):
+
+                    if in_equity:
+                        in_dates = list(in_equity.keys())
+                        in_values = list(in_equity.values())
                         fig.add_trace(
-                            go.Bar(
-                                x=["Return (%)", "Sharpe Ratio", "Max Drawdown (%)"],
-                                y=[
-                                    row["Return (%)"],
-                                    row["Sharpe Ratio"],
-                                    row["Max Drawdown (%)"],
-                                ],
-                                name=row["Window"],
-                                text=[
-                                    f"{row['Return (%)']:.2f}%",
-                                    f"{row['Sharpe Ratio']:.2f}",
-                                    f"{row['Max Drawdown (%)']:.2f}%",
-                                ],
+                            go.Scatter(
+                                x=in_dates,
+                                y=in_values,
+                                mode="lines",
+                                name="In-Sample",
+                                line=dict(color="#1f77b4", width=3),
                             )
                         )
+
+                    if out_equity:
+                        out_dates = list(out_equity.keys())
+                        out_values = list(out_equity.values())
+                        fig.add_trace(
+                            go.Scatter(
+                                x=out_dates,
+                                y=out_values,
+                                mode="lines",
+                                name="Out-Sample",
+                                line=dict(color="#ff7f0e", width=3),
+                            )
+                        )
+
+                    # Add vertical line at test start
+                    test_start = periods.get("out_sample_start", "")
+                    if test_start:
+                        fig.add_vline(
+                            x=test_start,
+                            line_dash="dash",
+                            line_color="green",
+                            annotation_text="Test Start",
+                        )
+
                     fig.update_layout(
-                        title="Window Performance Comparison",
-                        barmode="group",
+                        title="Portfolio Value",
+                        xaxis_title="Date",
+                        yaxis_title="Value",
+                        showlegend=True,
                         height=500,
                     )
                     st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No equity curve data available")
 
-    # 4. Combined equity curve visualization
-    st.write("### 📈 Combined Equity Curve")
-    cumulative_return = 100
-    equity_points = [cumulative_return]
-    dates = []
+            with tab2:  # In-Sample
+                st.write("### 📊 In-Sample Analysis")
 
-    for window in windows:
-        if window.get("valid", False):
-            equity = window["out_sample_performance"].get("timereturn", {})
-            if equity:
-                # Calculate cumulative returns
-                returns = list(equity.values())
-                for ret in returns:
-                    cumulative_return *= 1 + ret / 100
-                    equity_points.append(cumulative_return)
+                # Trade Statistics
+                if in_trades:
+                    st.write("#### Trade Statistics")
+                    win_trades = [t for t in in_trades if t.get("pnl", 0) > 0]
+                    loss_trades = [t for t in in_trades if t.get("pnl", 0) <= 0]
 
-                # Add dates for plotting
-                dates.extend(sorted(equity.keys()))
+                    avg_win = (
+                        sum(t["pnl"] for t in win_trades) / len(win_trades)
+                        if win_trades
+                        else 0
+                    )
+                    avg_loss = (
+                        sum(t["pnl"] for t in loss_trades) / len(loss_trades)
+                        if loss_trades
+                        else 0
+                    )
+                    win_rate = (
+                        len(win_trades) / len(in_trades) * 100 if in_trades else 0
+                    )
 
-    if len(equity_points) > 1:
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=dates,
-                y=equity_points,
-                mode="lines",
-                name="Cumulative Equity",
-            )
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Trades", len(in_trades))
+                        st.metric("Win Rate", f"{win_rate:.1f}%")
+
+                    with col2:
+                        st.metric("Avg Win", f"${avg_win:.2f}")
+                        st.metric("Avg Loss", f"${avg_loss:.2f}")
+
+                    with col3:
+                        profit_factor = abs(avg_win / avg_loss) if avg_loss else 0
+                        st.metric("Profit Factor", f"{profit_factor:.2f}")
+                        st.metric(
+                            "Win/Loss Ratio",
+                            f"{abs(avg_win/avg_loss):.2f}" if avg_loss else "N/A",
+                        )
+
+                    with col4:
+                        st.metric(
+                            "Max Win",
+                            (
+                                f"${max(t['pnl'] for t in win_trades):.2f}"
+                                if win_trades
+                                else "N/A"
+                            ),
+                        )
+                        st.metric(
+                            "Max Loss",
+                            (
+                                f"${min(t['pnl'] for t in loss_trades):.2f}"
+                                if loss_trades
+                                else "N/A"
+                            ),
+                        )
+
+                    # Detailed Trades Table
+                    st.write("#### Detailed Trades")
+                    in_trade_df = pd.DataFrame(in_trades)
+
+                    # Format datetime columns
+                    for col in ["entry_time", "exit_time"]:
+                        if col in in_trade_df.columns:
+                            in_trade_df[col] = pd.to_datetime(in_trade_df[col])
+
+                    # Display formatted table
+                    st.dataframe(in_trade_df, use_container_width=True)
+                else:
+                    st.info("No in-sample trades executed")
+
+                # Time Return Analysis for in-sample
+                if in_trades and "entry_time" in in_trade_df.columns:
+                    st.write("#### In-Sample Time Return Analysis")
+
+                    # Extract month from entry time
+                    in_trade_df["month"] = in_trade_df["entry_time"].dt.to_period("M")
+
+                    # Calculate monthly P&L
+                    monthly_pnl = (
+                        in_trade_df.groupby("month")["pnl"].sum().reset_index()
+                    )
+                    monthly_pnl["month"] = monthly_pnl["month"].dt.to_timestamp()
+
+                    # Calculate monthly return percentage
+                    initial_cash = params.get("initial_cash", 10000)
+                    monthly_pnl["return_pct"] = (
+                        monthly_pnl["pnl"] / initial_cash
+                    ) * 100
+
+                    if not monthly_pnl.empty:
+                        # Create visualization
+                        fig = px.bar(
+                            monthly_pnl,
+                            x="month",
+                            y="return_pct",
+                            labels={"return_pct": "Return (%)", "month": "Month"},
+                            title="In-Sample Monthly Returns",
+                            color_discrete_sequence=["#1f77b4"],
+                        )
+                        fig.update_layout(
+                            xaxis_title="Month", yaxis_title="Return (%)", height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Display monthly returns table
+                        monthly_pnl["return_pct"] = monthly_pnl["return_pct"].apply(
+                            lambda x: f"{x:.2f}%"
+                        )
+                        st.dataframe(
+                            monthly_pnl[["month", "return_pct"]].rename(
+                                columns={"month": "Month", "return_pct": "Return (%)"}
+                            ),
+                            use_container_width=True,
+                        )
+
+            with tab3:  # Out-Sample
+                st.write("### 📊 Out-Sample Analysis")
+
+                # Trade Statistics
+                if out_trades:
+                    st.write("#### Trade Statistics")
+                    win_trades = [t for t in out_trades if t.get("pnl", 0) > 0]
+                    loss_trades = [t for t in out_trades if t.get("pnl", 0) <= 0]
+
+                    avg_win = (
+                        sum(t["pnl"] for t in win_trades) / len(win_trades)
+                        if win_trades
+                        else 0
+                    )
+                    avg_loss = (
+                        sum(t["pnl"] for t in loss_trades) / len(loss_trades)
+                        if loss_trades
+                        else 0
+                    )
+                    win_rate = (
+                        len(win_trades) / len(out_trades) * 100 if out_trades else 0
+                    )
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Total Trades", len(out_trades))
+                        st.metric("Win Rate", f"{win_rate:.1f}%")
+
+                    with col2:
+                        st.metric("Avg Win", f"${avg_win:.2f}")
+                        st.metric("Avg Loss", f"${avg_loss:.2f}")
+
+                    with col3:
+                        profit_factor = abs(avg_win / avg_loss) if avg_loss else 0
+                        st.metric("Profit Factor", f"{profit_factor:.2f}")
+                        st.metric(
+                            "Win/Loss Ratio",
+                            f"{abs(avg_win/avg_loss):.2f}" if avg_loss else "N/A",
+                        )
+
+                    with col4:
+                        st.metric(
+                            "Max Win",
+                            (
+                                f"${max(t['pnl'] for t in win_trades):.2f}"
+                                if win_trades
+                                else "N/A"
+                            ),
+                        )
+                        st.metric(
+                            "Max Loss",
+                            (
+                                f"${min(t['pnl'] for t in loss_trades):.2f}"
+                                if loss_trades
+                                else "N/A"
+                            ),
+                        )
+
+                    # Detailed Trades Table
+                    st.write("#### Detailed Trades")
+                    out_trade_df = pd.DataFrame(out_trades)
+
+                    # Format datetime columns
+                    for col in ["entry_time", "exit_time"]:
+                        if col in out_trade_df.columns:
+                            out_trade_df[col] = pd.to_datetime(out_trade_df[col])
+
+                    # Display formatted table
+                    st.dataframe(out_trade_df, use_container_width=True)
+                else:
+                    st.info("No out-sample trades executed")
+
+                # Time Return Analysis for out-sample
+                if out_trades and "entry_time" in out_trade_df.columns:
+                    st.write("#### Out-Sample Time Return Analysis")
+
+                    # Extract month from entry time
+                    out_trade_df["month"] = out_trade_df["entry_time"].dt.to_period("M")
+
+                    # Calculate monthly P&L
+                    monthly_pnl = (
+                        out_trade_df.groupby("month")["pnl"].sum().reset_index()
+                    )
+                    monthly_pnl["month"] = monthly_pnl["month"].dt.to_timestamp()
+
+                    # Calculate monthly return percentage
+                    initial_cash = params.get("initial_cash", 10000)
+                    monthly_pnl["return_pct"] = (
+                        monthly_pnl["pnl"] / initial_cash
+                    ) * 100
+
+                    if not monthly_pnl.empty:
+                        # Create visualization
+                        fig = px.bar(
+                            monthly_pnl,
+                            x="month",
+                            y="return_pct",
+                            labels={"return_pct": "Return (%)", "month": "Month"},
+                            title="Out-Sample Monthly Returns",
+                            color_discrete_sequence=["#ff7f0e"],
+                        )
+                        fig.update_layout(
+                            xaxis_title="Month", yaxis_title="Return (%)", height=400
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Display monthly returns table
+                        monthly_pnl["return_pct"] = monthly_pnl["return_pct"].apply(
+                            lambda x: f"{x:.2f}%"
+                        )
+                        st.dataframe(
+                            monthly_pnl[["month", "return_pct"]].rename(
+                                columns={"month": "Month", "return_pct": "Return (%)"}
+                            ),
+                            use_container_width=True,
+                        )
+
+            with tab4:  # Time Analysis
+                st.write("### ⏱️ Time Return Analysis")
+
+                # Combine in-sample and out-sample trades
+                all_window_trades = in_trades + out_trades
+                if all_window_trades:
+                    trade_df = pd.DataFrame(all_window_trades)
+
+                    if "entry_time" in trade_df.columns:
+                        # Hourly analysis
+                        st.write("#### Hourly Returns")
+                        trade_df["entry_time"] = pd.to_datetime(trade_df["entry_time"])
+                        trade_df["hour"] = trade_df["entry_time"].dt.hour
+
+                        hourly_pnl = trade_df.groupby("hour")["pnl"].sum().reset_index()
+
+                        if not hourly_pnl.empty:
+                            fig = px.bar(
+                                hourly_pnl,
+                                x="hour",
+                                y="pnl",
+                                labels={"pnl": "P&L", "hour": "Hour of Day"},
+                                title="Hourly Returns",
+                                color_discrete_sequence=["#2ca02c"],
+                            )
+                            fig.update_layout(
+                                xaxis_title="Hour (24h)",
+                                yaxis_title="Profit/Loss",
+                                height=400,
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        # Day of week analysis
+                        st.write("#### Day of Week Returns")
+                        trade_df["day_of_week"] = trade_df["entry_time"].dt.day_name()
+                        day_order = [
+                            "Monday",
+                            "Tuesday",
+                            "Wednesday",
+                            "Thursday",
+                            "Friday",
+                            "Saturday",
+                            "Sunday",
+                        ]
+                        trade_df["day_of_week"] = pd.Categorical(
+                            trade_df["day_of_week"], categories=day_order, ordered=True
+                        )
+
+                        dow_pnl = (
+                            trade_df.groupby("day_of_week")["pnl"].sum().reset_index()
+                        )
+
+                        if not dow_pnl.empty:
+                            fig = px.bar(
+                                dow_pnl,
+                                x="day_of_week",
+                                y="pnl",
+                                labels={"pnl": "P&L", "day_of_week": "Day of Week"},
+                                title="Day of Week Returns",
+                                color_discrete_sequence=["#d62728"],
+                            )
+                            fig.update_layout(
+                                xaxis_title="Day of Week",
+                                yaxis_title="Profit/Loss",
+                                height=400,
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        # Monthly analysis
+                        st.write("#### Monthly Returns")
+                        trade_df["month"] = trade_df["entry_time"].dt.to_period("M")
+                        monthly_pnl = (
+                            trade_df.groupby("month")["pnl"].sum().reset_index()
+                        )
+                        monthly_pnl["month"] = monthly_pnl["month"].dt.to_timestamp()
+
+                        if not monthly_pnl.empty:
+                            fig = px.bar(
+                                monthly_pnl,
+                                x="month",
+                                y="pnl",
+                                labels={"pnl": "P&L", "month": "Month"},
+                                title="Monthly Returns",
+                                color_discrete_sequence=["#9467bd"],
+                            )
+                            fig.update_layout(
+                                xaxis_title="Month",
+                                yaxis_title="Profit/Loss",
+                                height=400,
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning(
+                            "Trade data missing 'entry_time' field for time analysis"
+                        )
+                else:
+                    st.info("No trade data available for time analysis")
+
+    # Performance degradation metrics
+    st.write("### 📉 Performance Degradation Summary")
+    degradation_data = []
+
+    for i, window in enumerate(windows):
+        if not window.get("valid", True):
+            continue
+
+        in_perf = window.get("in_sample_performance", {}).get("summary", {})
+        out_perf = window.get("out_sample_performance", {}).get("summary", {})
+
+        in_return = in_perf.get("total_return_pct", 0)
+        out_return = out_perf.get("total_return_pct", 0)
+        degradation = out_return - in_return
+
+        degradation_data.append(
+            {
+                "Window": i + 1,
+                "In-Sample Return": in_return,
+                "Out-Sample Return": out_return,
+                "Degradation (%)": degradation,
+            }
         )
-        fig.update_layout(
-            title="Walk-Forward Equity Curve",
-            xaxis_title="Date",
-            yaxis_title="Cumulative Value",
-            showlegend=True,
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
-    # 5. Export option
+    if degradation_data:
+        deg_df = pd.DataFrame(degradation_data)
+        st.bar_chart(
+            deg_df.set_index("Window")[["In-Sample Return", "Out-Sample Return"]]
+        )
+        st.dataframe(
+            deg_df.style.format(
+                {
+                    "In-Sample Return": "{:.2f}%",
+                    "Out-Sample Return": "{:.2f}%",
+                    "Degradation (%)": "{:.2f}%",
+                }
+            ),
+            use_container_width=True,
+        )
+    else:
+        st.info("No degradation data available")
+
+    # Export option
+    st.write("### 💾 Export Results")
     if st.button("Export Full Walk-Forward Report", key="export_wf"):
         report_json = json.dumps(results, indent=2, default=str)
         st.download_button(
             label="Download Full Report as JSON",
             data=report_json,
-            file_name=f"{params['ticker']}_walkforward_report.json",
+            file_name=f"{ticker}_walkforward_report.json",
             mime="application/json",
         )
+
     st.success("Walk-forward analysis display complete!")
 
 
@@ -3978,8 +4392,6 @@ def render_sidebar():
 
     else:
         n_trials = 10
-        in_sample_weeks = None
-        out_sample_weeks = None
     # Timeframe selection
     timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "4h", "1d"])
 
@@ -4607,8 +5019,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
         except:
             print("Warning: Could not convert best_params string to dict")
 
-    import pandas as pd
-
+    # Format percentage columns
     percent_cols = [
         col
         for col in window_summary.columns
@@ -4632,33 +5043,9 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
     if all_out_sample:
         pd.DataFrame(all_out_sample).to_csv("all_out_sample_trades.csv", index=False)
 
-    # Print and save trade statistics
-    print("\nTrade Statistics Summary:")
-    print(stats_summary.to_string(index=False))
-    stats_summary.to_csv("trade_statistics_summary.csv", index=False)
-    print("\nSaved trade statistics to 'trade_statistics_summary.csv'")
-
     # Print overall metrics
     overall = wf.get_overall_metrics()
-    print("\nOverall Performance:")
-    print(f"In-Sample Avg Return: {overall['in_sample_avg_return']:.4f}")
-    print(f"Out-of-Sample Avg Return: {overall['out_sample_avg_return']:.4f}")
 
-    if overall["in_sample_avg_sharpe"] is not None:
-        print(
-            f"In-Sample Avg Sharpe: {overall['in_sample_avg_sharpe']:.4f} (based on {overall['in_sample_sharpe_count']} valid values)"
-        )
-    else:
-        print(f"In-Sample Avg Sharpe: N/A (no valid values found)")
-
-    if overall["out_sample_avg_sharpe"] is not None:
-        print(
-            f"Out-of-Sample Avg Sharpe: {overall['out_sample_avg_sharpe']:.4f} (based on {overall['out_sample_sharpe_count']} valid values)"
-        )
-    else:
-        print(f"Out-of-Sample Avg Sharpe: N/A (no valid values found)")
-
-    print(f"Total Windows: {overall['total_windows']}")
     # NEW: Check if we have results
     if not wf.results:
         st.error(
@@ -4675,19 +5062,6 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
 
     # FIX: Handle best_params display
     if not param_evolution_df.empty:
-        # Check if best_params is string representation of dict
-        if (
-            "best_params" in param_evolution_df.columns
-            and param_evolution_df["best_params"].apply(type).eq(str).all()
-        ):
-            try:
-                # Convert string to dictionary
-                param_evolution_df["best_params"] = param_evolution_df[
-                    "best_params"
-                ].apply(ast.literal_eval)
-            except:
-                st.warning("Could not convert best_params string to dictionary")
-
         # Create a display version of parameters
         param_evolution_df["parameters_display"] = param_evolution_df[
             "best_params"
@@ -4698,24 +5072,6 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 else "No parameters"
             )
         )
-
-        # Remove percent signs and convert columns to float if needed
-        percent_cols = [
-            col
-            for col in param_evolution_df.columns
-            if any(x in col.lower() for x in ["return", "drawdown"])
-        ]
-        for col in percent_cols:
-            # Remove % and convert to numeric, regardless of dtype
-            param_evolution_df[col] = (
-                param_evolution_df[col]
-                .astype(str)
-                .str.replace("%", "", regex=False)
-                .str.strip()
-            )
-            param_evolution_df[col] = pd.to_numeric(
-                param_evolution_df[col], errors="coerce"
-            )
 
         # Create display DataFrame without the raw best_params column
         display_df = param_evolution_df.drop(columns=["best_params"], errors="ignore")
@@ -4790,7 +5146,138 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
         else:
             st.info("No out-of-sample equity curve data available")
 
-    # 3. Display each window in expanders
+    # 3. Time Return Analysis (NEW SECTION)
+    st.subheader("⏱️ Time Return Analysis")
+    st.write("### Monthly Return Distribution")
+
+    # Calculate monthly returns
+    def calculate_monthly_returns(all_trades, initial_cash):
+        if not all_trades:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_trades)
+        if "entry_date" not in df.columns or "pnl_net" not in df.columns:
+            return pd.DataFrame()
+
+        try:
+            df["entry_date"] = pd.to_datetime(df["entry_date"])
+            df["month"] = df["entry_date"].dt.to_period("M")
+
+            # Calculate monthly P&L
+            monthly_pnl = df.groupby("month")["pnl_net"].sum().reset_index()
+            monthly_pnl["month"] = monthly_pnl["month"].dt.to_timestamp()
+            monthly_pnl["return_pct"] = (monthly_pnl["pnl_net"] / initial_cash) * 100
+
+            return monthly_pnl
+        except Exception as e:
+            print(f"Error calculating monthly returns: {e}")
+            return pd.DataFrame()
+
+    # Calculate monthly returns
+    initial_cash = params.get("initial_cash", 10000)
+    in_sample_monthly = calculate_monthly_returns(all_in_sample, initial_cash)
+    out_sample_monthly = calculate_monthly_returns(all_out_sample, initial_cash)
+
+    # Create visualizations
+    if not in_sample_monthly.empty or not out_sample_monthly.empty:
+        fig = go.Figure()
+
+        if not in_sample_monthly.empty:
+            fig.add_trace(
+                go.Bar(
+                    x=in_sample_monthly["month"],
+                    y=in_sample_monthly["return_pct"],
+                    name="In-Sample",
+                    marker_color="#1f77b4",
+                )
+            )
+
+        if not out_sample_monthly.empty:
+            fig.add_trace(
+                go.Bar(
+                    x=out_sample_monthly["month"],
+                    y=out_sample_monthly["return_pct"],
+                    name="Out-of-Sample",
+                    marker_color="#ff7f0e",
+                )
+            )
+
+        fig.update_layout(
+            title="Monthly Returns",
+            xaxis_title="Month",
+            yaxis_title="Return (%)",
+            barmode="group",
+            height=500,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Show monthly return statistics
+        st.write("### Monthly Return Statistics")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if not in_sample_monthly.empty:
+                st.write("**In-Sample Monthly Returns**")
+                st.dataframe(
+                    in_sample_monthly.set_index("month")[["return_pct"]].style.format(
+                        {"return_pct": "{:.2f}%"}
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.info("No in-sample monthly returns")
+
+        with col2:
+            if not out_sample_monthly.empty:
+                st.write("**Out-of-Sample Monthly Returns**")
+                st.dataframe(
+                    out_sample_monthly.set_index("month")[["return_pct"]].style.format(
+                        {"return_pct": "{:.2f}%"}
+                    ),
+                    use_container_width=True,
+                )
+            else:
+                st.info("No out-of-sample monthly returns")
+    else:
+        st.info("No monthly return data available")
+
+    # Monthly return metrics
+    st.write("### Monthly Return Metrics")
+
+    def calculate_return_metrics(returns_df):
+        if returns_df.empty:
+            return {}
+
+        metrics = {
+            "Best Month": f"{returns_df['return_pct'].max():.2f}%",
+            "Worst Month": f"{returns_df['return_pct'].min():.2f}%",
+            "Avg Positive Month": f"{returns_df[returns_df['return_pct'] > 0]['return_pct'].mean():.2f}%",
+            "Avg Negative Month": f"{returns_df[returns_df['return_pct'] < 0]['return_pct'].mean():.2f}%",
+            "Win Rate": f"{len(returns_df[returns_df['return_pct'] > 0]) / len(returns_df) * 100:.1f}%",
+            "Std Dev": f"{returns_df['return_pct'].std():.2f}%",
+        }
+        return metrics
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if not in_sample_monthly.empty:
+            st.write("**In-Sample Metrics**")
+            metrics = calculate_return_metrics(in_sample_monthly)
+            for k, v in metrics.items():
+                st.metric(k, v)
+        else:
+            st.info("No in-sample monthly metrics")
+
+    with col2:
+        if not out_sample_monthly.empty:
+            st.write("**Out-of-Sample Metrics**")
+            metrics = calculate_return_metrics(out_sample_monthly)
+            for k, v in metrics.items():
+                st.metric(k, v)
+        else:
+            st.info("No out-of-sample monthly metrics")
+
+    # 4. Display each window in expanders
     st.write("### 📅 Detailed Window Analysis")
     for i, result in enumerate(wf.results):
         with st.expander(
@@ -4807,9 +5294,8 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 st.write(f"Optimization Trials: {params['n_trials']}")
                 st.write("**Best Parameters**")
 
-                # FIX: Handle empty best_params
+                # Handle best_params
                 if result.get("best_params"):
-                    # Ensure we have a dictionary
                     best_params = result["best_params"]
                     if isinstance(best_params, str):
                         try:
@@ -4905,33 +5391,71 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                         )
                     )
 
-                # Add vertical line at test start only if it matches the x-axis type
-                if not in_sample_curve.empty and not out_sample_curve.empty:
-                    test_start = result["test_start"]
-                    # Try to match the type of x-axis (index) for vline
-                    x_index = in_sample_curve.index
-                    # If index is datetime, convert test_start to datetime
-                    import pandas as pd
+                # Fixed datetime conversion for test_start - using shapes instead of add_vline
+                test_start = result.get("test_start", None)
+                if test_start is not None and not pd.isna(test_start):
+                    try:
+                        # Handle different data types
+                        if isinstance(test_start, (list, tuple, np.ndarray)):
+                            test_start = test_start[0]
 
-                    if pd.api.types.is_datetime64_any_dtype(x_index):
-                        test_start_vline = pd.to_datetime(test_start)
-                    else:
-                        test_start_vline = str(test_start)
-                    # Only add vline if test_start_vline is in the x-axis or is a valid datetime
-                    if (
-                        hasattr(test_start_vline, "to_pydatetime")
-                        and test_start_vline in x_index
-                    ) or (
-                        isinstance(test_start_vline, str)
-                        and test_start_vline in x_index.astype(str)
-                    ):
-                        fig.add_vline(
-                            x=test_start_vline,
-                            line_dash="dash",
-                            line_color="green",
-                            annotation_text="Test Start",
-                        )
-                    # Otherwise, skip vline to avoid type errors
+                        # Convert to pandas timestamp first
+                        if isinstance(test_start, pd.Period):
+                            test_start = test_start.to_timestamp()
+                        elif not isinstance(test_start, pd.Timestamp):
+                            test_start = pd.to_datetime(test_start)
+
+                        # Convert to python datetime for plotly
+                        if hasattr(test_start, "to_pydatetime"):
+                            test_start = test_start.to_pydatetime()
+
+                        # Get y-axis range for the vertical line
+                        y_min = float("inf")
+                        y_max = float("-inf")
+
+                        if not in_sample_curve.empty:
+                            y_min = min(y_min, in_sample_curve.min())
+                            y_max = max(y_max, in_sample_curve.max())
+
+                        if not out_sample_curve.empty:
+                            y_min = min(y_min, out_sample_curve.min())
+                            y_max = max(y_max, out_sample_curve.max())
+
+                        # Only add the line if we have valid y-range
+                        if y_min != float("inf") and y_max != float("-inf"):
+                            # Add vertical line using add_shape instead of add_vline
+                            fig.add_shape(
+                                type="line",
+                                x0=test_start,
+                                y0=y_min,
+                                x1=test_start,
+                                y1=y_max,
+                                line=dict(
+                                    color="green",
+                                    width=2,
+                                    dash="dash",
+                                ),
+                            )
+
+                            # Add annotation separately
+                            fig.add_annotation(
+                                x=test_start,
+                                y=y_max,
+                                text="Test Start",
+                                showarrow=True,
+                                arrowhead=2,
+                                arrowsize=1,
+                                arrowwidth=2,
+                                arrowcolor="green",
+                                font=dict(color="green"),
+                                bgcolor="rgba(255,255,255,0.8)",
+                                bordercolor="green",
+                                borderwidth=1,
+                            )
+
+                    except Exception as e:
+                        print(f"Warning: Could not add test start line: {e}")
+                        # Continue without the vertical line
 
                 fig.update_layout(
                     title="Portfolio Value",
@@ -4943,9 +5467,6 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.info("No equity curve data available")
-
-            # Detailed Trades Table
-            st.write("### 📋 Detailed Trades")
 
             if result.get("in_sample_trades") or result.get("out_sample_trades"):
                 tab1, tab2 = st.tabs(["In-Sample Trades", "Out-Sample Trades"])
@@ -5048,7 +5569,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             else:
                 st.info("No trades recorded for this window")
 
-    # 4. Overall metrics
+    # 5. Overall metrics
     st.subheader("📈 Overall Performance Summary")
     overall = wf.get_overall_metrics()
     col1, col2 = st.columns(2)
@@ -5063,14 +5584,13 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 "Out-Sample Avg Sharpe", f"{overall['out_sample_avg_sharpe']:.4f}"
             )
 
-    # 5. Trade statistics summary
-    stats_summary, all_in_sample, all_out_sample = wf.generate_trade_statistics()
+    # 6. Trade statistics summary
     st.write("### 📋 Aggregate Trade Statistics")
     st.dataframe(stats_summary, use_container_width=True)
 
-    # 6. Download all trades
-    st.write("### 💾 Download All Trades")
-    col1, col2 = st.columns(2)
+    # 7. Download all trades
+    st.write("### 💾 Download All Results")
+    col1, col2, col3 = st.columns(3)
     with col1:
         if all_in_sample:
             csv_in = pd.DataFrame(all_in_sample).to_csv(index=False).encode("utf-8")
@@ -5081,7 +5601,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 mime="text/csv",
             )
         else:
-            st.info("No in-sample trades to download")
+            st.info("No in-sample trades")
 
     with col2:
         if all_out_sample:
@@ -5093,7 +5613,28 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 mime="text/csv",
             )
         else:
-            st.info("No out-sample trades to download")
+            st.info("No out-sample trades")
+
+    with col3:
+        # Download monthly returns
+        if not in_sample_monthly.empty or not out_sample_monthly.empty:
+            monthly_returns = pd.DataFrame()
+            if not in_sample_monthly.empty:
+                monthly_returns["in_sample_month"] = in_sample_monthly["month"]
+                monthly_returns["in_sample_return"] = in_sample_monthly["return_pct"]
+            if not out_sample_monthly.empty:
+                monthly_returns["out_sample_month"] = out_sample_monthly["month"]
+                monthly_returns["out_sample_return"] = out_sample_monthly["return_pct"]
+
+            csv_monthly = monthly_returns.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                label="Download Monthly Returns",
+                data=csv_monthly,
+                file_name="monthly_returns.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("No monthly returns")
 
     progress_bar.progress(100)
     status_text.text("Walk-forward analysis complete!")

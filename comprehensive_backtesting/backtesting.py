@@ -274,15 +274,12 @@ def run_basic_comparison_analysis(
     return results_comparison
 
 
+# Updated run_complete_backtest function in backtesting.py
 def run_complete_backtest(
     ticker,
     start_date,
     end_date,
-    window_days,
-    out_days,
-    step_days,
     strategy_class,
-    analyzers,
     interval,
     n_trials,
 ):
@@ -348,35 +345,101 @@ def run_complete_backtest(
 
     print("\n" + "=" * 60)
     try:
-        validation_analyzer = ValidationAnalyzer(
-            strategy_name=strategy_class, ticker=ticker
-        )
+        # Get data for walk-forward analysis
+        from comprehensive_backtesting.data import get_data_sync
 
-        wf_results = validation_analyzer.walk_forward_analysis(
+        data = get_data_sync(
+            ticker=ticker,
             start_date=start_date,
             end_date=end_date,
-            in_sample_days=window_days,
-            out_sample_days=out_days,
-            step_days=step_days,
-            n_trials=n_trials,
-            min_trades=1,
             interval=interval,
         )
+
+        from .walk_forward_analysis import WalkForwardAnalysis
+        from comprehensive_backtesting.registry import get_strategy
+
+        strategy_class = get_strategy(strategy_class)
+        wf = WalkForwardAnalysis(
+            data=data,
+            strategy_class=strategy_class.__name__,
+            optimization_params=strategy_class.optimization_params,
+            optimization_metric="total_return",
+            training_ratio=0.6,
+            testing_ratio=0.15,
+            step_ratio=0.2,
+            initial_cash=10000,
+            commission=0.001,
+            n_trials=n_trials,
+            verbose=True,
+        )
+        wf.run_analysis()
+
+        # Format results for display
+        wf_results = {"windows": [], "summary_stats": wf.get_overall_metrics()}
+
+        for result in wf.results:
+            window_info = {
+                "valid": True,
+                "periods": {
+                    "in_sample_start": result["train_start"],
+                    "in_sample_end": result["train_end"],
+                    "out_sample_start": result["test_start"],
+                    "out_sample_end": result["test_end"],
+                },
+                "best_params": result["best_params"],
+                "in_sample_performance": {
+                    "summary": {
+                        "total_return_pct": result["in_sample_metrics"]["total_return"]
+                        * 100,
+                        "sharpe_ratio": result["in_sample_metrics"]["sharpe_ratio"],
+                        "max_drawdown_pct": result["in_sample_metrics"]["max_drawdown"]
+                        * 100,
+                    },
+                    "trade_analysis": {
+                        "trades": result["in_sample_trades"],
+                        "completed_trades": result["in_sample_trades"],
+                    },
+                },
+                "out_sample_performance": {
+                    "summary": {
+                        "total_return_pct": result["out_sample_metrics"]["total_return"]
+                        * 100,
+                        "sharpe_ratio": result["out_sample_metrics"]["sharpe_ratio"],
+                        "max_drawdown_pct": result["out_sample_metrics"]["max_drawdown"]
+                        * 100,
+                    },
+                    "trade_analysis": {
+                        "trades": result["out_sample_trades"],
+                        "completed_trades": result["out_sample_trades"],
+                    },
+                },
+            }
+            wf_results["windows"].append(window_info)
+
         results["walk_forward"] = wf_results
+
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         logger.error(f"Walk-forward analysis failed: {str(e)}")
+        # Fallback to parameter optimization
+        results["walk_forward"] = run_parameter_optimization(
+            strategy_class=strategy_class,
+            ticker=ticker,
+            start_date=start_date,
+            end_date=end_date,
+            n_trials=n_trials,
+            interval=interval,
+        )
 
     print("\n" + "=" * 60)
     print("Generating comprehensive reports...")
     try:
-        basic_analyzer = PerformanceAnalyzer(basic_results)
+        basic_analyzer = PerformanceAnalyzer(results["basic"])
         basic_analyzer.save_report_to_file(f"{ticker}_basic_report.json")
         print(f"Basic report saved: {ticker}_basic_report.json")
-        if (
-            "optimization" in results
-            and results["optimization"]
-            and "cerebro" in results["optimization"]
-        ):
+        if "optimization" in results and results["optimization"]:
             opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
             opt_analyzer.save_report_to_file(f"{ticker}_optimized_report.json")
             print(f"Optimized report saved: {ticker}_optimized_report.json")
