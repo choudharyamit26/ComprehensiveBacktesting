@@ -399,6 +399,9 @@ def run_complete_backtest(
                         "trades": result["in_sample_trades"],
                         "completed_trades": result["in_sample_trades"],
                     },
+                    "equity_curve": result["in_sample_metrics"][
+                        "equity_curve"
+                    ].to_dict(),
                 },
                 "out_sample_performance": {
                     "summary": {
@@ -412,6 +415,9 @@ def run_complete_backtest(
                         "trades": result["out_sample_trades"],
                         "completed_trades": result["out_sample_trades"],
                     },
+                    "equity_curve": result["out_sample_metrics"][
+                        "equity_curve"
+                    ].to_dict(),
                 },
             }
             wf_results["windows"].append(window_info)

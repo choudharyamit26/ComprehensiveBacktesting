@@ -3135,20 +3135,27 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
     # Display overall summary statistics
     if summary_stats:
         st.write("### 📈 Overall Performance Summary")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4, col5 = st.columns(5)
         col1.metric(
             "Valid Windows",
-            f"{summary_stats.get('valid_windows', 0)}/{summary_stats.get('total_windows', 0)}",
+            f"{summary_stats.get('total_windows', 0)}",
         )
         col2.metric(
             "Avg In-Sample Return",
-            f"{summary_stats.get('avg_in_sample_return', 0):.2f}%",
+            f"{summary_stats.get('in_sample_return_avg_return', 0):.2f}%",
         )
         col3.metric(
             "Avg Out-Sample Return",
-            f"{summary_stats.get('avg_out_sample_return', 0):.2f}%",
+            f"{summary_stats.get('out_sample_avg_return', 0):.2f}%",
         )
-
+        col4.metric(
+            "Avg In-Sample Sharpe",
+            f"{summary_stats.get('in_sample_avg_sharpe', 0):.2f}",
+        )
+        col5.metric(
+            "Avg Out-Sample Sharpe",
+            f"{summary_stats.get('out_sample_avg_sharpe', 0):.2f}",
+        )
         col1, col2, col3 = st.columns(3)
         col1.metric(
             "Out-Sample Win Rate", f"{summary_stats.get('win_rate_out_sample', 0):.1f}%"
@@ -3187,6 +3194,8 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         )
 
     if param_evolution:
+        import pandas as pd
+
         param_df = pd.DataFrame(param_evolution)
         # Fill None/NaN with 0.0 for columns to be formatted
         for col in ["In Return (%)", "Out Return (%)", "In Sharpe", "Out Sharpe"]:
@@ -3412,6 +3421,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                 if in_equity or out_equity:
                     fig = go.Figure()
 
+                    in_dates = out_dates = None
                     if in_equity:
                         in_dates = list(in_equity.keys())
                         in_values = list(in_equity.values())
@@ -3438,11 +3448,33 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                             )
                         )
 
-                    # Add vertical line at test start
+                    # Add vertical line at test start, matching x-axis type
                     test_start = periods.get("out_sample_start", "")
                     if test_start:
+                        import pandas as pd
+
+                        x_axis_type = None
+                        if in_dates and len(in_dates) > 0:
+                            x_axis_type = type(in_dates[0])
+                        elif out_dates and len(out_dates) > 0:
+                            x_axis_type = type(out_dates[0])
+                        else:
+                            x_axis_type = str
+
+                        test_start_x = test_start
+                        if x_axis_type is str:
+                            test_start_x = str(test_start)
+                        elif x_axis_type.__name__ in ["Timestamp", "datetime"]:
+                            # Convert to milliseconds since epoch to ensure Plotly compatibility
+                            test_start_x = (
+                                pd.to_datetime(test_start).value // 10**6
+                            )  # Convert to milliseconds
+                            fig.update_xaxes(
+                                type="date"
+                            )  # Explicitly set x-axis to date type
+                        # else: leave as is
                         fig.add_vline(
-                            x=test_start,
+                            x=test_start_x,
                             line_dash="dash",
                             line_color="green",
                             annotation_text="Test Start",
@@ -4389,7 +4421,18 @@ def render_sidebar():
             step=10,
             help="Number of optimization trials to run (increases in steps of 10)",
         )
-
+        optimization_parameters = st.sidebar.selectbox(
+            "Optimization Parameters",
+            [
+                "total_return",
+                "sharpe_ratio",
+                "max_drawdown",
+                "sortino_ratio",
+                "calmar",
+                "time",
+            ],
+            help="Choose whether to optimize all parameters or only selected ones",
+        )
     else:
         n_trials = 10
     # Timeframe selection
@@ -4430,6 +4473,7 @@ def render_sidebar():
         "timeframe": timeframe,
         "selected_analyzers": selected_analyzers,
         "available_analyzers": available_analyzers,
+        "optimization_parameters": optimization_parameters,
     }
 
 
@@ -5572,7 +5616,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
     # 5. Overall metrics
     st.subheader("📈 Overall Performance Summary")
     overall = wf.get_overall_metrics()
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("In-Sample Avg Return", f"{overall['in_sample_avg_return']:.4f}")
         st.metric("Out-Sample Avg Return", f"{overall['out_sample_avg_return']:.4f}")
@@ -5583,7 +5627,11 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             st.metric(
                 "Out-Sample Avg Sharpe", f"{overall['out_sample_avg_sharpe']:.4f}"
             )
-
+    with col3:
+        st.metric(
+            "Valid Windows",
+            f"{overall['total_windows']}",
+        )
     # 6. Trade statistics summary
     st.write("### 📋 Aggregate Trade Statistics")
     st.dataframe(stats_summary, use_container_width=True)
