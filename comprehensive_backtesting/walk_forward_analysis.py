@@ -6,7 +6,9 @@ from datetime import datetime, timedelta
 from multiprocessing import Pool
 
 from comprehensive_backtesting.data import get_data_sync
+from comprehensive_backtesting.registry import get_strategy
 from comprehensive_backtesting.sma_bollinger_band import SMABollinger
+from backtrader.analyzers import TimeReturn
 
 
 class StrategyTradeAnalyzer(bt.Analyzer):
@@ -45,6 +47,7 @@ class StrategyTradeAnalyzer(bt.Analyzer):
         return self.trades.copy()
 
 
+# [Modify create_cerebro function]
 def create_cerebro(data, strategy_class, params, initial_cash, commission):
     cerebro = bt.Cerebro()
     data_feed = bt.feeds.PandasData(dataname=data)
@@ -56,6 +59,9 @@ def create_cerebro(data, strategy_class, params, initial_cash, commission):
     cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe")
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
+
+    # Add TimeReturn analyzer for equity curve
+    cerebro.addanalyzer(TimeReturn, timeframe=bt.TimeFrame.Days, _name="timereturn")
 
     # Use the strategy's own trade tracking
     cerebro.addanalyzer(StrategyTradeAnalyzer, _name="tradehistory")
@@ -118,13 +124,16 @@ def process_window(args):
         test_start,
         test_end,
         data,
-        strategy_class,
+        strategy_name,  # changed from strategy_class
         optimization_params,
         optimization_metric,
         initial_cash,
         commission,
         n_trials,
     ) = args
+
+    # Resolve strategy class from name (multiprocessing safe)
+    strategy_class = get_strategy(strategy_name)
 
     print(f"Processing window {window_num}")
 
@@ -276,6 +285,10 @@ def extract_metrics(strat):
     drawdown_analysis = strat.analyzers.drawdown.get_analysis()
     metrics["max_drawdown"] = drawdown_analysis["max"]["drawdown"]
 
+    timereturn = strat.analyzers.timereturn.get_analysis()
+    equity_curve = pd.Series(timereturn)
+    equity_curve = (1 + equity_curve).cumprod() * strat.cerebro.broker.startingcash
+    metrics["equity_curve"] = equity_curve
     return metrics
 
 
@@ -433,6 +446,24 @@ class WalkForwardAnalysis:
                 for w in windows
             ]
             self.results = pool.map(process_window, args)
+
+        # Aggregate all equity curves
+        self.all_in_sample_equity = pd.DataFrame()
+        self.all_out_sample_equity = pd.DataFrame()
+
+        for result in self.results:
+            window_id = result["walk_forward"]
+            in_sample_curve = result["in_sample_metrics"].get(
+                "equity_curve", pd.Series()
+            )
+            out_sample_curve = result["out_sample_metrics"].get(
+                "equity_curve", pd.Series()
+            )
+
+            if not in_sample_curve.empty:
+                self.all_in_sample_equity[f"Window {window_id}"] = in_sample_curve
+            if not out_sample_curve.empty:
+                self.all_out_sample_equity[f"Window {window_id}"] = out_sample_curve
 
     def get_overall_metrics(self):
         in_sample_returns = [
@@ -606,101 +637,86 @@ class WalkForwardAnalysis:
             }
         )
 
-        # Add percentage formatting
-        stats_summary["In-Sample"] = stats_summary.apply(
-            lambda x: (
-                f"{x['In-Sample']:.2%}" if "Rate" in x["Metric"] else x["In-Sample"]
-            ),
-            axis=1,
-        )
-        stats_summary["Out-of-Sample"] = stats_summary.apply(
-            lambda x: (
-                f"{x['Out-of-Sample']:.2%}"
-                if "Rate" in x["Metric"]
-                else x["Out-of-Sample"]
-            ),
-            axis=1,
-        )
-
         return stats_summary, all_in_sample_trades, all_out_sample_trades
 
 
-def run_walkforward_example():
-    # Example data and strategy
-    data = get_data_sync(
-        ticker="SBIN.NS", start_date="2020-01-01", end_date="2025-07-01", interval="1d"
-    )
+# def run_walkforward_example():
+#     # Example data and strategy
+#     data = get_data_sync(
+#         ticker="SBIN.NS", start_date="2020-01-01", end_date="2025-07-01", interval="1d"
+#     )
 
-    # Debug print for data range
-    print(f"Data range: {data.index.min()} to {data.index.max()}")
-    print(f"Data columns: {data.columns}")
-    print(f"Data head:\n{data.head()}")
+#     # Debug print for data range
+#     print(f"Data range: {data.index.min()} to {data.index.max()}")
+#     print(f"Data columns: {data.columns}")
+#     print(f"Data head:\n{data.head()}")
+#     strategy_class = get_strategy("SMABollinger")
 
-    wf = WalkForwardAnalysis(
-        data=data,
-        strategy_class=SMABollinger,
-        optimization_params=SMABollinger.optimization_params,
-        optimization_metric="total_return",
-        training_ratio=0.6,
-        testing_ratio=0.15,
-        step_ratio=0.2,
-        n_trials=50,
-        verbose=False,
-    )
-    wf.run_analysis()
+#     wf = WalkForwardAnalysis(
+#         data=data,
+#         strategy_class=strategy_class.__name__,
+#         optimization_params=strategy_class.optimization_params,
+#         optimization_metric="total_return",
+#         training_ratio=0.6,
+#         testing_ratio=0.15,
+#         step_ratio=0.2,
+#         n_trials=50,
+#         verbose=False,
+#     )
+#     wf.run_analysis()
 
-    # Print results
-    print("\nWalk-Forward Analysis Results:")
-    for result in wf.results:
-        print(f"\nWindow {result['walk_forward']}:")
-        print(f"Training Period: {result['train_start']} to {result['train_end']}")
-        print(f"Testing Period: {result['test_start']} to {result['test_end']}")
-        print(f"Best Parameters: {result['best_params']}")
-        print(f"In-Sample Metrics: {result['in_sample_metrics']}")
-        print(f"Out-of-Sample Metrics: {result['out_sample_metrics']}")
+#     # Print results
+#     print("\nWalk-Forward Analysis Results:")
+#     for result in wf.results:
+#         print(f"\nWindow {result['walk_forward']}:")
+#         print(f"Training Period: {result['train_start']} to {result['train_end']}")
+#         print(f"Testing Period: {result['test_start']} to {result['test_end']}")
+#         print(f"Best Parameters: {result['best_params']}")
+#         print(f"In-Sample Metrics: {result['in_sample_metrics']}")
+#         print(f"Out-of-Sample Metrics: {result['out_sample_metrics']}")
 
-    # Generate trade statistics summary
-    stats_summary, all_in_sample, all_out_sample = wf.generate_trade_statistics()
+#     # Generate trade statistics summary
+#     stats_summary, all_in_sample, all_out_sample = wf.generate_trade_statistics()
 
-    # Save window summary with parameters
-    window_summary = wf.get_window_summary()
-    window_summary.to_csv("window_parameters_summary.csv", index=False)
-    print("\nSaved window parameters summary to 'window_parameters_summary.csv'")
+#     # Save window summary with parameters
+#     window_summary = wf.get_window_summary()
+#     window_summary.to_csv("window_parameters_summary.csv", index=False)
+#     print("\nSaved window parameters summary to 'window_parameters_summary.csv'")
 
-    # Save aggregated trades
-    if all_in_sample:
-        pd.DataFrame(all_in_sample).to_csv("all_in_sample_trades.csv", index=False)
-    if all_out_sample:
-        pd.DataFrame(all_out_sample).to_csv("all_out_sample_trades.csv", index=False)
+#     # Save aggregated trades
+#     if all_in_sample:
+#         pd.DataFrame(all_in_sample).to_csv("all_in_sample_trades.csv", index=False)
+#     if all_out_sample:
+#         pd.DataFrame(all_out_sample).to_csv("all_out_sample_trades.csv", index=False)
 
-    # Print and save trade statistics
-    print("\nTrade Statistics Summary:")
-    print(stats_summary.to_string(index=False))
-    stats_summary.to_csv("trade_statistics_summary.csv", index=False)
-    print("\nSaved trade statistics to 'trade_statistics_summary.csv'")
+#     # Print and save trade statistics
+#     print("\nTrade Statistics Summary:")
+#     print(stats_summary.to_string(index=False))
+#     stats_summary.to_csv("trade_statistics_summary.csv", index=False)
+#     print("\nSaved trade statistics to 'trade_statistics_summary.csv'")
 
-    # Print overall metrics
-    overall = wf.get_overall_metrics()
-    print("\nOverall Performance:")
-    print(f"In-Sample Avg Return: {overall['in_sample_avg_return']:.4f}")
-    print(f"Out-of-Sample Avg Return: {overall['out_sample_avg_return']:.4f}")
+#     # Print overall metrics
+#     overall = wf.get_overall_metrics()
+#     print("\nOverall Performance:")
+#     print(f"In-Sample Avg Return: {overall['in_sample_avg_return']:.4f}")
+#     print(f"Out-of-Sample Avg Return: {overall['out_sample_avg_return']:.4f}")
 
-    if overall["in_sample_avg_sharpe"] is not None:
-        print(
-            f"In-Sample Avg Sharpe: {overall['in_sample_avg_sharpe']:.4f} (based on {overall['in_sample_sharpe_count']} valid values)"
-        )
-    else:
-        print(f"In-Sample Avg Sharpe: N/A (no valid values found)")
+#     if overall["in_sample_avg_sharpe"] is not None:
+#         print(
+#             f"In-Sample Avg Sharpe: {overall['in_sample_avg_sharpe']:.4f} (based on {overall['in_sample_sharpe_count']} valid values)"
+#         )
+#     else:
+#         print(f"In-Sample Avg Sharpe: N/A (no valid values found)")
 
-    if overall["out_sample_avg_sharpe"] is not None:
-        print(
-            f"Out-of-Sample Avg Sharpe: {overall['out_sample_avg_sharpe']:.4f} (based on {overall['out_sample_sharpe_count']} valid values)"
-        )
-    else:
-        print(f"Out-of-Sample Avg Sharpe: N/A (no valid values found)")
+#     if overall["out_sample_avg_sharpe"] is not None:
+#         print(
+#             f"Out-of-Sample Avg Sharpe: {overall['out_sample_avg_sharpe']:.4f} (based on {overall['out_sample_sharpe_count']} valid values)"
+#         )
+#     else:
+#         print(f"Out-of-Sample Avg Sharpe: N/A (no valid values found)")
 
-    print(f"Total Windows: {overall['total_windows']}")
+#     print(f"Total Windows: {overall['total_windows']}")
 
 
-if __name__ == "__main__":
-    run_walkforward_example()
+# if __name__ == "__main__":
+#     run_walkforward_example()
