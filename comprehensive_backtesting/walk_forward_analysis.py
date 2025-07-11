@@ -179,18 +179,6 @@ def process_window(args):
     in_sample_metrics = extract_metrics(strat_in)
     in_sample_trades = extract_trades(strat_in)
 
-    # Save in-sample trades to CSV
-    if in_sample_trades:
-        in_sample_trades_df = pd.DataFrame(in_sample_trades)
-        in_sample_trades_df.to_csv(
-            f"window_{window_num}_in_sample_trades.csv", index=False
-        )
-        print(
-            f"Saved {len(in_sample_trades)} in-sample trades to window_{window_num}_in_sample_trades.csv"
-        )
-    else:
-        print(f"No in-sample trades to save for window {window_num}")
-
     # Out-of-sample evaluation
     test_data = data[(data.index >= test_start) & (data.index <= test_end)]
     cerebro_out = create_cerebro(
@@ -200,18 +188,6 @@ def process_window(args):
     strat_out = results_out[0]
     out_sample_metrics = extract_metrics(strat_out)
     out_sample_trades = extract_trades(strat_out)
-
-    # Save out-of-sample trades to CSV
-    if out_sample_trades:
-        out_sample_trades_df = pd.DataFrame(out_sample_trades)
-        out_sample_trades_df.to_csv(
-            f"window_{window_num}_out_sample_trades.csv", index=False
-        )
-        print(
-            f"Saved {len(out_sample_trades)} out-of-sample trades to window_{window_num}_out_sample_trades.csv"
-        )
-    else:
-        print(f"No out-of-sample trades to save for window {window_num}")
 
     return {
         "walk_forward": window_num,
@@ -638,85 +614,3 @@ class WalkForwardAnalysis:
         )
 
         return stats_summary, all_in_sample_trades, all_out_sample_trades
-
-
-# def run_walkforward_example():
-#     # Example data and strategy
-#     data = get_data_sync(
-#         ticker="SBIN.NS", start_date="2020-01-01", end_date="2025-07-01", interval="1d"
-#     )
-
-#     # Debug print for data range
-#     print(f"Data range: {data.index.min()} to {data.index.max()}")
-#     print(f"Data columns: {data.columns}")
-#     print(f"Data head:\n{data.head()}")
-#     strategy_class = get_strategy("SMABollinger")
-
-#     wf = WalkForwardAnalysis(
-#         data=data,
-#         strategy_class=strategy_class.__name__,
-#         optimization_params=strategy_class.optimization_params,
-#         optimization_metric="total_return",
-#         training_ratio=0.6,
-#         testing_ratio=0.15,
-#         step_ratio=0.2,
-#         n_trials=50,
-#         verbose=False,
-#     )
-#     wf.run_analysis()
-
-#     # Print results
-#     print("\nWalk-Forward Analysis Results:")
-#     for result in wf.results:
-#         print(f"\nWindow {result['walk_forward']}:")
-#         print(f"Training Period: {result['train_start']} to {result['train_end']}")
-#         print(f"Testing Period: {result['test_start']} to {result['test_end']}")
-#         print(f"Best Parameters: {result['best_params']}")
-#         print(f"In-Sample Metrics: {result['in_sample_metrics']}")
-#         print(f"Out-of-Sample Metrics: {result['out_sample_metrics']}")
-
-#     # Generate trade statistics summary
-#     stats_summary, all_in_sample, all_out_sample = wf.generate_trade_statistics()
-
-#     # Save window summary with parameters
-#     window_summary = wf.get_window_summary()
-#     window_summary.to_csv("window_parameters_summary.csv", index=False)
-#     print("\nSaved window parameters summary to 'window_parameters_summary.csv'")
-
-#     # Save aggregated trades
-#     if all_in_sample:
-#         pd.DataFrame(all_in_sample).to_csv("all_in_sample_trades.csv", index=False)
-#     if all_out_sample:
-#         pd.DataFrame(all_out_sample).to_csv("all_out_sample_trades.csv", index=False)
-
-#     # Print and save trade statistics
-#     print("\nTrade Statistics Summary:")
-#     print(stats_summary.to_string(index=False))
-#     stats_summary.to_csv("trade_statistics_summary.csv", index=False)
-#     print("\nSaved trade statistics to 'trade_statistics_summary.csv'")
-
-#     # Print overall metrics
-#     overall = wf.get_overall_metrics()
-#     print("\nOverall Performance:")
-#     print(f"In-Sample Avg Return: {overall['in_sample_avg_return']:.4f}")
-#     print(f"Out-of-Sample Avg Return: {overall['out_sample_avg_return']:.4f}")
-
-#     if overall["in_sample_avg_sharpe"] is not None:
-#         print(
-#             f"In-Sample Avg Sharpe: {overall['in_sample_avg_sharpe']:.4f} (based on {overall['in_sample_sharpe_count']} valid values)"
-#         )
-#     else:
-#         print(f"In-Sample Avg Sharpe: N/A (no valid values found)")
-
-#     if overall["out_sample_avg_sharpe"] is not None:
-#         print(
-#             f"Out-of-Sample Avg Sharpe: {overall['out_sample_avg_sharpe']:.4f} (based on {overall['out_sample_sharpe_count']} valid values)"
-#         )
-#     else:
-#         print(f"Out-of-Sample Avg Sharpe: N/A (no valid values found)")
-
-#     print(f"Total Windows: {overall['total_windows']}")
-
-
-# if __name__ == "__main__":
-#     run_walkforward_example()

@@ -3142,23 +3142,23 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         )
         col2.metric(
             "Avg In-Sample Return",
-            f"{summary_stats.get('in_sample_return_avg_return', 0):.2f}%",
+            f"{summary_stats.get('in_sample_return_avg_return', 0)}%",
         )
         col3.metric(
             "Avg Out-Sample Return",
-            f"{summary_stats.get('out_sample_avg_return', 0):.2f}%",
+            f"{summary_stats.get('out_sample_avg_return', 0)}%",
         )
         col4.metric(
             "Avg In-Sample Sharpe",
-            f"{summary_stats.get('in_sample_avg_sharpe', 0):.2f}",
+            f"{summary_stats.get('in_sample_avg_sharpe', 0)}",
         )
         col5.metric(
             "Avg Out-Sample Sharpe",
-            f"{summary_stats.get('out_sample_avg_sharpe', 0):.2f}",
+            f"{summary_stats.get('out_sample_avg_sharpe', 0)}",
         )
         col1, col2, col3 = st.columns(3)
         col1.metric(
-            "Out-Sample Win Rate", f"{summary_stats.get('win_rate_out_sample', 0):.1f}%"
+            "Out-Sample Win Rate", f"{summary_stats.get('win_rate_out_sample', 0)}%"
         )
         col2.metric("Return Correlation", f"{summary_stats.get('correlation', 0):.3f}")
         col3.metric(
@@ -4406,7 +4406,14 @@ def render_sidebar():
             .strip()
             .upper()
         )
-
+    optimization_parameters = [
+        "total_return",
+        "sharpe_ratio",
+        "max_drawdown",
+        "sortino_ratio",
+        "calmar",
+        "time_return",
+    ]
     # Analysis type
     analysis_type = st.sidebar.selectbox(
         "Analysis Type",
@@ -4435,6 +4442,7 @@ def render_sidebar():
         )
     else:
         n_trials = 10
+
     # Timeframe selection
     timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "4h", "1d"])
 
@@ -5077,15 +5085,6 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
             window_summary[col].astype(str).str.replace("%", "", regex=False)
         )
         window_summary[col] = pd.to_numeric(window_summary[col], errors="coerce")
-
-    window_summary.to_csv("window_parameters_summary.csv", index=False)
-    print("\nSaved window parameters summary to 'window_parameters_summary.csv'")
-
-    # Save aggregated trades
-    if all_in_sample:
-        pd.DataFrame(all_in_sample).to_csv("all_in_sample_trades.csv", index=False)
-    if all_out_sample:
-        pd.DataFrame(all_out_sample).to_csv("all_out_sample_trades.csv", index=False)
 
     # Print overall metrics
     overall = wf.get_overall_metrics()
