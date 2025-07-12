@@ -3143,19 +3143,19 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         )
         col2.metric(
             "Avg In-Sample Return",
-            f"{summary_stats.get('in_sample_return_avg_return', 0)}%",
+            f"{summary_stats.get('in_sample_return_avg_return', 0):.4f}%",
         )
         col3.metric(
             "Avg Out-Sample Return",
-            f"{summary_stats.get('out_sample_avg_return', 0)}%",
+            f"{summary_stats.get('out_sample_avg_return', 0):.4f}%",
         )
         col4.metric(
             "Avg In-Sample Sharpe",
-            f"{summary_stats.get('in_sample_avg_sharpe', 0)}",
+            f"{summary_stats.get('in_sample_avg_sharpe', 0):.4f}",
         )
         col5.metric(
             "Avg Out-Sample Sharpe",
-            f"{summary_stats.get('out_sample_avg_sharpe', 0)}",
+            f"{summary_stats.get('out_sample_avg_sharpe', 0):.4f}",
         )
         col1, col2, col3 = st.columns(3)
         col1.metric(

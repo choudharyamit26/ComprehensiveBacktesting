@@ -2,13 +2,10 @@ import backtrader as bt
 import numpy as np
 import optuna
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import timedelta
 from multiprocessing import Pool
 
-from comprehensive_backtesting.data import get_data_sync
 from comprehensive_backtesting.registry import get_strategy
-from comprehensive_backtesting.sma_bollinger_band import SMABollinger
-from backtrader.analyzers import TimeReturn
 
 
 class StrategyTradeAnalyzer(bt.Analyzer):
@@ -47,23 +44,37 @@ class StrategyTradeAnalyzer(bt.Analyzer):
         return self.trades.copy()
 
 
-# [Modify create_cerebro function]
 def create_cerebro(data, strategy_class, params, initial_cash, commission):
     cerebro = bt.Cerebro()
+
+    # Add data feed
     data_feed = bt.feeds.PandasData(dataname=data)
     cerebro.adddata(data_feed)
+
+    # Add strategy
     cerebro.addstrategy(strategy_class, **params)
+
+    # Set broker parameters
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(commission=commission)
+
+    # Add analyzers
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
-    cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name="sharpe")
+    cerebro.addanalyzer(
+        bt.analyzers.SharpeRatio, _name="sharpe", riskfreerate=0.0, annualize=True
+    )
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
 
-    # Add TimeReturn analyzer for equity curve
-    cerebro.addanalyzer(TimeReturn, timeframe=bt.TimeFrame.Days, _name="timereturn")
+    # Add TimeReturn analyzer for daily returns (crucial for Sharpe calculation)
+    cerebro.addanalyzer(
+        bt.analyzers.TimeReturn,
+        timeframe=bt.TimeFrame.Days,
+        compression=1,
+        _name="timereturn",
+    )
 
-    # Use the strategy's own trade tracking
+    # Add our custom trade analyzer
     cerebro.addanalyzer(StrategyTradeAnalyzer, _name="tradehistory")
 
     return cerebro
@@ -208,63 +219,71 @@ def extract_metrics(strat):
 
     # Get returns analysis
     returns_analysis = strat.analyzers.returns.get_analysis()
-    metrics["total_return"] = returns_analysis["rtot"]
+    metrics["total_return"] = returns_analysis.get("rtot", 0)
 
-    # Handle Sharpe ratio calculation more robustly
-    sharpe_analysis = strat.analyzers.sharpe.get_analysis()
+    # Get TimeReturn data for proper Sharpe calculation
+    timereturn_analysis = strat.analyzers.timereturn.get_analysis()
 
-    # Try to get Sharpe ratio from analyzer first
-    if (
-        sharpe_analysis
-        and "sharperatio" in sharpe_analysis
-        and sharpe_analysis["sharperatio"] is not None
-    ):
-        # Check if it's a valid number (not NaN or infinite)
-        sharpe_value = sharpe_analysis["sharperatio"]
-        if not (pd.isna(sharpe_value) or np.isinf(sharpe_value)):
-            metrics["sharpe_ratio"] = sharpe_value
-        else:
-            metrics["sharpe_ratio"] = None
-    else:
-        # Fallback: Calculate Sharpe ratio manually if possible
-        try:
-            if "rnorm" in returns_analysis:
-                # Get normalized returns
-                returns_value = returns_analysis.get("rnorm")
-                # Check if returns_value is a dictionary or a single float
-                if isinstance(returns_value, dict) and len(returns_value) > 1:
-                    # Convert to pandas Series for easier calculation
-                    returns_series = pd.Series(list(returns_value.values()))
+    # Calculate Sharpe ratio using TimeReturn data
+    if timereturn_analysis and len(timereturn_analysis) > 1:
+        # Convert to pandas Series for easier calculation
+        returns_series = pd.Series(timereturn_analysis)
 
-                    # Calculate Sharpe ratio manually
-                    if len(returns_series) > 1 and returns_series.std() > 0:
-                        # Assuming risk-free rate is 0 for simplicity
-                        sharpe_manual = (
-                            returns_series.mean() / returns_series.std() * (252**0.5)
-                        )  # Annualized
-                        if not (pd.isna(sharpe_manual) or np.isinf(sharpe_manual)):
-                            metrics["sharpe_ratio"] = sharpe_manual
-                        else:
-                            metrics["sharpe_ratio"] = None
-                    else:
-                        metrics["sharpe_ratio"] = None
+        # Remove any NaN or infinite values
+        returns_series = returns_series.replace([np.inf, -np.inf], np.nan).dropna()
+
+        if len(returns_series) > 1 and returns_series.std() > 0:
+            # Calculate annualized Sharpe ratio (assuming daily returns)
+            # Risk-free rate assumed to be 0 for simplicity
+            daily_mean = returns_series.mean()
+            daily_std = returns_series.std()
+
+            # Annualize (252 trading days per year)
+            annualized_return = (1 + daily_mean) ** 252 - 1
+            annualized_volatility = daily_std * np.sqrt(252)
+
+            if annualized_volatility > 0:
+                sharpe_ratio = annualized_return / annualized_volatility
+
+                # Validate the Sharpe ratio
+                if not (pd.isna(sharpe_ratio) or np.isinf(sharpe_ratio)):
+                    metrics["sharpe_ratio"] = sharpe_ratio
                 else:
-                    # Handle case where rnorm is a single float or empty
-                    metrics["sharpe_ratio"] = None
+                    metrics["sharpe_ratio"] = 0.0
             else:
-                metrics["sharpe_ratio"] = None
-        except Exception as e:
-            print(f"Error calculating Sharpe ratio manually: {e}")
-            metrics["sharpe_ratio"] = None
+                metrics["sharpe_ratio"] = 0.0
+        else:
+            metrics["sharpe_ratio"] = 0.0
+    else:
+        # Fallback: try the built-in Sharpe analyzer
+        sharpe_analysis = strat.analyzers.sharpe.get_analysis()
+        if (
+            sharpe_analysis
+            and "sharperatio" in sharpe_analysis
+            and sharpe_analysis["sharperatio"] is not None
+            and not (
+                pd.isna(sharpe_analysis["sharperatio"])
+                or np.isinf(sharpe_analysis["sharperatio"])
+            )
+        ):
+            metrics["sharpe_ratio"] = sharpe_analysis["sharperatio"]
+        else:
+            metrics["sharpe_ratio"] = 0.0
 
     # Get drawdown
     drawdown_analysis = strat.analyzers.drawdown.get_analysis()
-    metrics["max_drawdown"] = drawdown_analysis["max"]["drawdown"]
+    metrics["max_drawdown"] = drawdown_analysis.get("max", {}).get("drawdown", 0)
 
-    timereturn = strat.analyzers.timereturn.get_analysis()
-    equity_curve = pd.Series(timereturn)
-    equity_curve = (1 + equity_curve).cumprod() * strat.cerebro.broker.startingcash
-    metrics["equity_curve"] = equity_curve
+    # Create equity curve from TimeReturn data
+    if timereturn_analysis:
+        equity_curve = pd.Series(timereturn_analysis)
+        # Convert to cumulative returns starting from initial cash
+        equity_curve = (1 + equity_curve).cumprod() * strat.cerebro.broker.startingcash
+        metrics["equity_curve"] = equity_curve
+    else:
+        # Fallback: create simple equity curve
+        metrics["equity_curve"] = pd.Series([strat.cerebro.broker.startingcash])
+
     return metrics
 
 
@@ -442,57 +461,98 @@ class WalkForwardAnalysis:
                 self.all_out_sample_equity[f"Window {window_id}"] = out_sample_curve
 
     def get_overall_metrics(self):
-        in_sample_returns = [
-            r["in_sample_metrics"]["total_return"] for r in self.results
-        ]
-        out_sample_returns = [
-            r["out_sample_metrics"]["total_return"] for r in self.results
-        ]
-
-        # Filter out None values and convert to float for Sharpe ratios
+        in_sample_returns = []
+        out_sample_returns = []
         in_sample_sharpes = []
         out_sample_sharpes = []
 
         for r in self.results:
-            # In-sample Sharpe ratios
-            in_sharpe = r["in_sample_metrics"]["sharpe_ratio"]
+            # Collect returns
+            in_return = r["in_sample_metrics"].get("total_return", 0)
+            out_return = r["out_sample_metrics"].get("total_return", 0)
+
+            if in_return is not None:
+                in_sample_returns.append(in_return)
+            if out_return is not None:
+                out_sample_returns.append(out_return)
+
+            # Collect Sharpe ratios (now should be valid numbers)
+            in_sharpe = r["in_sample_metrics"].get("sharpe_ratio", 0)
+            out_sharpe = r["out_sample_metrics"].get("sharpe_ratio", 0)
+
+            # Since we now ensure sharpe_ratio is always a valid number (0.0 if invalid)
             if in_sharpe is not None and not (
                 pd.isna(in_sharpe) or np.isinf(in_sharpe)
             ):
                 in_sample_sharpes.append(float(in_sharpe))
 
-            # Out-of-sample Sharpe ratios
-            out_sharpe = r["out_sample_metrics"]["sharpe_ratio"]
             if out_sharpe is not None and not (
                 pd.isna(out_sharpe) or np.isinf(out_sharpe)
             ):
                 out_sample_sharpes.append(float(out_sharpe))
 
+        # Calculate averages
+        in_sample_avg_return = (
+            sum(in_sample_returns) / len(in_sample_returns) if in_sample_returns else 0
+        )
+        out_sample_avg_return = (
+            sum(out_sample_returns) / len(out_sample_returns)
+            if out_sample_returns
+            else 0
+        )
+        in_sample_avg_sharpe = (
+            sum(in_sample_sharpes) / len(in_sample_sharpes) if in_sample_sharpes else 0
+        )
+        out_sample_avg_sharpe = (
+            sum(out_sample_sharpes) / len(out_sample_sharpes)
+            if out_sample_sharpes
+            else 0
+        )
+
+        # Calculate win rates
+        positive_out_sample = sum(1 for r in out_sample_returns if r > 0)
+        win_rate_out_sample = (
+            (positive_out_sample / len(out_sample_returns) * 100)
+            if out_sample_returns
+            else 0
+        )
+
+        # Calculate correlation between in-sample and out-sample returns
+        correlation = 0
+        if (
+            len(in_sample_returns) == len(out_sample_returns)
+            and len(in_sample_returns) > 1
+        ):
+            try:
+                correlation = np.corrcoef(in_sample_returns, out_sample_returns)[0, 1]
+                if pd.isna(correlation):
+                    correlation = 0
+            except:
+                correlation = 0
+
+        # Calculate average degradation
+        degradations = []
+        for i in range(min(len(in_sample_returns), len(out_sample_returns))):
+            degradation = in_sample_returns[i] - out_sample_returns[i]
+            degradations.append(degradation)
+
+        avg_degradation = sum(degradations) / len(degradations) if degradations else 0
+
         overall = {
-            "in_sample_avg_return": (
-                sum(in_sample_returns) / len(in_sample_returns)
-                if in_sample_returns
-                else 0
-            ),
-            "out_sample_avg_return": (
-                sum(out_sample_returns) / len(out_sample_returns)
-                if out_sample_returns
-                else 0
-            ),
-            "in_sample_avg_sharpe": (
-                sum(in_sample_sharpes) / len(in_sample_sharpes)
-                if in_sample_sharpes
-                else None
-            ),
-            "out_sample_avg_sharpe": (
-                sum(out_sample_sharpes) / len(out_sample_sharpes)
-                if out_sample_sharpes
-                else None
-            ),
+            "total_windows": len(self.results),
+            "in_sample_return_avg_return": in_sample_avg_return
+            * 100,  # Convert to percentage
+            "out_sample_avg_return": out_sample_avg_return
+            * 100,  # Convert to percentage
+            "in_sample_avg_sharpe": in_sample_avg_sharpe,
+            "out_sample_avg_sharpe": out_sample_avg_sharpe,
+            "win_rate_out_sample": win_rate_out_sample,
+            "correlation": correlation,
+            "avg_degradation": avg_degradation * 100,  # Convert to percentage
             "in_sample_sharpe_count": len(in_sample_sharpes),
             "out_sample_sharpe_count": len(out_sample_sharpes),
-            "total_windows": len(self.results),
         }
+
         return overall
 
     def get_window_summary(self):
