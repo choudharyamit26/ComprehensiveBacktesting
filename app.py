@@ -2516,7 +2516,7 @@ def run_complete_backtest_UI(data, n_trials, ticker, params):
     # Run complete backtest
     results = run_complete_backtest(
         data=data,
-        ticker=params["ticker"],
+        ticker=ticker,
         start_date=params["start_date"],
         end_date=params["end_date"],
         strategy_class=params["selected_strategy"],

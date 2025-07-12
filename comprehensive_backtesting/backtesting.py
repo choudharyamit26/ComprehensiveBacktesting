@@ -439,15 +439,15 @@ def run_complete_backtest(
 
     print("\n" + "=" * 60)
     print("Generating comprehensive reports...")
-    try:
-        basic_analyzer = PerformanceAnalyzer(results["basic"])
-        basic_analyzer.save_report_to_file(f"{ticker}_basic_report.json")
-        print(f"Basic report saved: {ticker}_basic_report.json")
-        if "optimization" in results and results["optimization"]:
-            opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
-            opt_analyzer.save_report_to_file(f"{ticker}_optimized_report.json")
-            print(f"Optimized report saved: {ticker}_optimized_report.json")
-    except Exception as e:
-        logger.error(f"Report generation failed: {str(e)}")
+    # try:
+    #     basic_analyzer = PerformanceAnalyzer(results["basic"])
+    #     basic_analyzer.save_report_to_file(f"{ticker}_basic_report.json")
+    #     print(f"Basic report saved: {ticker}_basic_report.json")
+    #     if "optimization" in results and results["optimization"]:
+    #         opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
+    #         opt_analyzer.save_report_to_file(f"{ticker}_optimized_report.json")
+    #         print(f"Optimized report saved: {ticker}_optimized_report.json")
+    # except Exception as e:
+    #     logger.error(f"Report generation failed: {str(e)}")
 
     return results
