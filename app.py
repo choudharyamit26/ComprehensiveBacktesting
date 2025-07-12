@@ -2510,11 +2510,12 @@ def plot_equity_curve(equity_data):
         return None
 
 
-def run_complete_backtest_UI(n_trials, ticker, params):
+def run_complete_backtest_UI(data, n_trials, ticker, params):
     """Run a complete backtest demonstration with default parameters."""
 
     # Run complete backtest
     results = run_complete_backtest(
+        data=data,
         ticker=params["ticker"],
         start_date=params["start_date"],
         end_date=params["end_date"],
@@ -4171,23 +4172,16 @@ def display_complete_backtest_summary(results, ticker, timeframe):
             st.info("No trading time analysis available")
 
 
-def complete_backtest(progress_bar, params):
+def complete_backtest(data, progress_bar, params):
     """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
     # Run backtest
     results, params = run_complete_backtest_UI(
-        params["n_trials"], params["ticker"], params
+        data, params["n_trials"], params["ticker"], params
     )
     if not results:
         st.error("Complete backtest failed")
         return
 
-    # Get data for visualization
-    data = get_data_sync(
-        params["ticker"],
-        params["start_date"],
-        params["end_date"],
-        interval=params["timeframe"],
-    )
     display_composite_results(results, data, params["ticker"], params["timeframe"])
     display_parameter_evolution(results, params["ticker"])
     display_strategy_comparison(results)
@@ -4516,6 +4510,7 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
     status_text.text("Running backtest...")
     ticker = params["ticker"]
     results, cerebro = run_basic_backtest(
+        data=data,
         strategy_class=params["selected_strategy"],
         ticker=params["ticker"],
         start_date=params["start_date"].strftime("%Y-%m-%d"),
@@ -4739,6 +4734,7 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
     status_text.text("Starting optimization...")
     ticker = params["ticker"]
     results = run_parameter_optimization(
+        data=data,
         strategy_class=params["selected_strategy"],
         ticker=params["ticker"],
         start_date=params["start_date"].strftime("%Y-%m-%d"),
@@ -5758,7 +5754,7 @@ def run_analysis(params):
         elif params["analysis_type"] == "Complete Backtest":
             progress_bar.progress(40)
             status_text.text("Running  Complete Backtest ...")
-            complete_backtest(progress_bar, params)
+            complete_backtest(data, progress_bar, params)
 
     except Exception as e:
         import traceback

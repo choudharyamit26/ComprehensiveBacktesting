@@ -10,12 +10,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def run_basic_backtest(strategy_class, ticker, start_date, end_date, interval):
+def run_basic_backtest(data, strategy_class, ticker, start_date, end_date, interval):
     """Run a basic backtest with default parameters."""
     logger.info(f"Running basic backtest for {ticker}")
     print(f"\n=== BASIC BACKTEST: {ticker} ===")
     try:
         results, cerebro = run_backtest(
+            data=data,
             strategy_class=strategy_class,
             ticker=ticker,
             start_date=start_date,
@@ -34,6 +35,7 @@ def run_basic_backtest(strategy_class, ticker, start_date, end_date, interval):
 
 
 def run_parameter_optimization(
+    data,
     strategy_class,
     ticker,
     start_date,
@@ -47,6 +49,7 @@ def run_parameter_optimization(
     print(f"Running optimization with {n_trials} trials...")
     try:
         optimization_results = optimize_strategy(
+            data=data,
             strategy_class=strategy_class,
             ticker=ticker,
             start_date=start_date,
@@ -223,7 +226,7 @@ def run_comprehensive_validation(strategy_class, ticker, start_date, end_date):
 
 
 def run_basic_comparison_analysis(
-    strategy_name, ticker, start_date, end_date, interval
+    data, strategy_name, ticker, start_date, end_date, interval
 ):
     """Run basic strategy comparison."""
     logger.info(f"Running strategy comparison for {ticker}")
@@ -257,7 +260,8 @@ def run_basic_comparison_analysis(
         print(f"\nRunning {name} strategy...")
         try:
             results, _ = run_backtest(
-                strategy_class=strategy_name,  # Use get_strategy
+                data=data,
+                strategy_class=strategy_name,
                 ticker=ticker,
                 start_date=start_date,
                 end_date=end_date,
@@ -276,6 +280,7 @@ def run_basic_comparison_analysis(
 
 # Updated run_complete_backtest function in backtesting.py
 def run_complete_backtest(
+    data,
     ticker,
     start_date,
     end_date,
@@ -291,6 +296,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         basic_results, basic_cerebro = run_basic_backtest(
+            data,
             strategy_class,
             ticker,
             start_date,
@@ -309,6 +315,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         opt_results = run_parameter_optimization(
+            data=data,
             strategy_class=strategy_class,
             ticker=ticker,
             start_date=start_date,
@@ -323,6 +330,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         validation_results = run_insample_outsample_analysis(
+            data,
             strategy_class,
             ticker,
             start_date,
@@ -337,7 +345,7 @@ def run_complete_backtest(
     print("\n" + "=" * 60)
     try:
         comparison_results = run_basic_comparison_analysis(
-            strategy_class, ticker, start_date, end_date, interval=interval
+            data, strategy_class, ticker, start_date, end_date, interval=interval
         )
         results["comparison"] = comparison_results
     except Exception as e:
@@ -345,16 +353,6 @@ def run_complete_backtest(
 
     print("\n" + "=" * 60)
     try:
-        # Get data for walk-forward analysis
-        from comprehensive_backtesting.data import get_data_sync
-
-        data = get_data_sync(
-            ticker=ticker,
-            start_date=start_date,
-            end_date=end_date,
-            interval=interval,
-        )
-
         from .walk_forward_analysis import WalkForwardAnalysis
         from comprehensive_backtesting.registry import get_strategy
 

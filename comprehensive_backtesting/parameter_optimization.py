@@ -61,6 +61,7 @@ class SortinoRatio(bt.Analyzer):
 class OptimizationObjective:
     def __init__(
         self,
+        data,
         strategy_class,
         ticker: str,
         start_date: str,
@@ -91,7 +92,7 @@ class OptimizationObjective:
         self.initial_cash = initial_cash
         self.commission = commission
         self.interval = interval
-        self.data = get_data_sync(ticker, start_date, end_date, interval=self.interval)
+        self.data = data
         if self.data is None or self.data.empty:
             raise ValueError(
                 f"No data available for {ticker} from {start_date} to {end_date}"
@@ -122,6 +123,7 @@ class OptimizationObjective:
 
             # Run backtest with current parameters
             results, _ = run_backtest(
+                data=self.data,
                 strategy_class=self.strategy_class,
                 ticker=self.ticker,
                 start_date=self.start_date,
@@ -226,6 +228,7 @@ class OptimizationObjective:
 
 
 def optimize_strategy(
+    data,
     strategy_class,
     ticker: str,
     start_date: str,
@@ -262,6 +265,7 @@ def optimize_strategy(
     try:
         study = optuna.create_study(direction="maximize")
         objective = OptimizationObjective(
+            data=data,
             strategy_class=get_strategy(strategy_class),
             ticker=ticker,
             start_date=start_date,
@@ -283,6 +287,7 @@ def optimize_strategy(
         print("Running final backtest with best parameters...")
         try:
             results, cerebro = run_backtest(
+                data=data,
                 strategy_class=strategy_class,
                 ticker=ticker,
                 start_date=start_date,

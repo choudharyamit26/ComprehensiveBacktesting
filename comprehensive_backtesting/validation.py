@@ -779,6 +779,7 @@ class ValidationAnalyzer:
         try:
             # Proceed with backtest
             results, cerebro = run_backtest(
+                data=self.data,
                 strategy_class=self.strategy_class,
                 interval=interval,
                 ticker=self.ticker,

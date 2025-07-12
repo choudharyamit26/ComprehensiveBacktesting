@@ -30,6 +30,7 @@ DEFAULT_TICKERS = [
 
 
 def run_backtest(
+    data,
     strategy_class,
     interval,
     ticker,
@@ -51,7 +52,7 @@ def run_backtest(
     )
 
     # Get data with proper timezone handling
-    data_df = get_data_sync(ticker, start_date, end_date, interval=interval)
+    data_df = data.copy()
 
     if not validate_data(data_df, strict=False):  # Added strict mode
         logger.warning(f"Data validation warnings for {ticker}. Proceeding anyway.")
