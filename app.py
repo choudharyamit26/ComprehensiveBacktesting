@@ -886,382 +886,382 @@ def calculate_rsi(prices, period=14):
     return rsi
 
 
-def create_candlestick_chart_with_trades(
-    data, results, title="Candlestick Chart with Trades"
-):
-    """Create a dynamic candlestick chart with strategy-specific indicators."""
-    try:
-        strategy = get_strategy(results)
+# def create_candlestick_chart_with_trades(
+#     data, results, title="Candlestick Chart with Trades"
+# ):
+#     """Create a dynamic candlestick chart with strategy-specific indicators."""
+#     try:
+#         strategy = get_strategy(results)
 
-        # Dynamically detect indicators used by the strategy
-        detected_indicators = detect_strategy_indicators(strategy)
-        calculated_indicators = calculate_indicator_values(data, detected_indicators)
+#         # Dynamically detect indicators used by the strategy
+#         detected_indicators = detect_strategy_indicators(strategy)
+#         calculated_indicators = calculate_indicator_values(data, detected_indicators)
 
-        # Determine subplot structure based on detected indicators
-        price_indicators = [
-            k for k, v in calculated_indicators.items() if v["subplot"] == "price"
-        ]
-        oscillator_indicators = [
-            k for k, v in calculated_indicators.items() if v["subplot"] == "oscillator"
-        ]
+#         # Determine subplot structure based on detected indicators
+#         price_indicators = [
+#             k for k, v in calculated_indicators.items() if v["subplot"] == "price"
+#         ]
+#         oscillator_indicators = [
+#             k for k, v in calculated_indicators.items() if v["subplot"] == "oscillator"
+#         ]
 
-        # Dynamic subplot configuration
-        num_rows = 3  # Base: Price + Volume + Equity
-        subplot_titles = ["Price Action & Trades", "Volume", "Equity Curve"]
-        row_heights = [0.6, 0.2, 0.2]
+#         # Dynamic subplot configuration
+#         num_rows = 3  # Base: Price + Volume + Equity
+#         subplot_titles = ["Price Action & Trades", "Volume", "Equity Curve"]
+#         row_heights = [0.6, 0.2, 0.2]
 
-        if oscillator_indicators:
-            num_rows = 4
-            subplot_titles = [
-                "Price Action & Trades",
-                "Technical Indicators",
-                "Volume",
-                "Equity Curve",
-            ]
-            row_heights = [0.5, 0.2, 0.15, 0.15]
+#         if oscillator_indicators:
+#             num_rows = 4
+#             subplot_titles = [
+#                 "Price Action & Trades",
+#                 "Technical Indicators",
+#                 "Volume",
+#                 "Equity Curve",
+#             ]
+#             row_heights = [0.5, 0.2, 0.15, 0.15]
 
-        # Create dynamic subplot structure
-        fig = make_subplots(
-            rows=num_rows,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            subplot_titles=subplot_titles,
-            row_heights=row_heights,
-            specs=[[{"secondary_y": False}] for _ in range(num_rows)],
-        )
+#         # Create dynamic subplot structure
+#         fig = make_subplots(
+#             rows=num_rows,
+#             cols=1,
+#             shared_xaxes=True,
+#             vertical_spacing=0.03,
+#             subplot_titles=subplot_titles,
+#             row_heights=row_heights,
+#             specs=[[{"secondary_y": False}] for _ in range(num_rows)],
+#         )
 
-        # Ensure index is DatetimeIndex and convert timezone for display
-        if not isinstance(data.index, pd.DatetimeIndex):
-            data.index = pd.to_datetime(data.index)
-        # Filter out rows with missing OHLCV data
-        required_cols = ["Open", "High", "Low", "Close", "Volume"]
-        filtered_data = data.dropna(subset=required_cols)
-        dates = (
-            filtered_data.index.tz_localize("UTC").tz_convert(IST)
-            if filtered_data.index.tz is None
-            else filtered_data.index.tz_convert(IST)
-        )
+#         # Ensure index is DatetimeIndex and convert timezone for display
+#         if not isinstance(data.index, pd.DatetimeIndex):
+#             data.index = pd.to_datetime(data.index)
+#         # Filter out rows with missing OHLCV data
+#         required_cols = ["Open", "High", "Low", "Close", "Volume"]
+#         filtered_data = data.dropna(subset=required_cols)
+#         dates = (
+#             filtered_data.index.tz_localize("UTC").tz_convert(IST)
+#             if filtered_data.index.tz is None
+#             else filtered_data.index.tz_convert(IST)
+#         )
 
-        # Add candlestick chart
-        fig.add_trace(
-            go.Candlestick(
-                x=dates,
-                open=filtered_data["Open"],
-                high=filtered_data["High"],
-                low=filtered_data["Low"],
-                close=filtered_data["Close"],
-                name="OHLC",
-                increasing_line_color="#00ff88",
-                decreasing_line_color="#ff4444",
-                increasing_fillcolor="#00ff88",
-                decreasing_fillcolor="#ff4444",
-            ),
-            row=1,
-            col=1,
-        )
-        # Explicitly set x-axis type to date
-        fig.update_xaxes(type="date")
-        # Add price-based indicators to the price chart
-        for indicator_name, indicator_data in calculated_indicators.items():
-            if indicator_data["subplot"] == "price":
-                line_style = indicator_data.get("line_style", "solid")
-                line_dict = {"color": indicator_data["color"], "width": 2}
-                if line_style == "dash":
-                    line_dict["dash"] = "dash"
+#         # Add candlestick chart
+#         fig.add_trace(
+#             go.Candlestick(
+#                 x=dates,
+#                 open=filtered_data["Open"],
+#                 high=filtered_data["High"],
+#                 low=filtered_data["Low"],
+#                 close=filtered_data["Close"],
+#                 name="OHLC",
+#                 increasing_line_color="#00ff88",
+#                 decreasing_line_color="#ff4444",
+#                 increasing_fillcolor="#00ff88",
+#                 decreasing_fillcolor="#ff4444",
+#             ),
+#             row=1,
+#             col=1,
+#         )
+#         # Explicitly set x-axis type to date
+#         fig.update_xaxes(type="date")
+#         # Add price-based indicators to the price chart
+#         for indicator_name, indicator_data in calculated_indicators.items():
+#             if indicator_data["subplot"] == "price":
+#                 line_style = indicator_data.get("line_style", "solid")
+#                 line_dict = {"color": indicator_data["color"], "width": 2}
+#                 if line_style == "dash":
+#                     line_dict["dash"] = "dash"
 
-                fig.add_trace(
-                    go.Scatter(
-                        x=dates,
-                        y=indicator_data["values"],
-                        mode="lines",
-                        name=indicator_data["name"],
-                        line=line_dict,
-                        hovertemplate=f'{indicator_data["name"]}: %{{y:.2f}}<extra></extra>',
-                    ),
-                    row=1,
-                    col=1,
-                )
+#                 fig.add_trace(
+#                     go.Scatter(
+#                         x=dates,
+#                         y=indicator_data["values"],
+#                         mode="lines",
+#                         name=indicator_data["name"],
+#                         line=line_dict,
+#                         hovertemplate=f'{indicator_data["name"]}: %{{y:.2f}}<extra></extra>',
+#                     ),
+#                     row=1,
+#                     col=1,
+#                 )
 
-        # Add oscillator indicators to separate subplot (if any)
-        oscillator_row = 2 if oscillator_indicators else None
-        if oscillator_row:
-            for indicator_name, indicator_data in calculated_indicators.items():
-                if indicator_data["subplot"] == "oscillator":
-                    if indicator_data["type"] == "line":
-                        fig.add_trace(
-                            go.Scatter(
-                                x=dates,
-                                y=indicator_data["values"],
-                                mode="lines",
-                                name=indicator_data["name"],
-                                line=dict(color=indicator_data["color"], width=2),
-                                hovertemplate=f'{indicator_data["name"]}: %{{y:.2f}}<extra></extra>',
-                            ),
-                            row=oscillator_row,
-                            col=1,
-                        )
-                    elif indicator_data["type"] == "bar":
-                        fig.add_trace(
-                            go.Bar(
-                                x=dates,
-                                y=indicator_data["values"],
-                                name=indicator_data["name"],
-                                marker_color=indicator_data["color"],
-                                opacity=0.7,
-                            ),
-                            row=oscillator_row,
-                            col=1,
-                        )
+#         # Add oscillator indicators to separate subplot (if any)
+#         oscillator_row = 2 if oscillator_indicators else None
+#         if oscillator_row:
+#             for indicator_name, indicator_data in calculated_indicators.items():
+#                 if indicator_data["subplot"] == "oscillator":
+#                     if indicator_data["type"] == "line":
+#                         fig.add_trace(
+#                             go.Scatter(
+#                                 x=dates,
+#                                 y=indicator_data["values"],
+#                                 mode="lines",
+#                                 name=indicator_data["name"],
+#                                 line=dict(color=indicator_data["color"], width=2),
+#                                 hovertemplate=f'{indicator_data["name"]}: %{{y:.2f}}<extra></extra>',
+#                             ),
+#                             row=oscillator_row,
+#                             col=1,
+#                         )
+#                     elif indicator_data["type"] == "bar":
+#                         fig.add_trace(
+#                             go.Bar(
+#                                 x=dates,
+#                                 y=indicator_data["values"],
+#                                 name=indicator_data["name"],
+#                                 marker_color=indicator_data["color"],
+#                                 opacity=0.7,
+#                             ),
+#                             row=oscillator_row,
+#                             col=1,
+#                         )
 
-                    # Add levels for oscillators
-                    if "levels" in indicator_data:
-                        levels = indicator_data["levels"]
-                        if "overbought" in levels:
-                            fig.add_hline(
-                                y=levels["overbought"],
-                                line_dash="dash",
-                                line_color="red",
-                                annotation_text=f"Overbought ({levels['overbought']})",
-                                row=oscillator_row,
-                                col=1,
-                            )
-                        if "oversold" in levels:
-                            fig.add_hline(
-                                y=levels["oversold"],
-                                line_dash="dash",
-                                line_color="green",
-                                annotation_text=f"Oversold ({levels['oversold']})",
-                                row=oscillator_row,
-                                col=1,
-                            )
-                        if "neutral" in levels:
-                            fig.add_hline(
-                                y=levels["neutral"],
-                                line_dash="dot",
-                                line_color="gray",
-                                annotation_text=f"Neutral ({levels['neutral']})",
-                                row=oscillator_row,
-                                col=1,
-                            )
+#                     # Add levels for oscillators
+#                     if "levels" in indicator_data:
+#                         levels = indicator_data["levels"]
+#                         if "overbought" in levels:
+#                             fig.add_hline(
+#                                 y=levels["overbought"],
+#                                 line_dash="dash",
+#                                 line_color="red",
+#                                 annotation_text=f"Overbought ({levels['overbought']})",
+#                                 row=oscillator_row,
+#                                 col=1,
+#                             )
+#                         if "oversold" in levels:
+#                             fig.add_hline(
+#                                 y=levels["oversold"],
+#                                 line_dash="dash",
+#                                 line_color="green",
+#                                 annotation_text=f"Oversold ({levels['oversold']})",
+#                                 row=oscillator_row,
+#                                 col=1,
+#                             )
+#                         if "neutral" in levels:
+#                             fig.add_hline(
+#                                 y=levels["neutral"],
+#                                 line_dash="dot",
+#                                 line_color="gray",
+#                                 annotation_text=f"Neutral ({levels['neutral']})",
+#                                 row=oscillator_row,
+#                                 col=1,
+#                             )
 
-                    # Set y-axis range for oscillators
-                    if "y_range" in indicator_data:
-                        fig.update_yaxes(
-                            range=indicator_data["y_range"], row=oscillator_row, col=1
-                        )
+#                     # Set y-axis range for oscillators
+#                     if "y_range" in indicator_data:
+#                         fig.update_yaxes(
+#                             range=indicator_data["y_range"], row=oscillator_row, col=1
+#                         )
 
-        # Extract and plot trades
-        trades = None
-        if hasattr(strategy, "analyzers") and hasattr(
-            strategy.analyzers, "tradeanalyzer"
-        ):
-            trades = strategy.analyzers.tradeanalyzer.get_analysis()
-        elif hasattr(strategy, "analyzers") and hasattr(strategy.analyzers, "trades"):
-            trades = strategy.analyzers.trades.get_analysis()
+#         # Extract and plot trades
+#         trades = None
+#         if hasattr(strategy, "analyzers") and hasattr(
+#             strategy.analyzers, "tradeanalyzer"
+#         ):
+#             trades = strategy.analyzers.tradeanalyzer.get_analysis()
+#         elif hasattr(strategy, "analyzers") and hasattr(strategy.analyzers, "trades"):
+#             trades = strategy.analyzers.trades.get_analysis()
 
-        buy_dates, buy_prices, sell_dates, sell_prices = [], [], [], []
-        trade_lines = []
+#         buy_dates, buy_prices, sell_dates, sell_prices = [], [], [], []
+#         trade_lines = []
 
-        if trades:
-            closed_trades = trades.get("closed", []) or trades.get("trades", [])
-            if isinstance(closed_trades, list):
-                for i, trade in enumerate(closed_trades):
-                    try:
-                        entry_time = (
-                            pd.to_datetime(trade["datein"], unit="s")
-                            .tz_localize("UTC")
-                            .tz_convert(IST)
-                        )
-                        exit_time = (
-                            pd.to_datetime(trade["dateout"], unit="s")
-                            .tz_localize("UTC")
-                            .tz_convert(IST)
-                        )
-                        entry_price = trade["pricein"]
-                        exit_price = trade["priceout"]
-                        pnl = trade.get("pnl", 0)
+#         if trades:
+#             closed_trades = trades.get("closed", []) or trades.get("trades", [])
+#             if isinstance(closed_trades, list):
+#                 for i, trade in enumerate(closed_trades):
+#                     try:
+#                         entry_time = (
+#                             pd.to_datetime(trade["datein"], unit="s")
+#                             .tz_localize("UTC")
+#                             .tz_convert(IST)
+#                         )
+#                         exit_time = (
+#                             pd.to_datetime(trade["dateout"], unit="s")
+#                             .tz_localize("UTC")
+#                             .tz_convert(IST)
+#                         )
+#                         entry_price = trade["pricein"]
+#                         exit_price = trade["priceout"]
+#                         pnl = trade.get("pnl", 0)
 
-                        buy_dates.append(entry_time)
-                        buy_prices.append(entry_price)
-                        sell_dates.append(exit_time)
-                        sell_prices.append(exit_price)
+#                         buy_dates.append(entry_time)
+#                         buy_prices.append(entry_price)
+#                         sell_dates.append(exit_time)
+#                         sell_prices.append(exit_price)
 
-                        # Add trade connection line
-                        line_color = "green" if pnl > 0 else "red"
-                        fig.add_trace(
-                            go.Scatter(
-                                x=[entry_time, exit_time],
-                                y=[entry_price, exit_price],
-                                mode="lines",
-                                line=dict(color=line_color, width=2, dash="dot"),
-                                name=f"Trade {i+1}",
-                                showlegend=False,
-                                hovertemplate=f"Trade {i+1}<br>P&L: {pnl:.2f}<extra></extra>",
-                            ),
-                            row=1,
-                            col=1,
-                        )
+#                         # Add trade connection line
+#                         line_color = "green" if pnl > 0 else "red"
+#                         fig.add_trace(
+#                             go.Scatter(
+#                                 x=[entry_time, exit_time],
+#                                 y=[entry_price, exit_price],
+#                                 mode="lines",
+#                                 line=dict(color=line_color, width=2, dash="dot"),
+#                                 name=f"Trade {i+1}",
+#                                 showlegend=False,
+#                                 hovertemplate=f"Trade {i+1}<br>P&L: {pnl:.2f}<extra></extra>",
+#                             ),
+#                             row=1,
+#                             col=1,
+#                         )
 
-                    except (KeyError, TypeError) as e:
-                        logger.warning(f"Invalid trade data format: {e}")
-                        continue
+#                     except (KeyError, TypeError) as e:
+#                         logger.warning(f"Invalid trade data format: {e}")
+#                         continue
 
-        # Add buy signals
-        if buy_dates:
-            fig.add_trace(
-                go.Scatter(
-                    x=buy_dates,
-                    y=buy_prices,
-                    mode="markers",
-                    marker=dict(
-                        symbol="triangle-up",
-                        size=12,
-                        color="lime",
-                        line=dict(color="darkgreen", width=2),
-                    ),
-                    name="Buy Signal",
-                    hovertemplate="Buy<br>Price: %{y:.2f}<br>Date: %{x}<extra></extra>",
-                ),
-                row=1,
-                col=1,
-            )
+#         # Add buy signals
+#         if buy_dates:
+#             fig.add_trace(
+#                 go.Scatter(
+#                     x=buy_dates,
+#                     y=buy_prices,
+#                     mode="markers",
+#                     marker=dict(
+#                         symbol="triangle-up",
+#                         size=12,
+#                         color="lime",
+#                         line=dict(color="darkgreen", width=2),
+#                     ),
+#                     name="Buy Signal",
+#                     hovertemplate="Buy<br>Price: %{y:.2f}<br>Date: %{x}<extra></extra>",
+#                 ),
+#                 row=1,
+#                 col=1,
+#             )
 
-        # Add sell signals
-        if sell_dates:
-            fig.add_trace(
-                go.Scatter(
-                    x=sell_dates,
-                    y=sell_prices,
-                    mode="markers",
-                    marker=dict(
-                        symbol="triangle-down",
-                        size=12,
-                        color="red",
-                        line=dict(color="darkred", width=2),
-                    ),
-                    name="Sell Signal",
-                    hovertemplate="Sell<br>Price: %{y:.2f}<br>Date: %{x}<extra></extra>",
-                ),
-                row=1,
-                col=1,
-            )
+#         # Add sell signals
+#         if sell_dates:
+#             fig.add_trace(
+#                 go.Scatter(
+#                     x=sell_dates,
+#                     y=sell_prices,
+#                     mode="markers",
+#                     marker=dict(
+#                         symbol="triangle-down",
+#                         size=12,
+#                         color="red",
+#                         line=dict(color="darkred", width=2),
+#                     ),
+#                     name="Sell Signal",
+#                     hovertemplate="Sell<br>Price: %{y:.2f}<br>Date: %{x}<extra></extra>",
+#                 ),
+#                 row=1,
+#                 col=1,
+#             )
 
-        # Determine volume and equity rows based on layout
-        volume_row = num_rows - 1  # Second to last row
-        equity_row = num_rows  # Last row
+#         # Determine volume and equity rows based on layout
+#         volume_row = num_rows - 1  # Second to last row
+#         equity_row = num_rows  # Last row
 
-        # Add volume bars
-        colors = [
-            "#00ff88" if close >= open else "#ff4444"
-            for close, open in zip(data["Close"], data["Open"])
-        ]
+#         # Add volume bars
+#         colors = [
+#             "#00ff88" if close >= open else "#ff4444"
+#             for close, open in zip(data["Close"], data["Open"])
+#         ]
 
-        fig.add_trace(
-            go.Bar(
-                x=dates,
-                y=data["Volume"],
-                name="Volume",
-                marker_color=colors,
-                opacity=0.7,
-                hovertemplate="Volume: %{y:,.0f}<extra></extra>",
-            ),
-            row=volume_row,
-            col=1,
-        )
+#         fig.add_trace(
+#             go.Bar(
+#                 x=dates,
+#                 y=data["Volume"],
+#                 name="Volume",
+#                 marker_color=colors,
+#                 opacity=0.7,
+#                 hovertemplate="Volume: %{y:,.0f}<extra></extra>",
+#             ),
+#             row=volume_row,
+#             col=1,
+#         )
 
-        # Add equity curve
-        equity = None
-        if hasattr(strategy, "analyzers") and hasattr(strategy.analyzers, "timereturn"):
-            equity = strategy.analyzers.timereturn.get_analysis()
-        elif hasattr(strategy, "analyzers") and hasattr(
-            strategy.analyzers, "time_return"
-        ):
-            equity = strategy.analyzers.time_return.get_analysis()
+#         # Add equity curve
+#         equity = None
+#         if hasattr(strategy, "analyzers") and hasattr(strategy.analyzers, "timereturn"):
+#             equity = strategy.analyzers.timereturn.get_analysis()
+#         elif hasattr(strategy, "analyzers") and hasattr(
+#             strategy.analyzers, "time_return"
+#         ):
+#             equity = strategy.analyzers.time_return.get_analysis()
 
-        if equity:
-            try:
-                if isinstance(equity, dict):
-                    equity_keys = list(equity.keys())
-                    if equity_keys:
-                        first_key = equity_keys[0]
-                        if isinstance(first_key, str):
-                            equity_dates = pd.to_datetime(
-                                equity_keys, utc=True
-                            ).tz_convert(IST)
-                        elif isinstance(first_key, (pd.Timestamp, datetime)):
-                            if first_key.tzinfo is None:
-                                equity_dates = (
-                                    pd.to_datetime(equity_keys)
-                                    .tz_localize("UTC")
-                                    .tz_convert(IST)
-                                )
-                            else:
-                                equity_dates = pd.to_datetime(equity_keys).tz_convert(
-                                    IST
-                                )
-                        else:
-                            equity_dates = pd.to_datetime(
-                                equity_keys, unit="s", utc=True
-                            ).tz_convert(IST)
-                        equity_values = list(equity.values())
+#         if equity:
+#             try:
+#                 if isinstance(equity, dict):
+#                     equity_keys = list(equity.keys())
+#                     if equity_keys:
+#                         first_key = equity_keys[0]
+#                         if isinstance(first_key, str):
+#                             equity_dates = pd.to_datetime(
+#                                 equity_keys, utc=True
+#                             ).tz_convert(IST)
+#                         elif isinstance(first_key, (pd.Timestamp, datetime)):
+#                             if first_key.tzinfo is None:
+#                                 equity_dates = (
+#                                     pd.to_datetime(equity_keys)
+#                                     .tz_localize("UTC")
+#                                     .tz_convert(IST)
+#                                 )
+#                             else:
+#                                 equity_dates = pd.to_datetime(equity_keys).tz_convert(
+#                                     IST
+#                                 )
+#                         else:
+#                             equity_dates = pd.to_datetime(
+#                                 equity_keys, unit="s", utc=True
+#                             ).tz_convert(IST)
+#                         equity_values = list(equity.values())
 
-                        # Convert to cumulative returns for better visualization
-                        cumulative_returns = [(1 + val) for val in equity_values]
+#                         # Convert to cumulative returns for better visualization
+#                         cumulative_returns = [(1 + val) for val in equity_values]
 
-                        fig.add_trace(
-                            go.Scatter(
-                                x=equity_dates,
-                                y=cumulative_returns,
-                                mode="lines",
-                                name="Equity Curve",
-                                line=dict(color="#1f77b4", width=2),
-                                hovertemplate="Equity: %{y:.4f}<br>Date: %{x}<extra></extra>",
-                            ),
-                            row=equity_row,
-                            col=1,
-                        )
-            except Exception as e:
-                logger.warning(f"Could not plot equity curve: {e}")
+#                         fig.add_trace(
+#                             go.Scatter(
+#                                 x=equity_dates,
+#                                 y=cumulative_returns,
+#                                 mode="lines",
+#                                 name="Equity Curve",
+#                                 line=dict(color="#1f77b4", width=2),
+#                                 hovertemplate="Equity: %{y:.4f}<br>Date: %{x}<extra></extra>",
+#                             ),
+#                             row=equity_row,
+#                             col=1,
+#                         )
+#             except Exception as e:
+#                 logger.warning(f"Could not plot equity curve: {e}")
 
-        # Dynamic layout updates based on number of rows
-        layout_updates = {
-            "title": title,
-            f"xaxis{num_rows}_title": "Date",
-            "yaxis_title": "Price ()",
-            f"yaxis{volume_row}_title": "Volume",
-            f"yaxis{equity_row}_title": "Equity",
-            "height": 800 + (num_rows - 3) * 200,  # Dynamic height based on subplots
-            "showlegend": True,
-            "hovermode": "x unified",
-        }
+#         # Dynamic layout updates based on number of rows
+#         layout_updates = {
+#             "title": title,
+#             f"xaxis{num_rows}_title": "Date",
+#             "yaxis_title": "Price ()",
+#             f"yaxis{volume_row}_title": "Volume",
+#             f"yaxis{equity_row}_title": "Equity",
+#             "height": 800 + (num_rows - 3) * 200,  # Dynamic height based on subplots
+#             "showlegend": True,
+#             "hovermode": "x unified",
+#         }
 
-        # Add oscillator y-axis title if present
-        if oscillator_indicators:
-            layout_updates["yaxis2_title"] = "Indicators"
+#         # Add oscillator y-axis title if present
+#         if oscillator_indicators:
+#             layout_updates["yaxis2_title"] = "Indicators"
 
-        fig.update_layout(**layout_updates)
+#         fig.update_layout(**layout_updates)
 
-        # Remove gaps for non-trading hours and weekends
-        fig.update_xaxes(
-            rangebreaks=[
-                dict(
-                    bounds=[6, 0], pattern="day of week"
-                ),  # Hide weekends (Saturday=5, Sunday=6)
-                dict(
-                    bounds=["15:30", "09:15"], pattern="hour"
-                ),  # Hide non-trading hours
-            ]
-        )
-        # Remove rangeslider for cleaner look
-        fig.update_layout(xaxis_rangeslider_visible=False)
+#         # Remove gaps for non-trading hours and weekends
+#         fig.update_xaxes(
+#             rangebreaks=[
+#                 dict(
+#                     bounds=[6, 0], pattern="day of week"
+#                 ),  # Hide weekends (Saturday=5, Sunday=6)
+#                 dict(
+#                     bounds=["15:30", "09:15"], pattern="hour"
+#                 ),  # Hide non-trading hours
+#             ]
+#         )
+#         # Remove rangeslider for cleaner look
+#         fig.update_layout(xaxis_rangeslider_visible=False)
 
-        return fig
+#         return fig
 
-    except Exception as e:
-        logger.error(f"Error creating candlestick chart: {e}", exc_info=True)
-        st.error(f"Failed to create candlestick chart: {str(e)}")
-        return None
+#     except Exception as e:
+#         logger.error(f"Error creating candlestick chart: {e}", exc_info=True)
+#         st.error(f"Failed to create candlestick chart: {str(e)}")
+#         return None
 
 
 def extract_indicator_values_from_strategy(
@@ -2817,12 +2817,12 @@ def display_basic_results(results, data, ticker):
         st.table(summary_table)  # Changed to st.table
 
         # Plot basic backtest chart
-        st.write("### Basic Strategy Performance")
-        fig = create_candlestick_chart_with_trades(
-            data, results["basic"], "Basic Strategy Results"
-        )
-        if fig:
-            st.plotly_chart(fig, use_container_width=True, key=f"basic_chart_{ticker}")
+        # st.write("### Basic Strategy Performance")
+        # fig = create_candlestick_chart_with_trades(
+        #     data, results["basic"], "Basic Strategy Results"
+        # )
+        # if fig:
+        #     st.plotly_chart(fig, use_container_width=True, key=f"basic_chart_{ticker}")
 
         # Trades table for basic strategy
         st.write("### 💰 Basic Strategy Trades")
@@ -2889,27 +2889,27 @@ def display_optimized_results(results, data, ticker, timeframe):
             st.warning("Could not generate contour plot")
 
         # Enhanced Candlestick Chart for Optimized Strategy
-        st.write("### 📈 Optimized Strategy - Enhanced Chart with Indicators")
-        plotly_fig = create_candlestick_chart_with_trades(
-            data, results["optimization"]["results"], "Optimized Strategy Results"
-        )
-        if plotly_fig:
-            st.plotly_chart(
-                plotly_fig,
-                use_container_width=True,
-                key=f"optimized_chart_{ticker}_{timeframe}",
-            )
-            # if st.button("Export Optimized Strategy Chart"):
-            #     buf = BytesIO()
-            #     plotly_fig.write_image(buf, format="png")
-            #     st.download_button(
-            #         label="Download Optimized Strategy Chart as PNG",
-            #         data=buf.getvalue(),
-            #         file_name=f"{params['ticker']}_optimized_strategy_chart.png",
-            #         mime="image/png",
-            #     )
-        else:
-            st.warning("Could not generate optimized strategy chart")
+        # st.write("### 📈 Optimized Strategy - Enhanced Chart with Indicators")
+        # plotly_fig = create_candlestick_chart_with_trades(
+        #     data, results["optimization"]["results"], "Optimized Strategy Results"
+        # )
+        # if plotly_fig:
+        #     st.plotly_chart(
+        #         plotly_fig,
+        #         use_container_width=True,
+        #         key=f"optimized_chart_{ticker}_{timeframe}",
+        #     )
+        # if st.button("Export Optimized Strategy Chart"):
+        #     buf = BytesIO()
+        #     plotly_fig.write_image(buf, format="png")
+        #     st.download_button(
+        #         label="Download Optimized Strategy Chart as PNG",
+        #         data=buf.getvalue(),
+        #         file_name=f"{params['ticker']}_optimized_strategy_chart.png",
+        #         mime="image/png",
+        #     )
+        # else:
+        #     st.warning("Could not generate optimized strategy chart")
 
         # Dynamic Technical Indicators for Optimized Strategy
         st.write("### 📊 Optimized Strategy - Technical Indicators")
@@ -4391,7 +4391,12 @@ def render_sidebar():
 
     if ticker_input_method == "Select from List":
         available_tickers = get_available_tickers()
-        ticker = st.sidebar.multiselect("Ticker Symbol", available_tickers)
+        ticker_options = ["Select All"] + available_tickers
+        ticker = st.sidebar.multiselect(
+            "Ticker Symbol", ticker_options, default=["Select All"]
+        )
+        if "Select All" in ticker:
+            ticker = available_tickers
     else:
         ticker = (
             st.sidebar.text_input(
@@ -4544,22 +4549,22 @@ def run_backtest_analysis(
     #     )
 
     # Enhanced Candlestick Chart with Technical Indicators
-    st.write("### 📈 Enhanced Chart with Technical Indicators & Trades")
-    plotly_fig = create_candlestick_chart_with_trades(data, results)
-    if plotly_fig:
-        st.plotly_chart(plotly_fig, use_container_width=True)
-        # Export plot
-        # if st.button("Export Enhanced Chart"):
-        #     buf = BytesIO()
-        #     plotly_fig.write_image(buf, format="png")
-        #     st.download_button(
-        #         label="Download Enhanced Chart as PNG",
-        #         data=buf.getvalue(),
-        #         file_name=f"{params['ticker']}_enhanced_backtest_chart.png",
-        #         mime="image/png",
-        #     )
-    else:
-        st.warning("Could not generate chart")
+    # st.write("### 📈 Enhanced Chart with Technical Indicators & Trades")
+    # plotly_fig = create_candlestick_chart_with_trades(data, results)
+    # if plotly_fig:
+    #     st.plotly_chart(plotly_fig, use_container_width=True)
+    # Export plot
+    # if st.button("Export Enhanced Chart"):
+    #     buf = BytesIO()
+    #     plotly_fig.write_image(buf, format="png")
+    #     st.download_button(
+    #         label="Download Enhanced Chart as PNG",
+    #         data=buf.getvalue(),
+    #         file_name=f"{params['ticker']}_enhanced_backtest_chart.png",
+    #         mime="image/png",
+    #     )
+    # else:
+    #     st.warning("Could not generate chart")
 
     # Dynamic Technical Indicators Table
     st.write("### 📊 Technical Indicators - Latest Values")
@@ -4794,23 +4799,23 @@ def run_optimization_analysis(
         st.warning("Could not generate contour plot")
 
     # Enhanced Candlestick Chart for Optimized Strategy
-    st.write("### 📈 Optimized Strategy - Enhanced Chart with Indicators")
-    plotly_fig = create_candlestick_chart_with_trades(
-        data, results["results"], "Optimized Strategy Results"
-    )
-    if plotly_fig:
-        st.plotly_chart(plotly_fig, use_container_width=True)
-        # if st.button("Export Optimized Strategy Chart"):
-        buf = BytesIO()
-        plotly_fig.write_image(buf, format="png")
-        # st.download_button(
-        #     label="Download Optimized Strategy Chart as PNG",
-        #     data=buf.getvalue(),
-        #     file_name=f"{params['ticker']}_optimized_strategy_chart.png",
-        #     mime="image/png",
-        # )
-    else:
-        st.warning("Could not generate optimized strategy chart")
+    # st.write("### 📈 Optimized Strategy - Enhanced Chart with Indicators")
+    # plotly_fig = create_candlestick_chart_with_trades(
+    #     data, results["results"], "Optimized Strategy Results"
+    # )
+    # if plotly_fig:
+    #     st.plotly_chart(plotly_fig, use_container_width=True)
+    # if st.button("Export Optimized Strategy Chart"):
+    # buf = BytesIO()
+    # plotly_fig.write_image(buf, format="png")
+    # st.download_button(
+    #     label="Download Optimized Strategy Chart as PNG",
+    #     data=buf.getvalue(),
+    #     file_name=f"{params['ticker']}_optimized_strategy_chart.png",
+    #     mime="image/png",
+    # )
+    # else:
+    #     st.warning("Could not generate optimized strategy chart")
 
     # Dynamic Technical Indicators for Optimized Strategy
     st.write("### 📊 Optimized Strategy - Technical Indicators")
