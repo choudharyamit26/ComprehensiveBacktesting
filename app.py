@@ -2535,7 +2535,7 @@ def display_composite_results(results, data, ticker, timeframe):
         ticker (str): Ticker symbol
         timeframe (str): Timeframe used for backtest
     """
-    st.subheader("Strategy Comparison")
+    st.subheader("Strategy Comparison" + " " + ticker)
     composite_fig = plot_composite_backtest_results(results, data)
     if composite_fig:
         st.plotly_chart(
@@ -2555,27 +2555,27 @@ def display_parameter_evolution(results, ticker):
         ticker (str): Ticker symbol
     """
     if "walk_forward" in results:
-        st.subheader("Walk-Forward Parameter Evolution")
+        st.subheader("Walk-Forward Parameter Evolution" + " " + ticker)
         param_evolution_df = create_parameter_evolution_table(results["walk_forward"])
         if not param_evolution_df.empty:
             st.dataframe(param_evolution_df, use_container_width=True)
 
             # Export parameter evolution
-            if st.button("Export Parameter Evolution Table"):
-                csv_data = param_evolution_df.to_csv(index=False)
-                st.download_button(
-                    label="Download as CSV",
-                    data=csv_data,
-                    file_name=f"{ticker}_parameter_evolution.csv",
-                    mime="text/csv",
-                )
+            # if st.button("Export Parameter Evolution Table"):
+            #     csv_data = param_evolution_df.to_csv(index=False)
+            # st.download_button(
+            #     label="Download as CSV",
+            #     data=csv_data,
+            #     file_name=f"{ticker}_parameter_evolution.csv",
+            #     mime="text/csv",
+            # )
         else:
             st.info("No parameter evolution data available for walk-forward")
 
 
-def display_strategy_comparison(results):
+def display_strategy_comparison(results, ticker):
     """Display comparison between basic, optimized, and walk-forward strategies"""
-    st.subheader("Strategy Comparison")
+    st.subheader("Strategy Comparison" + " " + ticker)
 
     if "basic" in results and "optimization" in results and "walk_forward" in results:
         basic_analyzer = PerformanceAnalyzer(results["basic"])
@@ -2790,7 +2790,9 @@ def display_strategy_comparison(results):
                 height=500,
             )
             st.plotly_chart(
-                fig, use_container_width=True, key="basic_vs_optimized_comparison"
+                fig,
+                use_container_width=True,
+                key="basic_vs_optimized_comparison_" + ticker,
             )
     else:
         st.warning("Incomplete results for strategy comparison")
@@ -2805,7 +2807,7 @@ def display_basic_results(results, data, ticker):
         ticker (str): Ticker symbol
     """
     if "basic" in results:
-        st.subheader("Basic Backtest Results")
+        st.subheader("Basic Backtest Results" + " " + ticker)
         basic_analyzer = PerformanceAnalyzer(results["basic"])
         basic_report = basic_analyzer.generate_full_report()
 
@@ -2832,14 +2834,14 @@ def display_basic_results(results, data, ticker):
                 st.dataframe(trades_df, use_container_width=True)
 
                 # Export trades table
-                if st.button("Export Basic Trades Table"):
-                    csv_data = trades_df.to_csv(index=False)
-                    st.download_button(
-                        label="Download as CSV",
-                        data=csv_data,
-                        file_name=f"{ticker}_basic_trades.csv",
-                        mime="text/csv",
-                    )
+                # if st.button("Export Basic Trades Table"):
+                #     csv_data = trades_df.to_csv(index=False)
+                #     st.download_button(
+                #         label="Download as CSV",
+                #         data=csv_data,
+                #         file_name=f"{ticker}_basic_trades.csv",
+                #         mime="text/csv",
+                # )
             else:
                 st.info("No trades executed by the basic strategy")
         except Exception as e:
@@ -2856,7 +2858,7 @@ def display_optimized_results(results, data, ticker, timeframe):
         timeframe (str): Timeframe used for backtest
     """
     if "optimization" in results:
-        st.subheader("Optimization Results")
+        st.subheader("Optimization Results" + " " + ticker)
         opt_analyzer = PerformanceAnalyzer(results["optimization"]["results"])
         opt_report = opt_analyzer.generate_full_report()
 
@@ -2874,15 +2876,15 @@ def display_optimized_results(results, data, ticker, timeframe):
                 use_container_width=True,
                 key=f"contour_fig_{ticker}_{timeframe}",
             )
-            if st.button("Export Contour Plot"):
-                buf = BytesIO()
-                contour_fig.write_image(buf, format="png")
-                st.download_button(
-                    label="Download Contour Plot as PNG",
-                    data=buf.getvalue(),
-                    file_name=f"{params['ticker']}_contour_plot.png",
-                    mime="image/png",
-                )
+            # if st.button("Export Contour Plot"):
+            #     buf = BytesIO()
+            #     contour_fig.write_image(buf, format="png")
+            #     st.download_button(
+            #         label="Download Contour Plot as PNG",
+            #         data=buf.getvalue(),
+            #         file_name=f"{params['ticker']}_contour_plot.png",
+            #         mime="image/png",
+            #     )
         else:
             st.warning("Could not generate contour plot")
 
@@ -2897,15 +2899,15 @@ def display_optimized_results(results, data, ticker, timeframe):
                 use_container_width=True,
                 key=f"optimized_chart_{ticker}_{timeframe}",
             )
-            if st.button("Export Optimized Strategy Chart"):
-                buf = BytesIO()
-                plotly_fig.write_image(buf, format="png")
-                st.download_button(
-                    label="Download Optimized Strategy Chart as PNG",
-                    data=buf.getvalue(),
-                    file_name=f"{params['ticker']}_optimized_strategy_chart.png",
-                    mime="image/png",
-                )
+            # if st.button("Export Optimized Strategy Chart"):
+            #     buf = BytesIO()
+            #     plotly_fig.write_image(buf, format="png")
+            #     st.download_button(
+            #         label="Download Optimized Strategy Chart as PNG",
+            #         data=buf.getvalue(),
+            #         file_name=f"{params['ticker']}_optimized_strategy_chart.png",
+            #         mime="image/png",
+            #     )
         else:
             st.warning("Could not generate optimized strategy chart")
 
@@ -3102,14 +3104,14 @@ def display_optimized_results(results, data, ticker, timeframe):
         )
 
     # Export option
-    if st.button("Export Full Optimization Report"):
-        report_json = json.dumps(opt_report, indent=2, default=str)
-        st.download_button(
-            label="Download Full Report as JSON",
-            data=report_json,
-            file_name=f"{params['ticker']}_optimization_report.json",
-            mime="application/json",
-        )
+    # if st.button("Export Full Optimization Report"):
+    #     report_json = json.dumps(opt_report, indent=2, default=str)
+    #     st.download_button(
+    #         label="Download Full Report as JSON",
+    #         data=report_json,
+    #         file_name=f"{params['ticker']}_optimization_report.json",
+    #         mime="application/json",
+    #     )
 
 
 def display_walkforward_results(results, ticker, timeframe, params, progress_bar):
@@ -3131,7 +3133,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
     progress_bar.progress(100)
 
     # Walk-Forward Summary Visualization
-    st.subheader("📊 Walk-Forward Analysis Summary")
+    st.subheader("📊 Walk-Forward Analysis Summary" + " " + ticker)
 
     # Display overall summary statistics
     if summary_stats:
@@ -3867,15 +3869,15 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
         st.info("No degradation data available")
 
     # Export option
-    st.write("### 💾 Export Results")
-    if st.button("Export Full Walk-Forward Report", key="export_wf"):
-        report_json = json.dumps(results, indent=2, default=str)
-        st.download_button(
-            label="Download Full Report as JSON",
-            data=report_json,
-            file_name=f"{ticker}_walkforward_report.json",
-            mime="application/json",
-        )
+    # st.write("### 💾 Export Results")
+    # if st.button("Export Full Walk-Forward Report", key="export_wf"):
+    #     report_json = json.dumps(results, indent=2, default=str)
+    #     st.download_button(
+    #         label="Download Full Report as JSON",
+    #         data=report_json,
+    #         file_name=f"{ticker}_walkforward_report.json",
+    #         mime="application/json",
+    #     )
 
     st.success("Walk-forward analysis display complete!")
 
@@ -3884,7 +3886,7 @@ def display_complete_backtest_summary(results, ticker, timeframe):
     """Display enhanced summary for complete backtest with trade statistics and best times."""
 
     if "walk_forward" in results:
-        st.subheader("Complete Backtest Summary")
+        st.subheader("Complete Backtest Summary" + " " + ticker)
 
         # Check if walk-forward windows are available
         if results["walk_forward"]["windows"]:
@@ -4024,7 +4026,9 @@ def display_complete_backtest_summary(results, ticker, timeframe):
             fig.update_layout(
                 title="Trade Statistics Comparison", height=400, showlegend=False
             )
-            st.plotly_chart(fig, use_container_width=True, key="trade_stats_comparison")
+            st.plotly_chart(
+                fig, use_container_width=True, key=f"trade_stats_comparison_{ticker}"
+            )
 
         # Combined Best Trading Times
         st.write("### ⏰ Combined Best Trading Times")
@@ -4172,26 +4176,24 @@ def display_complete_backtest_summary(results, ticker, timeframe):
             st.info("No trading time analysis available")
 
 
-def complete_backtest(data, progress_bar, params):
+def complete_backtest(data, progress_bar, params, ticker):
     """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
     # Run backtest
-    results, params = run_complete_backtest_UI(
-        data, params["n_trials"], params["ticker"], params
-    )
+    results, params = run_complete_backtest_UI(data, params["n_trials"], ticker, params)
     if not results:
         st.error("Complete backtest failed")
         return
 
-    display_composite_results(results, data, params["ticker"], params["timeframe"])
-    display_parameter_evolution(results, params["ticker"])
-    display_strategy_comparison(results)
+    display_composite_results(results, data, ticker, params["timeframe"])
+    display_parameter_evolution(results, ticker)
+    display_strategy_comparison(results, ticker)
     progress_bar.progress(60)
-    display_complete_backtest_summary(results, params["ticker"], params["timeframe"])
-    display_basic_results(results, data, params["ticker"])
+    display_complete_backtest_summary(results, ticker, params["timeframe"])
+    display_basic_results(results, data, ticker)
     progress_bar.progress(80)
-    display_optimized_results(results, data, params["ticker"], params["timeframe"])
+    display_optimized_results(results, data, ticker, params["timeframe"])
     display_walkforward_results(
-        results, params["ticker"], params["timeframe"], params, progress_bar
+        results, ticker, params["timeframe"], params, progress_bar
     )
     progress_bar.progress(100)
 
@@ -4389,7 +4391,7 @@ def render_sidebar():
 
     if ticker_input_method == "Select from List":
         available_tickers = get_available_tickers()
-        ticker = st.sidebar.selectbox("Ticker Symbol", available_tickers)
+        ticker = st.sidebar.multiselect("Ticker Symbol", available_tickers)
     else:
         ticker = (
             st.sidebar.text_input(
@@ -4505,14 +4507,15 @@ def validate_inputs(params):
     return errors
 
 
-def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_text):
+def run_backtest_analysis(
+    params, data, analyzer_config, progress_bar, status_text, ticker
+):
     """Run backtest analysis and display results."""
     status_text.text("Running backtest...")
-    ticker = params["ticker"]
     results, cerebro = run_basic_backtest(
         data=data,
         strategy_class=params["selected_strategy"],
-        ticker=params["ticker"],
+        ticker=ticker,
         start_date=params["start_date"].strftime("%Y-%m-%d"),
         end_date=params["end_date"].strftime("%Y-%m-%d"),
         interval=params["timeframe"],
@@ -4524,21 +4527,21 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
     # Initialize PerformanceAnalyzer with results
     analyzer = PerformanceAnalyzer(results[0])
     report = analyzer.generate_full_report()
-
     # Display report as table instead of JSON
-    st.write("### Backtest Results Summary")
+    print("Backtest Report:", ticker)
+    st.write("### Backtest Results Summary " + " " + ticker)
     summary_table = create_summary_table(report)
     st.table(summary_table)  # Changed to st.table
 
     # Export summary table
-    if st.button("Export Summary Table"):
-        csv_data = summary_table.to_csv(index=False)
-        st.download_button(
-            label="Download Summary as CSV",
-            data=csv_data,
-            file_name=f"{params['ticker']}_backtest_summary.csv",
-            mime="text/csv",
-        )
+    # if st.button("Export Summary Table"):
+    #     csv_data = summary_table.to_csv(index=False)
+    #     st.download_button(
+    #         label="Download Summary as CSV",
+    #         data=csv_data,
+    #         file_name=f"{params['ticker']}_backtest_summary.csv",
+    #         mime="text/csv",
+    #     )
 
     # Enhanced Candlestick Chart with Technical Indicators
     st.write("### 📈 Enhanced Chart with Technical Indicators & Trades")
@@ -4546,15 +4549,15 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
     if plotly_fig:
         st.plotly_chart(plotly_fig, use_container_width=True)
         # Export plot
-        if st.button("Export Enhanced Chart"):
-            buf = BytesIO()
-            plotly_fig.write_image(buf, format="png")
-            st.download_button(
-                label="Download Enhanced Chart as PNG",
-                data=buf.getvalue(),
-                file_name=f"{params['ticker']}_enhanced_backtest_chart.png",
-                mime="image/png",
-            )
+        # if st.button("Export Enhanced Chart"):
+        #     buf = BytesIO()
+        #     plotly_fig.write_image(buf, format="png")
+        #     st.download_button(
+        #         label="Download Enhanced Chart as PNG",
+        #         data=buf.getvalue(),
+        #         file_name=f"{params['ticker']}_enhanced_backtest_chart.png",
+        #         mime="image/png",
+        #     )
     else:
         st.warning("Could not generate chart")
 
@@ -4565,14 +4568,14 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
     if not indicators_df.empty:
         st.dataframe(indicators_df, use_container_width=True)
 
-        # Export indicators table
-        csv_data = indicators_df.to_csv(index=False)
-        st.download_button(
-            label="Download Indicators Table as CSV",
-            data=csv_data,
-            file_name=f"{params['ticker']}_indicators_table.csv",
-            mime="text/csv",
-        )
+        # # Export indicators table
+        # csv_data = indicators_df.to_csv(index=False)
+        # st.download_button(
+        #     label="Download Indicators Table as CSV",
+        #     data=csv_data,
+        #     file_name=f"{params['ticker']}_indicators_table.csv",
+        #     mime="text/csv",
+        # )
 
         # Show detected indicators summary
         detected_indicators = detect_strategy_indicators(strategy)
@@ -4626,13 +4629,13 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
             st.dataframe(styled_trades, use_container_width=True)
 
             # Export trades table
-            csv_data = trades_df.to_csv(index=False)
-            st.download_button(
-                label="Download Trades Table as CSV",
-                data=csv_data,
-                file_name=f"{ticker}_trades_table.csv",
-                mime="text/csv",
-            )
+            # csv_data = trades_df.to_csv(index=False)
+            # st.download_button(
+            #     label="Download Trades Table as CSV",
+            #     data=csv_data,
+            #     file_name=f"{ticker}_trades_table.csv",
+            #     mime="text/csv",
+            # )
         else:
             st.info("No trades executed during the backtest period.")
     except Exception as e:
@@ -4719,24 +4722,25 @@ def run_backtest_analysis(params, data, analyzer_config, progress_bar, status_te
         )
 
     # Export option
-    if st.button("Export Full Backtest Report"):
-        report_json = json.dumps(report, indent=2, default=str)
-        st.download_button(
-            label="Download Full Report as JSON",
-            data=report_json,
-            file_name=f"{params['ticker']}_backtest_report.json",
-            mime="application/json",
-        )
+    # if st.button("Export Full Backtest Report"):
+    #     report_json = json.dumps(report, indent=2, default=str)
+    #     st.download_button(
+    #         label="Download Full Report as JSON",
+    #         data=report_json,
+    #         file_name=f"{params['ticker']}_backtest_report.json",
+    #         mime="application/json",
+    #     )
 
 
-def run_optimization_analysis(params, data, analyzer_config, progress_bar, status_text):
+def run_optimization_analysis(
+    params, data, analyzer_config, progress_bar, status_text, ticker
+):
     """Run optimization analysis and display results."""
     status_text.text("Starting optimization...")
-    ticker = params["ticker"]
     results = run_parameter_optimization(
         data=data,
         strategy_class=params["selected_strategy"],
-        ticker=params["ticker"],
+        ticker=ticker,
         start_date=params["start_date"].strftime("%Y-%m-%d"),
         end_date=params["end_date"].strftime("%Y-%m-%d"),
         n_trials=params["n_trials"],
@@ -4758,34 +4762,34 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
     report = analyzer.generate_full_report()
 
     # Display report as table instead of JSON
-    st.write("### Optimization Results Summary")
+    st.write("### Optimization Results Summary" + " " + ticker)
     summary_table = create_summary_table(report)
     st.table(summary_table)  # Changed to st.table
 
     # Export summary table
-    if st.button("Export Optimization Summary"):
-        csv_data = summary_table.to_csv(index=False)
-        st.download_button(
-            label="Download Summary as CSV",
-            data=csv_data,
-            file_name=f"{params['ticker']}_optimization_summary.csv",
-            mime="text/csv",
-        )
+    # if st.button("Export Optimization Summary"):
+    #     csv_data = summary_table.to_csv(index=False)
+    #     st.download_button(
+    #         label="Download Summary as CSV",
+    #         data=csv_data,
+    #         file_name=f"{params['ticker']}_optimization_summary.csv",
+    #         mime="text/csv",
+    #     )
 
     # Optimization Contour Plot
     st.write("### 🗺️ Parameter Optimization Landscape")
     contour_fig = plot_contour(results["study"])
     if contour_fig:
         st.plotly_chart(contour_fig, use_container_width=True)
-        if st.button("Export Contour Plot"):
-            buf = BytesIO()
-            contour_fig.write_image(buf, format="png")
-            st.download_button(
-                label="Download Contour Plot as PNG",
-                data=buf.getvalue(),
-                file_name=f"{params['ticker']}_contour_plot.png",
-                mime="image/png",
-            )
+    #     if st.button("Export Contour Plot"):
+    #         buf = BytesIO()
+    #         contour_fig.write_image(buf, format="png")
+    #         st.download_button(
+    #             label="Download Contour Plot as PNG",
+    #             data=buf.getvalue(),
+    #             file_name=f"{params['ticker']}_contour_plot.png",
+    #             mime="image/png",
+    #         )
     else:
         st.warning("Could not generate contour plot")
 
@@ -4796,15 +4800,15 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
     )
     if plotly_fig:
         st.plotly_chart(plotly_fig, use_container_width=True)
-        if st.button("Export Optimized Strategy Chart"):
-            buf = BytesIO()
-            plotly_fig.write_image(buf, format="png")
-            st.download_button(
-                label="Download Optimized Strategy Chart as PNG",
-                data=buf.getvalue(),
-                file_name=f"{params['ticker']}_optimized_strategy_chart.png",
-                mime="image/png",
-            )
+        # if st.button("Export Optimized Strategy Chart"):
+        buf = BytesIO()
+        plotly_fig.write_image(buf, format="png")
+        # st.download_button(
+        #     label="Download Optimized Strategy Chart as PNG",
+        #     data=buf.getvalue(),
+        #     file_name=f"{params['ticker']}_optimized_strategy_chart.png",
+        #     mime="image/png",
+        # )
     else:
         st.warning("Could not generate optimized strategy chart")
 
@@ -4898,13 +4902,13 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
             st.dataframe(styled_trades, use_container_width=True)
 
             # Export optimized trades table
-            csv_data = opt_trades_df.to_csv(index=False)
-            st.download_button(
-                label="Download Optimized Trades Table as CSV",
-                data=csv_data,
-                file_name=f"{ticker}_optimized_trades_table.csv",
-                mime="text/csv",
-            )
+            # csv_data = opt_trades_df.to_csv(index=False)
+            # st.download_button(
+            #     label="Download Optimized Trades Table as CSV",
+            #     data=csv_data,
+            #     file_name=f"{ticker}_optimized_trades_table.csv",
+            #     mime="text/csv",
+            # )
         else:
             st.info("No trades executed by the optimized strategy.")
     except Exception as e:
@@ -4992,14 +4996,14 @@ def run_optimization_analysis(params, data, analyzer_config, progress_bar, statu
         )
 
     # Export option
-    if st.button("Export Full Optimization Report"):
-        report_json = json.dumps(report, indent=2, default=str)
-        st.download_button(
-            label="Download Full Report as JSON",
-            data=report_json,
-            file_name=f"{params['ticker']}_optimization_report.json",
-            mime="application/json",
-        )
+    # if st.button("Export Full Optimization Report"):
+    #     report_json = json.dumps(report, indent=2, default=str)
+    #     st.download_button(
+    #         label="Download Full Report as JSON",
+    #         data=report_json,
+    #         file_name=f"{params['ticker']}_optimization_report.json",
+    #         mime="application/json",
+    #     )
 
 
 def display_parameter_optimization_results(results, progress_bar, status_text):
@@ -5030,7 +5034,9 @@ def display_parameter_optimization_results(results, progress_bar, status_text):
     st.toast("Walk-forward analysis complete")
 
 
-def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status_text):
+def run_walkforward_analysis(
+    params, data, analyzer_config, progress_bar, status_text, ticker
+):
     """Run walk-forward analysis and display results."""
     status_text.text("Starting walk-forward analysis...")
 
@@ -5093,7 +5099,7 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
         return
 
     # Walk-Forward Summary Visualization
-    st.subheader("📊 Walk-Forward Analysis Summary")
+    st.subheader("📊 Walk-Forward Analysis Summary" + " " + ticker)
 
     # 1. Parameter evolution table
     st.write("### ⚙️ Parameter Evolution Across Windows")
@@ -5547,13 +5553,13 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                         )
 
                         # Download button
-                        csv = df_in.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            label="Download In-Sample Trades",
-                            data=csv,
-                            file_name=f"window_{i+1}_in_sample_trades.csv",
-                            mime="text/csv",
-                        )
+                        # csv = df_in.to_csv(index=False).encode("utf-8")
+                        # st.download_button(
+                        #     label="Download In-Sample Trades",
+                        #     data=csv,
+                        #     file_name=f"window_{i+1}_in_sample_trades.csv",
+                        #     mime="text/csv",
+                        # )
                     else:
                         st.info("No in-sample trades")
 
@@ -5596,13 +5602,13 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                         )
 
                         # Download button
-                        csv = df_out.to_csv(index=False).encode("utf-8")
-                        st.download_button(
-                            label="Download Out-Sample Trades",
-                            data=csv,
-                            file_name=f"window_{i+1}_out_sample_trades.csv",
-                            mime="text/csv",
-                        )
+                        # csv = df_out.to_csv(index=False).encode("utf-8")
+                        # st.download_button(
+                        #     label="Download Out-Sample Trades",
+                        #     data=csv,
+                        #     file_name=f"window_{i+1}_out_sample_trades.csv",
+                        #     mime="text/csv",
+                        # )
                     else:
                         st.info("No out-sample trades")
             else:
@@ -5613,7 +5619,9 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
     overall = wf.get_overall_metrics()
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("In-Sample Avg Return", f"{overall['in_sample_avg_return']:.4f}")
+        st.metric(
+            "In-Sample Avg Return", f"{overall['in_sample_return_avg_return']:.4f}"
+        )
         st.metric("Out-Sample Avg Return", f"{overall['out_sample_avg_return']:.4f}")
     with col2:
         if overall["in_sample_avg_sharpe"] is not None:
@@ -5632,29 +5640,29 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
     st.dataframe(stats_summary, use_container_width=True)
 
     # 7. Download all trades
-    st.write("### 💾 Download All Results")
+    # st.write("### 💾 Download All Results")
     col1, col2, col3 = st.columns(3)
     with col1:
         if all_in_sample:
             csv_in = pd.DataFrame(all_in_sample).to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download All In-Sample Trades",
-                data=csv_in,
-                file_name="all_in_sample_trades.csv",
-                mime="text/csv",
-            )
+            # st.download_button(
+            #     label="Download All In-Sample Trades",
+            #     data=csv_in,
+            #     file_name="all_in_sample_trades.csv",
+            #     mime="text/csv",
+            # )
         else:
             st.info("No in-sample trades")
 
     with col2:
         if all_out_sample:
             csv_out = pd.DataFrame(all_out_sample).to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download All Out-Sample Trades",
-                data=csv_out,
-                file_name="all_out_sample_trades.csv",
-                mime="text/csv",
-            )
+            # st.download_button(
+            #     label="Download All Out-Sample Trades",
+            #     data=csv_out,
+            #     file_name="all_out_sample_trades.csv",
+            #     mime="text/csv",
+            # )
         else:
             st.info("No out-sample trades")
 
@@ -5670,12 +5678,12 @@ def run_walkforward_analysis(params, data, analyzer_config, progress_bar, status
                 monthly_returns["out_sample_return"] = out_sample_monthly["return_pct"]
 
             csv_monthly = monthly_returns.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download Monthly Returns",
-                data=csv_monthly,
-                file_name="monthly_returns.csv",
-                mime="text/csv",
-            )
+            # st.download_button(
+            #     label="Download Monthly Returns",
+            #     data=csv_monthly,
+            #     file_name="monthly_returns.csv",
+            #     mime="text/csv",
+            # )
         else:
             st.info("No monthly returns")
 
@@ -5699,63 +5707,65 @@ def run_analysis(params):
 
         progress_bar.progress(10)
         status_text.text("Fetching data...")
-
-        # Fetch data
-        data = get_data_sync(
-            params["ticker"],
-            params["start_date"],
-            params["end_date"],
-            interval=params["timeframe"],
-        )
-
-        # Validate data
-        if data.empty:
-            st.error("No data available for the selected ticker and date range.")
-            progress_bar.progress(0)
-            status_text.text("Analysis failed - no data")
-            return
-
-        required_columns = ["Open", "High", "Low", "Close", "Volume"]
-        if not all(col in data.columns for col in required_columns):
-            missing = [col for col in required_columns if col not in data.columns]
-            st.error(f"Missing required columns: {', '.join(missing)}")
-            progress_bar.progress(0)
-            status_text.text("Analysis failed - invalid data")
-            return
-
-        progress_bar.progress(30)
-        status_text.text("Preparing analyzers...")
-
-        # Prepare analyzer configuration
-        analyzer_config = [
-            (params["available_analyzers"][name], {"_name": name.lower()})
-            for name in params["selected_analyzers"]
-        ]
-
-        # Run analysis based on type
-        if params["analysis_type"] == "Backtest":
-            progress_bar.progress(40)
-            status_text.text("Running  Backtest ...")
-            run_backtest_analysis(
-                params, data, analyzer_config, progress_bar, status_text
+        for ticker in params["ticker"]:
+            if not ticker:
+                st.sidebar.error("Ticker cannot be empty.")
+                return
+            # Fetch data
+            data = get_data_sync(
+                ticker,
+                params["start_date"],
+                params["end_date"],
+                interval=params["timeframe"],
             )
-        elif params["analysis_type"] == "Optimization":
-            progress_bar.progress(40)
-            status_text.text("Running  Walk-Forward Analysis ...")
-            run_optimization_analysis(
-                params, data, analyzer_config, progress_bar, status_text
-            )
-        elif params["analysis_type"] == "Walk-Forward":
-            progress_bar.progress(40)
-            status_text.text("Running  Walk-Forward Analysis ...")
-            run_walkforward_analysis(
-                params, data, analyzer_config, progress_bar, status_text
-            )
-        elif params["analysis_type"] == "Complete Backtest":
-            progress_bar.progress(40)
-            status_text.text("Running  Complete Backtest ...")
-            complete_backtest(data, progress_bar, params)
 
+            # Validate data
+            if data.empty:
+                st.error("No data available for the selected ticker and date range.")
+                progress_bar.progress(0)
+                status_text.text("Analysis failed - no data")
+                return
+
+            required_columns = ["Open", "High", "Low", "Close", "Volume"]
+            if not all(col in data.columns for col in required_columns):
+                missing = [col for col in required_columns if col not in data.columns]
+                st.error(f"Missing required columns: {', '.join(missing)}")
+                progress_bar.progress(0)
+                status_text.text("Analysis failed - invalid data")
+                return
+
+            progress_bar.progress(30)
+            status_text.text("Preparing analyzers...")
+
+            # Prepare analyzer configuration
+            analyzer_config = [
+                (params["available_analyzers"][name], {"_name": name.lower()})
+                for name in params["selected_analyzers"]
+            ]
+
+            # Run analysis based on type
+            if params["analysis_type"] == "Backtest":
+                progress_bar.progress(40)
+                status_text.text("Running  Backtest ...")
+                run_backtest_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+            elif params["analysis_type"] == "Optimization":
+                progress_bar.progress(40)
+                status_text.text("Running  Walk-Forward Analysis ...")
+                run_optimization_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+            elif params["analysis_type"] == "Walk-Forward":
+                progress_bar.progress(40)
+                status_text.text("Running  Walk-Forward Analysis ...")
+                run_walkforward_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+            elif params["analysis_type"] == "Complete Backtest":
+                progress_bar.progress(40)
+                status_text.text("Running  Complete Backtest ...")
+                complete_backtest(data, progress_bar, params, ticker)
     except Exception as e:
         import traceback
 
