@@ -67,8 +67,20 @@ def get_strategy(strategy_name: str):
 try:
     from .ema_rsi import EMARSI
     from .sma_bollinger_band import SMABollinger
+    from stratgies.momentum.rsi_macd import RSIMACD
+    from stratgies.meanreversion.rsi_bb import RSIBB
+    from stratgies.momentum.rsi_ema import RSIEMA
+    from stratgies.momentum.rsi_cci import RSICCI
+    from stratgies.momentum.rsi_adx import RSIADX
+    from stratgies.momentum.rsi_stochastic import RSIStochastic
 
     register_strategy("EMARSI", EMARSI)
     register_strategy("SMABollinger", SMABollinger)
+    register_strategy("RSIMACD", RSIMACD)
+    register_strategy("RSIBB", RSIBB)
+    register_strategy("RSIEMA", RSIEMA)
+    register_strategy("RSICCI", RSICCI)
+    register_strategy("RSIADX", RSIADX)
+    register_strategy("RSIStochastic", RSIStochastic)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")
