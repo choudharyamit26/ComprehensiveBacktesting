@@ -727,6 +727,25 @@ def detect_strategy_indicators(strategy):
         return {}
 
 
+def calculate_rsi(prices, period=14):
+    """Calculate RSI indicator."""
+    delta = prices.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def calculate_atr(high, low, close, period):
+    """Helper function to calculate ATR."""
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
+
 def calculate_indicator_values(data, indicator_info):
     """Calculate indicator values based on detected indicator info."""
     calculated_indicators = {}
@@ -774,7 +793,6 @@ def calculate_indicator_values(data, indicator_info):
                 }
 
             elif indicator_type == "MACD":
-                # MACD calculation
                 fast_period = params.get("period_me1", 12)
                 slow_period = params.get("period_me2", 26)
                 signal_period = params.get("period_signal", 9)
@@ -869,21 +887,107 @@ def calculate_indicator_values(data, indicator_info):
                     "y_range": [0, 100],
                 }
 
+            elif indicator_type == "Supertrend":
+                period = params.get("period", 10)
+                multiplier = params.get("multiplier", 3.0)
+
+                atr = calculate_atr(data["High"], data["Low"], data["Close"], period)
+                hl2 = (data["High"] + data["Low"]) / 2.0
+                basic_upperband = hl2 + (multiplier * atr)
+                basic_lowerband = hl2 - (multiplier * atr)
+                supertrend = pd.Series(index=data.index, dtype=float)
+                supertrend.iloc[0] = hl2.iloc[0]
+
+                for i in range(1, len(data)):
+                    if (
+                        basic_upperband.iloc[i] < supertrend.iloc[i - 1]
+                        or data["Close"].iloc[i - 1] > supertrend.iloc[i - 1]
+                    ):
+                        final_upperband = basic_upperband.iloc[i]
+                    else:
+                        final_upperband = supertrend.iloc[i - 1]
+
+                    if (
+                        basic_lowerband.iloc[i] > supertrend.iloc[i - 1]
+                        or data["Close"].iloc[i - 1] < supertrend.iloc[i - 1]
+                    ):
+                        final_lowerband = basic_lowerband.iloc[i]
+                    else:
+                        final_lowerband = supertrend.iloc[i - 1]
+
+                    if (
+                        supertrend.iloc[i - 1] == final_upperband
+                        and data["Close"].iloc[i] <= final_upperband
+                    ):
+                        supertrend.iloc[i] = final_upperband
+                    elif (
+                        supertrend.iloc[i - 1] == final_lowerband
+                        and data["Close"].iloc[i] >= final_lowerband
+                    ):
+                        supertrend.iloc[i] = final_lowerband
+                    elif data["Close"].iloc[i] <= final_lowerband:
+                        supertrend.iloc[i] = final_upperband
+                    else:
+                        supertrend.iloc[i] = final_lowerband
+
+                calculated_indicators[name] = {
+                    "values": supertrend,
+                    "type": "line",
+                    "subplot": "price",
+                    "color": "#00ff00",
+                    "name": f"Supertrend ({period}, {multiplier})",
+                }
+
+            elif indicator_type == "ParabolicSAR":
+                af = params.get("af", 0.02)
+                afmax = params.get("afmax", 0.2)
+
+                psar = pd.Series(index=data.index, dtype=float)
+                psar.iloc[0] = data["Low"].iloc[0]
+                trend = 1  # 1 for uptrend, -1 for downtrend
+                ep = data["High"].iloc[0]  # Extreme point
+                af_current = af
+
+                for i in range(1, len(data)):
+                    if trend == 1:
+                        psar.iloc[i] = psar.iloc[i - 1] + af_current * (
+                            ep - psar.iloc[i - 1]
+                        )
+                        if data["High"].iloc[i] > ep:
+                            ep = data["High"].iloc[i]
+                            af_current = min(af_current + af, afmax)
+                        if data["Low"].iloc[i] < psar.iloc[i]:
+                            trend = -1
+                            psar.iloc[i] = ep
+                            ep = data["Low"].iloc[i]
+                            af_current = af
+                    else:
+                        psar.iloc[i] = psar.iloc[i - 1] + af_current * (
+                            ep - psar.iloc[i - 1]
+                        )
+                        if data["Low"].iloc[i] < ep:
+                            ep = data["Low"].iloc[i]
+                            af_current = min(af_current + af, afmax)
+                        if data["High"].iloc[i] > psar.iloc[i]:
+                            trend = 1
+                            psar.iloc[i] = ep
+                            ep = data["High"].iloc[i]
+                            af_current = af
+
+                calculated_indicators[name] = {
+                    "values": psar,
+                    "type": "scatter",
+                    "subplot": "price",
+                    "color": "#ff00ff",
+                    "name": f"PSAR ({af}, {afmax})",
+                    "marker": {"symbol": "dot", "size": 5},
+                }
+
         return calculated_indicators
 
     except Exception as e:
         logger.error(f"Error calculating indicators: {e}")
         return {}
-
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI indicator."""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
 
 
 # def create_candlestick_chart_with_trades(

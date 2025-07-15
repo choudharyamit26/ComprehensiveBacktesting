@@ -87,6 +87,10 @@ try:
     from stratgies.breakout.Volume_VWAP_Breakout_Strategy import (
         VolumeVWAPBreakoutStrategy,
     )
+    from stratgies.momentum.ema_adx import EMAADXTrend
+    from stratgies.breakout.ATR_Volume_expansion import ATRVolumeExpansion
+    from stratgies.momentum.supertrend_psar import SuperTrendPSAR
+    from stratgies.breakout.EMAStochasticPullback import EMAStochasticPullback
 
     register_strategy("EMARSI", EMARSI)
     register_strategy("SMABollinger", SMABollinger)
@@ -107,5 +111,9 @@ try:
     register_strategy("VolumeVWAPBreakoutStrategy", VolumeVWAPBreakoutStrategy)
     register_strategy("BBSupertrendStrategy", BBSupertrendStrategy)
     register_strategy("OBVCMFStrategy", OBVCMFStrategy)
+    register_strategy("EMAADXTrend", EMAADXTrend)
+    register_strategy("ATRVolumeExpansion", ATRVolumeExpansion)
+    register_strategy("SuperTrendPSAR", SuperTrendPSAR)
+    register_strategy("EMAStochasticPullback", EMAStochasticPullback)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")
