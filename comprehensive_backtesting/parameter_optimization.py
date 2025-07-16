@@ -263,7 +263,12 @@ def optimize_strategy(
     print(f"Strategy class type: {type(strategy_class)}")
 
     try:
-        study = optuna.create_study(direction="maximize")
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(
+                n_startup_trials=n_trials, multivariate=True
+            ),
+        )
         objective = OptimizationObjective(
             data=data,
             strategy_class=get_strategy(strategy_class),

@@ -361,8 +361,9 @@ class WalkForwardAnalysis:
         strategy_class,
         optimization_params,
         optimization_metric="total_return",
-        training_ratio=0.8,
-        testing_ratio=0.2,
+        training_ratio=0.5,
+        gap_ratio=0.2,
+        testing_ratio=0.3,
         step_ratio=0.25,
         initial_cash=10000,
         commission=0.001,
@@ -374,6 +375,7 @@ class WalkForwardAnalysis:
         self.optimization_params = optimization_params
         self.optimization_metric = optimization_metric
         self.training_ratio = training_ratio
+        self.gap_ratio = gap_ratio
         self.testing_ratio = testing_ratio
         self.step_ratio = step_ratio
         self.initial_cash = initial_cash
@@ -382,17 +384,21 @@ class WalkForwardAnalysis:
         self.verbose = verbose
         self.results = []
 
-        # Calculate dynamic training and testing periods
+        # Calculate dynamic training, gap, and testing periods
         total_days = (data.index.max() - data.index.min()).days
-        self.window_length = int(total_days * (training_ratio + testing_ratio))
+        self.window_length = int(
+            total_days * (training_ratio + gap_ratio + testing_ratio)
+        )
         self.training_period = int(self.window_length * training_ratio)
-        self.testing_period = self.window_length - self.training_period
+        self.gap_period = int(self.window_length * gap_ratio)
+        self.testing_period = int(self.window_length * testing_ratio)
         self.step_period = int(self.testing_period * step_ratio)
 
         # Debug print for period calculations
         print(f"Total days: {total_days}")
         print(f"Window length: {self.window_length} days")
         print(f"Training period: {self.training_period} days")
+        print(f"Gap period: {self.gap_period} days")
         print(f"Testing period: {self.testing_period} days")
         print(f"Step period: {self.step_period} days")
 
@@ -402,20 +408,23 @@ class WalkForwardAnalysis:
         walk_forward_num = 1
         print(f"Starting window generation at {current_date}")
 
-        # Corrected window generation logic
+        # Window generation logic with gap period
         while (
             current_date + timedelta(days=self.window_length) <= self.data.index.max()
         ):
             train_start = current_date
             train_end = current_date + timedelta(days=self.training_period - 1)
-            test_start = train_end + timedelta(days=1)
+            gap_start = train_end + timedelta(days=1)
+            gap_end = gap_start + timedelta(days=self.gap_period - 1)
+            test_start = gap_end + timedelta(days=1)
             test_end = test_start + timedelta(days=self.testing_period - 1)
 
             windows.append(
                 (walk_forward_num, train_start, train_end, test_start, test_end)
             )
             print(
-                f"Window {walk_forward_num}: Train {train_start} to {train_end}, Test {test_start} to {test_end}"
+                f"Window {walk_forward_num}: Train {train_start} to {train_end}, "
+                f"Gap {gap_start} to {gap_end}, Test {test_start} to {test_end}"
             )
 
             current_date = current_date + timedelta(days=self.step_period)
