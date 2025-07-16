@@ -31,7 +31,6 @@ import plotly.express as px
 import optuna
 import optuna.visualization
 import backtrader as bt
-from io import BytesIO
 import matplotlib
 from comprehensive_backtesting.parameter_optimization import SortinoRatio
 from comprehensive_backtesting.utils import DEFAULT_TICKERS
@@ -47,7 +46,6 @@ import pytz
 from comprehensive_backtesting.registry import STRATEGY_REGISTRY
 from comprehensive_backtesting.data import get_data_sync
 from comprehensive_backtesting.reports import PerformanceAnalyzer
-import json
 import numpy as np
 from comprehensive_backtesting.backtesting import (
     run_basic_backtest,
@@ -983,6 +981,75 @@ def calculate_indicator_values(data, indicator_info):
                     "marker": {"symbol": "dot", "size": 5},
                 }
 
+            elif indicator_type == "CCI":
+                period = params.get("period", 14)
+                constant = params.get("constant", 0.015)
+
+                # Calculate Typical Price
+                typical_price = (data["High"] + data["Low"] + data["Close"]) / 3
+                # Calculate SMA of Typical Price
+                sma_tp = typical_price.rolling(window=period).mean()
+                # Calculate Mean Deviation
+                mean_deviation = typical_price.rolling(window=period).apply(
+                    lambda x: np.mean(np.abs(x - x.mean())), raw=False
+                )
+                # Calculate CCI
+                cci_values = (typical_price - sma_tp) / (constant * mean_deviation)
+
+                calculated_indicators[name] = {
+                    "values": cci_values,
+                    "type": "line",
+                    "subplot": "oscillator",
+                    "color": "#4682b4",
+                    "name": f"CCI ({period})",
+                    "y_range": [-200, 200],  # Typical range for CCI
+                    "levels": {
+                        "overbought": params.get("overbought", 100),
+                        "oversold": params.get("oversold", -100),
+                        "neutral": 0,
+                    },
+                }
+            elif indicator_type == "WilliamsR":
+                period = params.get("period", 14)
+                highest_high = data["High"].rolling(window=period).max()
+                lowest_low = data["Low"].rolling(window=period).min()
+                williams_r = -100 * (
+                    (highest_high - data["Close"]) / (highest_high - lowest_low)
+                )
+                calculated_indicators[name] = {
+                    "values": williams_r,
+                    "type": "line",
+                    "subplot": "oscillator",
+                    "color": "#ff6b35",
+                    "name": f"Williams %R ({period})",
+                    "y_range": [-100, 0],
+                    "levels": {
+                        "overbought": params.get("overbought", -20),
+                        "oversold": params.get("oversold", -80),
+                        "neutral": params.get("exit", -50),
+                    },
+                }
+
+            elif indicator_type == "Trendline":
+                period = params.get("period", 20)
+                swing_high = data["High"].rolling(window=period).max()
+                swing_low = data["Low"].rolling(window=period).min()
+                calculated_indicators[f"{name}_support"] = {
+                    "values": swing_low,
+                    "type": "line",
+                    "subplot": "price",
+                    "color": "#00ff00",
+                    "name": f"Trendline Support ({period})",
+                    "line_style": "dash",
+                }
+                calculated_indicators[f"{name}_resistance"] = {
+                    "values": swing_high,
+                    "type": "line",
+                    "subplot": "price",
+                    "color": "#ff0000",
+                    "name": f"Trendline Resistance ({period})",
+                    "line_style": "dash",
+                }
         return calculated_indicators
 
     except Exception as e:

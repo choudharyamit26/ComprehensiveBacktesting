@@ -64,7 +64,6 @@ def get_strategy(strategy_name: str):
     return strategy
 
 
-# Register default strategies
 try:
     from .ema_rsi import EMARSI
     from .sma_bollinger_band import SMABollinger
@@ -91,6 +90,19 @@ try:
     from stratgies.breakout.ATR_Volume_expansion import ATRVolumeExpansion
     from stratgies.momentum.supertrend_psar import SuperTrendPSAR
     from stratgies.breakout.EMAStochasticPullback import EMAStochasticPullback
+    from stratgies.meanreversion.sr_rsi import SRRSI
+    from stratgies.meanreversion.pivot_cci import PivotCCI
+    from stratgies.meanreversion.trendline_williams import TrendlineWilliams
+    from stratgies.momentum.bb_rsi_volume_breakout import BBRHIVolumeBreakout
+    from stratgies.momentum.bb_stochastic_obv import BBStochasticOBV
+    from stratgies.momentum.cci_rsi_stochastic_rsi import CCIRSIStochasticRSI
+    from stratgies.momentum.ema_adx_volume_trend import EMAAADXVolumeTrend
+    from stratgies.momentum.rsi_williams_stochastic import RSIWilliamsStochastic
+    from stratgies.momentum.triple_momentum_confirmation import (
+        TripleMomentumConfirmation,
+    )
+    from stratgies.momentum.rsi_macd_ema_trend import RSIMACDEMATrend
+    from stratgies.momentum.supertrend_cci_cmf import SupertrendCCICMF
 
     register_strategy("EMARSI", EMARSI)
     register_strategy("SMABollinger", SMABollinger)
@@ -115,5 +127,16 @@ try:
     register_strategy("ATRVolumeExpansion", ATRVolumeExpansion)
     register_strategy("SuperTrendPSAR", SuperTrendPSAR)
     register_strategy("EMAStochasticPullback", EMAStochasticPullback)
+    register_strategy("SRRSI", SRRSI)
+    register_strategy("PivotCCI", PivotCCI)
+    register_strategy("TrendlineWilliams", TrendlineWilliams)
+    register_strategy("BBRHIVolumeBreakout", BBRHIVolumeBreakout)
+    register_strategy("BBStochasticOBV", BBStochasticOBV)
+    register_strategy("CCIRSIStochasticRSI", CCIRSIStochasticRSI)
+    register_strategy("EMAAADXVolumeTrend", EMAAADXVolumeTrend)
+    register_strategy("RSIWilliamsStochastic", RSIWilliamsStochastic)
+    register_strategy("SupertrendCCICMF", SupertrendCCICMF)
+    register_strategy("TripleMomentumConfirmation", TripleMomentumConfirmation)
+    register_strategy("RSIMACDEMATrend", RSIMACDEMATrend)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")
