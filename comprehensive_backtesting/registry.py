@@ -121,6 +121,20 @@ try:
         Multiple_Stochastic_Timeframes,
     )
 
+    from stratgies.priceaction.doji_support_resistance_rsi import (
+        DojiSupportResistanceRSI,
+    )
+    from stratgies.priceaction.flag_pennant_momentum import FlagPennantMomentum
+    from stratgies.priceaction.hammer_shooting_star_confirmation import (
+        HammerShootingStarConfirmation,
+    )
+    from stratgies.priceaction.head_shoulders_confirmation import (
+        HeadShouldersConfirmation,
+    )
+    from stratgies.priceaction.triangle_breakout_confirmation import (
+        TriangleBreakoutConfirmation,
+    )
+
     register_strategy("RSIMACD", RSIMACD)
     register_strategy("RSIBB", RSIBB)
     register_strategy("RSIEMA", RSIEMA)
@@ -167,5 +181,10 @@ try:
     register_strategy("ATR_Supertrend_MACD", ATR_Supertrend_MACD)
     register_strategy("RSI_CCI_Williams_Stochastic", RSI_CCI_Williams_Stochastic)
     register_strategy("Multiple_Stochastic_Timeframes", Multiple_Stochastic_Timeframes)
+    register_strategy("DojiSupportResistanceRSI", DojiSupportResistanceRSI)
+    register_strategy("FlagPennantMomentum", FlagPennantMomentum)
+    register_strategy("HammerShootingStarConfirmation", HammerShootingStarConfirmation)
+    register_strategy("HeadShouldersConfirmation", HeadShouldersConfirmation)
+    register_strategy("TriangleBreakoutConfirmation", TriangleBreakoutConfirmation)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")
