@@ -65,8 +65,6 @@ def get_strategy(strategy_name: str):
 
 
 try:
-    from .ema_rsi import EMARSI
-    from .sma_bollinger_band import SMABollinger
     from stratgies.momentum.rsi_macd import RSIMACD
     from stratgies.meanreversion.rsi_bb import RSIBB
     from stratgies.momentum.rsi_ema import RSIEMA
@@ -103,9 +101,26 @@ try:
     )
     from stratgies.momentum.rsi_macd_ema_trend import RSIMACDEMATrend
     from stratgies.momentum.supertrend_cci_cmf import SupertrendCCICMF
+    from stratgies.momentum.ADX_EMA_MACD_Strategy import ADXEMAMACDStrategy
+    from stratgies.momentum.EMA_Supertrend_SAR_Strategy import EMASupertrendSARStrategy
+    from stratgies.momentum.VWAP_BB_ADX_Strategy import VWAPBBADXStrategy
+    from stratgies.momentum.VWAP_EMA_Volume_Strategy import VWAPEMAVolumeStrategy
+    from stratgies.priceaction.sr_rsi_volume import SRRSIVolume
+    from stratgies.priceaction.trendline_macd_ema import TrendlineMACD_EMA
 
-    register_strategy("EMARSI", EMARSI)
-    register_strategy("SMABollinger", SMABollinger)
+    from stratgies.priceaction.volume_atr_price_action import Volume_ATR_PriceAction
+    from stratgies.momentum.obv_cmf_volume_rate import OBV_CMF_VolumeRate
+    from stratgies.momentum.pivot_rsi_macd_volume import Pivot_RSI_MACD_Volume
+    from stratgies.momentum.pivot_bb_stochastic import Pivot_BB_Stochastic
+    from stratgies.momentum.atr_bb_volume_volatility import ATR_BB_VolumeVolatility
+    from stratgies.momentum.atr_supertrend_macd import ATR_Supertrend_MACD
+    from stratgies.momentum.rsi_cci_williams_stochastic import (
+        RSI_CCI_Williams_Stochastic,
+    )
+    from stratgies.momentum.multiple_stochastic_timeframes import (
+        Multiple_Stochastic_Timeframes,
+    )
+
     register_strategy("RSIMACD", RSIMACD)
     register_strategy("RSIBB", RSIBB)
     register_strategy("RSIEMA", RSIEMA)
@@ -138,5 +153,19 @@ try:
     register_strategy("SupertrendCCICMF", SupertrendCCICMF)
     register_strategy("TripleMomentumConfirmation", TripleMomentumConfirmation)
     register_strategy("RSIMACDEMATrend", RSIMACDEMATrend)
+    register_strategy("ADXEMAMACDStrategy", ADXEMAMACDStrategy)
+    register_strategy("EMASupertrendSARStrategy", EMASupertrendSARStrategy)
+    register_strategy("VWAPBBADXStrategy", VWAPBBADXStrategy)
+    register_strategy("VWAPEMAVolumeStrategy", VWAPEMAVolumeStrategy)
+    register_strategy("SRRSIVolume", SRRSIVolume)
+    register_strategy("TrendlineMACD_EMA", TrendlineMACD_EMA)
+    register_strategy("Volume_ATR_PriceAction", Volume_ATR_PriceAction)
+    register_strategy("OBV_CMF_VolumeRate", OBV_CMF_VolumeRate)
+    register_strategy("Pivot_RSI_MACD_Volume", Pivot_RSI_MACD_Volume)
+    register_strategy("Pivot_BB_Stochastic", Pivot_BB_Stochastic)
+    register_strategy("ATR_BB_VolumeVolatility", ATR_BB_VolumeVolatility)
+    register_strategy("ATR_Supertrend_MACD", ATR_Supertrend_MACD)
+    register_strategy("RSI_CCI_Williams_Stochastic", RSI_CCI_Williams_Stochastic)
+    register_strategy("Multiple_Stochastic_Timeframes", Multiple_Stochastic_Timeframes)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")

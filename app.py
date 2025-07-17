@@ -744,6 +744,31 @@ def calculate_atr(high, low, close, period):
     return tr.rolling(window=period).mean()
 
 
+import pandas as pd
+import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def calculate_rsi(data, period):
+    """Helper function to calculate RSI."""
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_atr(high, low, close, period):
+    """Helper function to calculate ATR."""
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
+
 def calculate_indicator_values(data, indicator_info):
     """Calculate indicator values based on detected indicator info."""
     calculated_indicators = {}
@@ -985,15 +1010,11 @@ def calculate_indicator_values(data, indicator_info):
                 period = params.get("period", 14)
                 constant = params.get("constant", 0.015)
 
-                # Calculate Typical Price
                 typical_price = (data["High"] + data["Low"] + data["Close"]) / 3
-                # Calculate SMA of Typical Price
                 sma_tp = typical_price.rolling(window=period).mean()
-                # Calculate Mean Deviation
                 mean_deviation = typical_price.rolling(window=period).apply(
                     lambda x: np.mean(np.abs(x - x.mean())), raw=False
                 )
-                # Calculate CCI
                 cci_values = (typical_price - sma_tp) / (constant * mean_deviation)
 
                 calculated_indicators[name] = {
@@ -1002,13 +1023,14 @@ def calculate_indicator_values(data, indicator_info):
                     "subplot": "oscillator",
                     "color": "#4682b4",
                     "name": f"CCI ({period})",
-                    "y_range": [-200, 200],  # Typical range for CCI
+                    "y_range": [-200, 200],
                     "levels": {
                         "overbought": params.get("overbought", 100),
                         "oversold": params.get("oversold", -100),
                         "neutral": 0,
                     },
                 }
+
             elif indicator_type == "WilliamsR":
                 period = params.get("period", 14)
                 highest_high = data["High"].rolling(window=period).max()
@@ -1026,7 +1048,7 @@ def calculate_indicator_values(data, indicator_info):
                     "levels": {
                         "overbought": params.get("overbought", -20),
                         "oversold": params.get("oversold", -80),
-                        "neutral": params.get("exit", -50),
+                        "neutral": params.get("neutral", -50),
                     },
                 }
 
@@ -1050,6 +1072,85 @@ def calculate_indicator_values(data, indicator_info):
                     "name": f"Trendline Resistance ({period})",
                     "line_style": "dash",
                 }
+
+            elif indicator_type == "ATR":
+                period = params.get("period", 14)
+                atr_values = calculate_atr(
+                    data["High"], data["Low"], data["Close"], period
+                )
+                calculated_indicators[name] = {
+                    "values": atr_values,
+                    "type": "line",
+                    "subplot": "oscillator",
+                    "color": "#8b008b",
+                    "name": f"ATR ({period})",
+                    "y_range": [0, None],  # ATR is non-negative
+                }
+
+            elif indicator_type == "VolumeVolatility":
+                period = params.get("period", 14)
+                volume_sma = data["Volume"].rolling(window=period).mean()
+                vol_volatility = data["Volume"] / volume_sma
+                calculated_indicators[name] = {
+                    "values": vol_volatility,
+                    "type": "line",
+                    "subplot": "volume",
+                    "color": "#ffa500",
+                    "name": f"Volume Volatility ({period})",
+                    "y_range": [0, None],  # Volume volatility is non-negative
+                    "levels": {"threshold": params.get("threshold", 1.5)},
+                }
+
+            elif indicator_type == "VolumeRate":
+                period = params.get("period", 14)
+                volume_rate = data["Volume"] / data["Volume"].shift(period)
+                calculated_indicators[name] = {
+                    "values": volume_rate,
+                    "type": "line",
+                    "subplot": "volume",
+                    "color": "#008080",
+                    "name": f"Volume Rate ({period})",
+                    "y_range": [0, None],  # Volume rate is non-negative
+                    "levels": {"neutral": 1.0},
+                }
+
+            elif indicator_type == "OBV":
+                obv = pd.Series(0.0, index=data.index)
+                for i in range(1, len(data)):
+                    if data["Close"].iloc[i] > data["Close"].iloc[i - 1]:
+                        obv.iloc[i] = obv.iloc[i - 1] + data["Volume"].iloc[i]
+                    elif data["Close"].iloc[i] < data["Close"].iloc[i - 1]:
+                        obv.iloc[i] = obv.iloc[i - 1] - data["Volume"].iloc[i]
+                    else:
+                        obv.iloc[i] = obv.iloc[i - 1]
+                calculated_indicators[name] = {
+                    "values": obv,
+                    "type": "line",
+                    "subplot": "volume",
+                    "color": "#6a5acd",
+                    "name": "OBV",
+                }
+
+            elif indicator_type == "CMF":
+                period = params.get("period", 20)
+                mfm = (
+                    (data["Close"] - data["Low"]) - (data["High"] - data["Close"])
+                ) / (data["High"] - data["Low"])
+                mfv = mfm * data["Volume"]
+                cmf = (
+                    mfv.rolling(window=period).sum()
+                    / data["Volume"].rolling(window=period).sum()
+                )
+                calculated_indicators[name] = {
+                    "values": cmf,
+                    "type": "line",
+                    "subplot": "oscillator",
+                    "color": "#20b2aa",
+                    "name": f"CMF ({period})",
+                    "y_range": [-1, 1],
+                    "levels": {"positive": 0, "negative": 0},
+                }
+
         return calculated_indicators
 
     except Exception as e:
