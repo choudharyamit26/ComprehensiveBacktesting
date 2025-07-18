@@ -23,6 +23,8 @@ USAGE:
 """
 
 import ast
+import os
+import yfinance as yf
 import streamlit as st
 import pandas as pd
 import plotly.graph_objs as go
@@ -363,17 +365,60 @@ def plot_composite_backtest_results(results, data):
         return None
 
 
-def load_tickers_from_file(file_path="tickers.txt"):
-    """Load tickers from a text file, one ticker per line."""
+def load_tickers_from_file(file_path="ind_nifty500list.csv"):
+    """
+    Load tickers from a CSV file with a 'ticker' column, validate them using yfinance,
+    and save validated tickers to a new CSV file.
+
+    Args:
+        file_path (str): Path to the CSV file containing tickers (default: 'ind_nifty500list.csv')
+
+    Returns:
+        list: List of validated ticker symbols
+    """
     try:
-        with open(file_path, "r") as f:
-            tickers = [line.strip().upper() for line in f if line.strip()]
-        return tickers
-    except FileNotFoundError:
-        logger.info(f"Ticker file {file_path} not found, using default tickers")
-        return DEFAULT_TICKERS
+        # Check if file exists
+        if not os.path.exists(file_path):
+            logger.info(f"CSV file '{file_path}' not found, using default tickers")
+            return DEFAULT_TICKERS
+
+        # Read CSV file
+        df = pd.read_csv(file_path)
+        if "ticker" not in df.columns:
+            logger.info(
+                f"No 'ticker' column found in CSV file '{file_path}', using default tickers"
+            )
+            return DEFAULT_TICKERS
+
+        # Extract and clean tickers
+        symbols = df["ticker"].dropna().astype(str).tolist()
+        cleaned_symbols = []
+        for symbol in symbols:
+            cleaned_symbol = symbol.strip().replace(".NS", "").replace(".BO", "")
+            if (
+                cleaned_symbol
+                and len(cleaned_symbol) <= 15
+                and cleaned_symbol.replace(".", "").replace("-", "").isalnum()
+            ):
+                cleaned_symbols.append(cleaned_symbol)
+
+        logger.info(f"Read {len(cleaned_symbols)} stock symbols from '{file_path}'")
+
+        valid_symbols = []
+        total_symbols = len(cleaned_symbols)
+        logger.info(f"Validating {total_symbols} tickers...")
+
+        for i, symbol in enumerate(cleaned_symbols, 1):
+            logger.debug(f"Validating ticker {i}/{total_symbols}: {symbol}")
+            nse_ticker = symbol + ".NS"
+            valid_symbols.append(nse_ticker)
+
+        logger.info(f"Validated {len(valid_symbols)}/{len(cleaned_symbols)} tickers")
+
+        return valid_symbols
+
     except Exception as e:
-        logger.error(f"Error loading tickers from file: {e}")
+        logger.error(f"Error reading CSV file '{file_path}': {e}")
         return DEFAULT_TICKERS
 
 

@@ -29,7 +29,6 @@ def read_stocks_from_csv(csv_file="ind_nifty500list.csv"):
                 cleaned_symbol
                 and len(cleaned_symbol) <= 15
                 and cleaned_symbol.replace(".", "").replace("-", "").isalnum()
-                and cleaned_symbol != "ETERNAL"
             ):
                 cleaned_symbols.append(cleaned_symbol)
 
