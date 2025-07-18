@@ -79,6 +79,15 @@ class MACDVolume(bt.Strategy):
         ("verbose", False),
     )
 
+    optimization_params = {
+            "fast_period": {"type": "int", "min": 8, "max": 16},
+            "slow_period": {"type": "int", "min": 20, "max": 35},
+            "signal_period": {"type": "int", "min": 6, "max": 12},
+            "volume_period": {"type": "int", "min": 10, "max": 50},
+            "volume_spike": {"type": "float", "min": 1.2, "max": 2.0},
+            "volume_dry": {"type": "float", "min": 0.5, "max": 1.0},
+        }
+    
     def __init__(self, tickers=None, analyzers=None, **kwargs):
         # Initialize MACD indicator
         self.macd = btind.MACD(
@@ -128,6 +137,8 @@ class MACDVolume(bt.Strategy):
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
+
+
 
         logger.debug(f"Initialized MACDVolume with params: {self.params}")
 
