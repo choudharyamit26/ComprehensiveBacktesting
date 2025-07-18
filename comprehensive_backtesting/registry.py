@@ -134,6 +134,12 @@ try:
     from stratgies.priceaction.triangle_breakout_confirmation import (
         TriangleBreakoutConfirmation,
     )
+    from stratgies.momentum.bsav_intraday import BSAV
+    from stratgies.momentum.motv_intraday import MOTV
+    from stratgies.momentum.rmbev_intraday import RMBEV
+    from stratgies.momentum.rmev_intraday import RMEV
+    from stratgies.momentum.spma_intraday import SPMA
+    from stratgies.momentum.verv_intraday import VERV
 
     register_strategy("RSIMACD", RSIMACD)
     register_strategy("RSIBB", RSIBB)
@@ -186,5 +192,11 @@ try:
     register_strategy("HammerShootingStarConfirmation", HammerShootingStarConfirmation)
     register_strategy("HeadShouldersConfirmation", HeadShouldersConfirmation)
     register_strategy("TriangleBreakoutConfirmation", TriangleBreakoutConfirmation)
+    register_strategy("BSAV", BSAV)
+    register_strategy("MOTV", MOTV)
+    register_strategy("RMBEV", RMBEV)
+    register_strategy("RMEV", RMEV)
+    register_strategy("SPMA", SPMA)
+    register_strategy("VERV", VERV)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")
