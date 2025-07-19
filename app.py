@@ -5305,6 +5305,7 @@ def run_backtest_analysis(
 
     # Display best strategies report after all strategies are processed
     display_best_strategies_report(strategy_reports, ticker, interval)
+    return strategy_reports
 
 
 def run_optimization_analysis(
@@ -6415,14 +6416,25 @@ def run_filter_backtest(params):
                 for name in params["selected_analyzers"]
             ]
 
-            # Run analysis based on type
-            if params["analysis_type"] == "Backtest":
-                progress_bar.progress(50)
-                status_text.text(f"Running Backtest for {ticker}...")
-                run_backtest_analysis(
-                    params, data, analyzer_config, progress_bar, status_text, ticker
-                )
-
+            progress_bar.progress(50)
+            status_text.text(f"Running Backtest for {ticker}...")
+            strategy_report = run_backtest_analysis(
+                params, data, analyzer_config, progress_bar, status_text, ticker
+            )
+            progress_bar.progress(65)
+            best_stratgies = []
+            for stratgies in strategy_report:
+                best_stratgies.append(stratgies["Strategy"])
+            params["selected_strategy"] = best_stratgies
+            status_text.text("Running  Backtest ...")
+            run_optimization_analysis(
+                params, data, analyzer_config, progress_bar, status_text, ticker
+            )
+            progress_bar.progress(80)
+            status_text.text("Running  Walk-Forward Analysis ...")
+            run_walkforward_analysis(
+                params, data, analyzer_config, progress_bar, status_text, ticker
+            )
         progress_bar.progress(100)
         status_text.text("Filter and backtest complete!")
         st.toast("Filter and backtest complete")
