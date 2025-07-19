@@ -4723,9 +4723,12 @@ def complete_backtest(data, progress_bar, params, ticker):
     """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
     strategy_reports = []
 
-    for strategy in params["selected_strategies"]:
+    for idx, strategy in enumerate(params["selected_strategies"]):
         data_copy = data.copy()
         params_copy = params.copy()
+        strategy_length = len(params["selected_strategy"])
+
+        progress_bar.progress(int((idx / strategy_length) * 60))
 
         # Run complete backtest
         results = run_complete_backtest(
@@ -4746,10 +4749,10 @@ def complete_backtest(data, progress_bar, params, ticker):
         display_composite_results(results, data_copy, ticker, params_copy["timeframe"])
         display_parameter_evolution(results, ticker)
         display_strategy_comparison(results, ticker)
-        progress_bar.progress(60)
+        progress_bar.progress(int((idx / len(params["selected_strategies"])) * 70 + 10))
         display_complete_backtest_summary(results, ticker, params_copy["timeframe"])
         display_basic_results(results, data_copy, ticker)
-        progress_bar.progress(80)
+        progress_bar.progress(int((idx / len(params["selected_strategies"])) * 80 + 10))
         display_optimized_results(results, data_copy, ticker, params_copy["timeframe"])
         display_walkforward_results(
             results, ticker, params_copy["timeframe"], params_copy, progress_bar
@@ -4791,12 +4794,13 @@ def complete_backtest(data, progress_bar, params, ticker):
                     if report:
                         strategy_reports.append(report)
 
-        progress_bar.progress(90)
+    # Update progress to 100% and show completion
+    progress_bar.progress(100)
+    st.toast("Complete backtest finished")
 
     # Display consolidated report for all strategies
     st.subheader("📊 Complete Backtest - Best Strategies Report")
     display_best_strategies_report(strategy_reports, ticker, params["timeframe"])
-    progress_bar.progress(100)
 
 
 def setup_page_config():
@@ -5308,8 +5312,11 @@ def run_optimization_analysis(
     end_date = params["end_date"].strftime("%Y-%m-%d")
     interval = params["timeframe"]
     n_trials = params["n_trials"]
+    strategy_reports = []
+    strategy_length = len(params["selected_strategy"])
+    for idx, strategy in enumerate(params["selected_strategy"]):
+        progress_bar.progress(int((idx / strategy_length) * 100))
 
-    for strategy in params["selected_strategy"]:
         results = run_parameter_optimization(
             data=data,
             strategy_class=strategy,
@@ -5320,76 +5327,37 @@ def run_optimization_analysis(
             interval=interval,
         )
 
-        progress_bar.progress(100)
-        status_text.text("Optimization complete!")
-        st.toast("Backtesting complete")
-
         # Check for errors in optimization results
         if results.get("results") is None:
             error_msg = results.get("error", "Unknown error during optimization.")
             st.error(f"Optimization failed: {error_msg}")
-            return
+            continue
 
         # Initialize PerformanceAnalyzer with results
         analyzer = PerformanceAnalyzer(results["results"][0])
         report = analyzer.generate_full_report()
 
+        # Generate strategy report
+        strategy_report = generate_strategy_report(
+            results["results"], strategy, ticker, interval
+        )
+        if strategy_report:
+            strategy_reports.append(strategy_report)
+
         # Display report as table instead of JSON
         st.write(
-            "### Optimization Results Summary"
-            + " "
-            + ticker
-            + " Using Strategy: "
-            + strategy
+            f"### Optimization Results Summary for {ticker} Using Strategy: {strategy}"
         )
         summary_table = create_summary_table(report)
-        st.table(summary_table)  # Changed to st.table
-
-        # Export summary table
-        # if st.button("Export Optimization Summary"):
-        #     csv_data = summary_table.to_csv(index=False)
-        #     st.download_button(
-        #         label="Download Summary as CSV",
-        #         data=csv_data,
-        #         file_name=f"{params['ticker']}_optimization_summary.csv",
-        #         mime="text/csv",
-        #     )
+        st.table(summary_table)
 
         # Optimization Contour Plot
         st.write("### 🗺️ Parameter Optimization Landscape")
         contour_fig = plot_contour(results["study"])
         if contour_fig:
             st.plotly_chart(contour_fig, use_container_width=True)
-        #     if st.button("Export Contour Plot"):
-        #         buf = BytesIO()
-        #         contour_fig.write_image(buf, format="png")
-        #         st.download_button(
-        #             label="Download Contour Plot as PNG",
-        #             data=buf.getvalue(),
-        #             file_name=f"{params['ticker']}_contour_plot.png",
-        #             mime="image/png",
-        #         )
         else:
             st.warning("Could not generate contour plot")
-
-        # Enhanced Candlestick Chart for Optimized Strategy
-        # st.write("### 📈 Optimized Strategy - Enhanced Chart with Indicators")
-        # plotly_fig = create_candlestick_chart_with_trades(
-        #     data, results["results"], "Optimized Strategy Results"
-        # )
-        # if plotly_fig:
-        #     st.plotly_chart(plotly_fig, use_container_width=True)
-        # if st.button("Export Optimized Strategy Chart"):
-        # buf = BytesIO()
-        # plotly_fig.write_image(buf, format="png")
-        # st.download_button(
-        #     label="Download Optimized Strategy Chart as PNG",
-        #     data=buf.getvalue(),
-        #     file_name=f"{params['ticker']}_optimized_strategy_chart.png",
-        #     mime="image/png",
-        # )
-        # else:
-        #     st.warning("Could not generate optimized strategy chart")
 
         # Dynamic Technical Indicators for Optimized Strategy
         st.write("### 📊 Optimized Strategy - Technical Indicators")
@@ -5458,7 +5426,7 @@ def run_optimization_analysis(
                 else:
                     st.info("No parameter data available")
         else:
-            logger.info("No best parameters found from line no 4053", best_params_info)
+            logger.info("No best parameters found", best_params_info)
             st.warning(
                 "Could not display best parameters: "
                 + best_params_info.get("error", "Unknown error")
@@ -5485,15 +5453,6 @@ def run_optimization_analysis(
 
                 styled_trades = opt_trades_df.style.apply(highlight_columns, axis=0)
                 st.dataframe(styled_trades, use_container_width=True)
-
-                # Export optimized trades table
-                # csv_data = opt_trades_df.to_csv(index=False)
-                # st.download_button(
-                #     label="Download Optimized Trades Table as CSV",
-                #     data=csv_data,
-                #     file_name=f"{ticker}_optimized_trades_table.csv",
-                #     mime="text/csv",
-                # )
             else:
                 st.info("No trades executed by the optimized strategy.")
         except Exception as e:
@@ -5573,37 +5532,21 @@ def run_optimization_analysis(
             st.write("### 📊 Optimized Strategy - Trading Time Analysis")
             time_chart = plot_time_analysis(time_analysis)
             if time_chart:
-                st.plotly_chart(time_chart, use_container_width=True)
+                st.plotly_chart(time_chart, use_container_width=True, key=uuid.uuid4())
         else:
             st.warning(
                 "Could not analyze time ranges: "
                 + time_analysis.get("error", "Unknown error")
             )
 
-        # Export option
-        # if st.button("Export Full Optimization Report"):
-        #     report_json = json.dumps(report, indent=2, default=str)
-        #     st.download_button(
-        #         label="Download Full Report as JSON",
-        #         data=report_json,
-        #         file_name=f"{params['ticker']}_optimization_report.json",
-        #         mime="application/json",
-        #     )
+    # Update progress to 100% and show completion
+    progress_bar.progress(100)
+    status_text.text("Optimization complete!")
+    st.toast("Optimization complete")
 
-        strategy_reports = []
-        report = generate_strategy_report(
-            results["results"],
-            "Optimized Strategy",
-            params["ticker"],
-            params["timeframe"],
-        )
-        if report:
-            strategy_reports.append(report)
-
-        # Display the report
-        display_best_strategies_report(
-            strategy_reports, params["ticker"], params["timeframe"]
-        )
+    # Display best strategies report after all strategies are processed
+    st.subheader("📊 Optimization - Best Strategies Report")
+    display_best_strategies_report(strategy_reports, ticker, interval)
 
 
 def display_parameter_optimization_results(results, progress_bar, status_text):
@@ -5641,8 +5584,10 @@ def run_walkforward_analysis(
     status_text.text("Starting walk-forward analysis...")
     data = data.copy()  # Ensure we don't modify the original data
     ticker = ticker  # Ensure we don't modify the original ticker
-
-    for strategy in params["selected_strategy"]:
+    strategy_reports = []
+    strategy_length = len(params["selected_strategy"])
+    for idx, strategy in enumerate(params["selected_strategy"]):
+        progress_bar.progress(int((idx / strategy_length) * 100))
         from comprehensive_backtesting.registry import get_strategy
 
         strategy_class = get_strategy(strategy)
@@ -5699,15 +5644,23 @@ def run_walkforward_analysis(
             st.error(
                 "Walk-forward analysis produced no results. Please check your parameters."
             )
-            return
+            continue
+
+        # Generate strategy report for each valid window
+        for i, window in enumerate(wf.results):
+            if window.get("valid") and "out_sample_performance" in window:
+                report = generate_strategy_report(
+                    window["out_sample_performance"],
+                    f"Walk-Forward Window {i+1}",
+                    ticker,
+                    params["timeframe"],
+                )
+                if report:
+                    strategy_reports.append(report)
 
         # Walk-Forward Summary Visualization
         st.subheader(
-            "📊 Walk-Forward Analysis Summary"
-            + " "
-            + ticker
-            + "Using strategy: "
-            + strategy
+            f"📊 Walk-Forward Analysis Summary for {ticker} Using Strategy: {strategy}"
         )
 
         # 1. Parameter evolution table
@@ -5808,7 +5761,7 @@ def run_walkforward_analysis(
             else:
                 st.info("No out-of-sample equity curve data available")
 
-        # 3. Time Return Analysis (NEW SECTION)
+        # 3. Time Return Analysis
         st.subheader("⏱️ Time Return Analysis")
         st.write("### Monthly Return Distribution")
 
@@ -6070,7 +6023,7 @@ def run_walkforward_analysis(
                             )
                         )
 
-                    # Fixed datetime conversion for test_start - using shapes instead of add_vline
+                    # Fixed datetime conversion for test_start
                     test_start = result.get("test_start", None)
                     if test_start is not None and not pd.isna(test_start):
                         try:
@@ -6102,7 +6055,7 @@ def run_walkforward_analysis(
 
                             # Only add the line if we have valid y-range
                             if y_min != float("inf") and y_max != float("-inf"):
-                                # Add vertical line using add_shape instead of add_vline
+                                # Add vertical line using add_shape
                                 fig.add_shape(
                                     type="line",
                                     x0=test_start,
@@ -6134,7 +6087,6 @@ def run_walkforward_analysis(
 
                         except Exception as e:
                             print(f"Warning: Could not add test start line: {e}")
-                            # Continue without the vertical line
 
                     fig.update_layout(
                         title="Portfolio Value",
@@ -6189,15 +6141,6 @@ def run_walkforward_analysis(
                                 height=min(400, 35 * len(df_in) + 35),  # Dynamic height
                                 use_container_width=True,
                             )
-
-                            # Download button
-                            # csv = df_in.to_csv(index=False).encode("utf-8")
-                            # st.download_button(
-                            #     label="Download In-Sample Trades",
-                            #     data=csv,
-                            #     file_name=f"window_{i+1}_in_sample_trades.csv",
-                            #     mime="text/csv",
-                            # )
                         else:
                             st.info("No in-sample trades")
 
@@ -6242,15 +6185,6 @@ def run_walkforward_analysis(
                                 ),  # Dynamic height
                                 use_container_width=True,
                             )
-
-                            # Download button
-                            # csv = df_out.to_csv(index=False).encode("utf-8")
-                            # st.download_button(
-                            #     label="Download Out-Sample Trades",
-                            #     data=csv,
-                            #     file_name=f"window_{i+1}_out_sample_trades.csv",
-                            #     mime="text/csv",
-                            # )
                         else:
                             st.info("No out-sample trades")
                 else:
@@ -6285,78 +6219,14 @@ def run_walkforward_analysis(
         st.write("### 📋 Aggregate Trade Statistics")
         st.dataframe(stats_summary, use_container_width=True)
 
-        # 7. Download all trades
-        # st.write("### 💾 Download All Results")
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if all_in_sample:
-                csv_in = pd.DataFrame(all_in_sample).to_csv(index=False).encode("utf-8")
-                # st.download_button(
-                #     label="Download All In-Sample Trades",
-                #     data=csv_in,
-                #     file_name="all_in_sample_trades.csv",
-                #     mime="text/csv",
-                # )
-            else:
-                st.info("No in-sample trades")
+    # Update progress to 100% and show completion
+    progress_bar.progress(100)
+    status_text.text("Walk-forward analysis complete!")
+    st.toast("Walk-forward analysis complete")
 
-        with col2:
-            if all_out_sample:
-                csv_out = (
-                    pd.DataFrame(all_out_sample).to_csv(index=False).encode("utf-8")
-                )
-                # st.download_button(
-                #     label="Download All Out-Sample Trades",
-                #     data=csv_out,
-                #     file_name="all_out_sample_trades.csv",
-                #     mime="text/csv",
-                # )
-            else:
-                st.info("No out-sample trades")
-
-        with col3:
-            # Download monthly returns
-            if not in_sample_monthly.empty or not out_sample_monthly.empty:
-                monthly_returns = pd.DataFrame()
-                if not in_sample_monthly.empty:
-                    monthly_returns["in_sample_month"] = in_sample_monthly["month"]
-                    monthly_returns["in_sample_return"] = in_sample_monthly[
-                        "return_pct"
-                    ]
-                if not out_sample_monthly.empty:
-                    monthly_returns["out_sample_month"] = out_sample_monthly["month"]
-                    monthly_returns["out_sample_return"] = out_sample_monthly[
-                        "return_pct"
-                    ]
-
-                csv_monthly = monthly_returns.to_csv(index=False).encode("utf-8")
-                # st.download_button(
-                #     label="Download Monthly Returns",
-                #     data=csv_monthly,
-                #     file_name="monthly_returns.csv",
-                #     mime="text/csv",
-                # )
-            else:
-                st.info("No monthly returns")
-        strategy_reports = []
-        for i, window in enumerate(wf["windows"]):
-            if window.get("valid") and "out_sample_performance" in window:
-                report = generate_strategy_report(
-                    window["out_sample_performance"],
-                    f"Walk-Forward Window {i+1}",
-                    params["ticker"],
-                    params["timeframe"],
-                )
-                if report:
-                    strategy_reports.append(report)
-
-        # Display the report
-        display_best_strategies_report(
-            strategy_reports, params["ticker"], params["timeframe"]
-        )
-        progress_bar.progress(100)
-        status_text.text("Walk-forward analysis complete!")
-        st.toast("Walk-forward analysis complete")
+    # Display best strategies report after all strategies are processed
+    st.subheader("📊 Walk-Forward - Best Strategies Report")
+    display_best_strategies_report(strategy_reports, ticker, params["timeframe"])
 
 
 def run_analysis(params):
@@ -6716,7 +6586,7 @@ def select_stocks_for_intraday_ui(
 
         if status_text:
             status_text.text("Stock selection complete!")
-
+        os.remove(validated_csv)
     else:
         print("\n" + "=" * 80)
         print("🎯 SELECTED STOCKS FOR INTRADAY TRADING")

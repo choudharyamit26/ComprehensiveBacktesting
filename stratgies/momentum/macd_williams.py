@@ -77,6 +77,15 @@ class MACDWilliams(bt.Strategy):
         ("verbose", False),
     )
 
+    optimization_params = {
+        "fast_period": {"type": "int", "min": 8, "max": 16},
+        "slow_period": {"type": "int", "min": 20, "max": 35},
+        "signal_period": {"type": "int", "min": 6, "max": 12},
+        "willr_period": {"type": "int", "min": 10, "max": 20},
+        "willr_oversold": {"type": "float", "min": -90, "max": -70},
+        "willr_overbought": {"type": "float", "min": -30, "max": -10},
+    }
+
     def __init__(self, tickers=None, analyzers=None, **kwargs):
         # Initialize MACD indicator
         self.macd = btind.MACD(

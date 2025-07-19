@@ -278,7 +278,6 @@ def run_basic_comparison_analysis(
     return results_comparison
 
 
-# Updated run_complete_backtest function in backtesting.py
 def run_complete_backtest(
     data,
     ticker,

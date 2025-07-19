@@ -135,7 +135,7 @@ def process_window(args):
         test_start,
         test_end,
         data,
-        strategy_name,  # changed from strategy_class
+        strategy_name,  # Strategy name to resolve the class
         optimization_params,
         optimization_metric,
         initial_cash,
@@ -152,17 +152,47 @@ def process_window(args):
 
     def objective(trial):
         params = {}
+        print(f"Optimization params: {optimization_params}")
         for param_name, param_config in optimization_params.items():
-            if param_config["type"] == "int":
-                params[param_name] = trial.suggest_int(
-                    param_name, param_config["low"], param_config["high"]
-                )
-            elif param_config["type"] == "float":
-                params[param_name] = trial.suggest_float(
-                    param_name, param_config["low"], param_config["high"]
-                )
+            param_type = param_config.get("type")
 
-        # Ensure slow_sma_period > fast_sma_period
+            if param_type == "int":
+                params[param_name] = trial.suggest_int(
+                    param_name,
+                    param_config.get("low", 1),  # Default to 1 if "low" is missing
+                    param_config.get(
+                        "high", 100
+                    ),  # Default to 100 if "high" is missing
+                )
+            elif param_type == "float":
+                params[param_name] = trial.suggest_float(
+                    param_name,
+                    param_config.get("low", 0.0),  # Default to 0.0 if "low" is missing
+                    param_config.get(
+                        "high", 1.0
+                    ),  # Default to 1.0 if "high" is missing
+                )
+            elif param_type == "categorical":
+                params[param_name] = trial.suggest_categorical(
+                    param_name,
+                    param_config.get(
+                        "choices", []
+                    ),  # Default to empty list if "choices" is missing
+                )
+            elif param_type == "loguniform":
+                params[param_name] = trial.suggest_float(
+                    param_name,
+                    param_config.get("low", 1e-5),  # Default to small value
+                    param_config.get("high", 1.0),  # Default to 1.0
+                    log=True,
+                )
+            else:
+                print(
+                    f"Warning: Unknown parameter type '{param_type}' for {param_name}, skipping."
+                )
+                continue
+
+        # Ensure slow_sma_period > fast_sma_period for strategies that require it
         if "fast_sma_period" in params and "slow_sma_period" in params:
             if params["slow_sma_period"] <= params["fast_sma_period"]:
                 params["slow_sma_period"] = params["fast_sma_period"] + 1
