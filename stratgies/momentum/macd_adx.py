@@ -59,12 +59,6 @@ class MACDADX(bt.Strategy):
     - adx_period (int): ADX period (default: 14)
     - adx_threshold (float): ADX strength threshold (default: 20)
     - verbose (bool): Enable detailed logging (default: False)
-
-    Usage:
-    ======
-    cerebro = bt.Cerebro()
-    cerebro.addstrategy(MACDADX, adx_period=20, adx_threshold=25)
-    cerebro.run()
     """
 
     params = (
@@ -75,6 +69,14 @@ class MACDADX(bt.Strategy):
         ("adx_threshold", 20),
         ("verbose", False),
     )
+
+    optimization_params = {
+        "fast_period": {"type": "int", "low": 8, "high": 16, "step": 1},
+        "slow_period": {"type": "int", "low": 20, "high": 35, "step": 1},
+        "signal_period": {"type": "int", "low": 6, "high": 12, "step": 1},
+        "adx_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "adx_threshold": {"type": "float", "low": 15, "high": 30},
+    }
 
     def __init__(self, tickers=None, analyzers=None, **kwargs):
         # Initialize MACD indicator

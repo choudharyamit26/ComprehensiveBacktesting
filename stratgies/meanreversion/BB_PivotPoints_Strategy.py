@@ -67,17 +67,6 @@ class BBPivotPointsStrategy(bt.Strategy):
     - bb_dev (float): BB standard deviation multiplier (default: 2.0)
     - pivot_proximity (float): Proximity to pivot level for entry (default: 0.5%)
     - verbose (bool): Enable detailed logging (default: False)
-
-    Usage:
-    ======
-    cerebro = bt.Cerebro()
-    cerebro.addstrategy(BBPivotPointsStrategy, bb_period=20, pivot_proximity=0.5)
-    cerebro.run()
-
-    Best Market Conditions:
-    ======================
-    - Markets with clear support/resistance levels
-    - Avoid low volatility or trending markets without clear pivots
     """
 
     params = (
@@ -86,6 +75,12 @@ class BBPivotPointsStrategy(bt.Strategy):
         ("pivot_proximity", 0.5),
         ("verbose", False),
     )
+
+    optimization_params = {
+        "bb_period": {"type": "int", "low": 10, "high": 30, "step": 1},
+        "bb_dev": {"type": "float", "low": 1.5, "high": 2.5},
+        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0},
+    }
 
     def __init__(self):
         self.data_intraday = self.datas[0]  # only one data feed
@@ -148,9 +143,13 @@ class BBPivotPointsStrategy(bt.Strategy):
 
         # Force exit at 15:15
         if current_time >= datetime.time(15, 15):
-            if self.getposition(data=self.data_intraday).size:
-                self.close(data=self.data_intraday)
-                trade_logger.info("Force closed all positions at 15:15 IST")
+            position_size = self.getposition(data=self.data_intraday).size
+            if position_size != 0:
+                self.order = self.close(data=self.data_intraday)
+                self.order_type = "exit_long" if position_size > 0 else "exit_short"
+                trade_logger.info(
+                    f"Force closing position at 15:15 IST | Position Size: {position_size}"
+                )
             return
 
         if not (datetime.time(9, 15) <= current_time <= datetime.time(15, 5)):
@@ -201,26 +200,30 @@ class BBPivotPointsStrategy(bt.Strategy):
                 self.order = self.buy(data=self.data_intraday)
                 self.order_type = "enter_long"
                 trade_logger.info(
-                    f"BUY SIGNAL | Time: {dt_ist} | Price: {current_price:.2f}"
+                    f"BUY SIGNAL | Time: {dt_ist} | Price: {current_price:.2f} | "
+                    f"Near Lower BB: {price_near_lower_bb} | Near S1: {near_s1} | Near S2: {near_s2}"
                 )
             elif bearish_entry:
                 self.order = self.sell(data=self.data_intraday)
                 self.order_type = "enter_short"
                 trade_logger.info(
-                    f"SELL SIGNAL | Time: {dt_ist} | Price: {current_price:.2f}"
+                    f"SELL SIGNAL | Time: {dt_ist} | Price: {current_price:.2f} | "
+                    f"Near Upper BB: {price_near_upper_bb} | Near R1: {near_r1} | Near R2: {near_r2}"
                 )
         else:
             if position_size > 0 and bullish_exit:
                 self.order = self.sell(data=self.data_intraday, size=position_size)
                 self.order_type = "exit_long"
                 trade_logger.info(
-                    f"EXIT LONG | Time: {dt_ist} | Price: {current_price:.2f}"
+                    f"EXIT LONG | Time: {dt_ist} | Price: {current_price:.2f} | "
+                    f"Reached Pivot: {current_price >= self.pivot_p} | Reached Upper BB: {current_price >= bb_top}"
                 )
             elif position_size < 0 and bearish_exit:
                 self.order = self.buy(data=self.data_intraday, size=abs(position_size))
                 self.order_type = "exit_short"
                 trade_logger.info(
-                    f"EXIT SHORT | Time: {dt_ist} | Price: {current_price:.2f}"
+                    f"EXIT SHORT | Time: {dt_ist} | Price: {current_price:.2f} | "
+                    f"Reached Pivot: {current_price <= self.pivot_p} | Reached Lower BB: {current_price <= bb_bot}"
                 )
 
     def notify_order(self, order):
@@ -240,7 +243,8 @@ class BBPivotPointsStrategy(bt.Strategy):
                     }
                 )
                 trade_logger.info(
-                    f"BUY EXECUTED | Ref: {order.ref} | Price: {order.executed.price:.2f}"
+                    f"BUY EXECUTED | Ref: {order.ref} | Price: {order.executed.price:.2f} | "
+                    f"Size: {order.executed.size} | Comm: {order.executed.comm:.2f}"
                 )
             elif self.order_type == "enter_short" and order.issell():
                 self.open_positions.append(
@@ -254,9 +258,16 @@ class BBPivotPointsStrategy(bt.Strategy):
                     }
                 )
                 trade_logger.info(
-                    f"SELL EXECUTED | Ref: {order.ref} | Price: {order.executed.price:.2f}"
+                    f"SELL EXECUTED | Ref: {order.ref} | Price: {order.executed.price:.2f} | "
+                    f"Size: {order.executed.size} | Comm: {order.executed.comm:.2f}"
                 )
             elif self.order_type == "exit_long" and order.issell():
+                if not self.open_positions:
+                    trade_logger.error(
+                        f"EXIT LONG EXECUTED | Ref: {order.ref} | No open positions to close | "
+                        f"Price: {order.executed.price:.2f} | Size: {order.executed.size}"
+                    )
+                    return
                 entry_info = self.open_positions.pop(0)
                 pnl = (order.executed.price - entry_info["entry_price"]) * abs(
                     entry_info["size"]
@@ -279,9 +290,16 @@ class BBPivotPointsStrategy(bt.Strategy):
                 )
                 self.trade_count += 1
                 trade_logger.info(
-                    f"EXIT LONG EXECUTED | Ref: {order.ref} | PnL: {pnl:.2f}"
+                    f"EXIT LONG EXECUTED | Ref: {order.ref} | Price: {order.executed.price:.2f} | "
+                    f"Size: {order.executed.size} | Comm: {order.executed.comm:.2f} | PnL: {pnl:.2f}"
                 )
             elif self.order_type == "exit_short" and order.isbuy():
+                if not self.open_positions:
+                    trade_logger.error(
+                        f"EXIT SHORT EXECUTED | Ref: {order.ref} | No open positions to close | "
+                        f"Price: {order.executed.price:.2f} | Size: {order.executed.size}"
+                    )
+                    return
                 entry_info = self.open_positions.pop(0)
                 pnl = (entry_info["entry_price"] - order.executed.price) * abs(
                     entry_info["size"]
@@ -304,7 +322,8 @@ class BBPivotPointsStrategy(bt.Strategy):
                 )
                 self.trade_count += 1
                 trade_logger.info(
-                    f"EXIT SHORT EXECUTED | Ref: {order.ref} | PnL: {pnl:.2f}"
+                    f"EXIT SHORT EXECUTED | Ref: {order.ref} | Price: {order.executed.price:.2f} | "
+                    f"Size: {order.executed.size} | Comm: {order.executed.comm:.2f} | PnL: {pnl:.2f}"
                 )
 
         if order.status in [
@@ -315,6 +334,9 @@ class BBPivotPointsStrategy(bt.Strategy):
         ]:
             self.order = None
             self.order_type = None
+            trade_logger.debug(
+                f"Order processed | Ref: {order.ref} | Status: {order.getstatusname()}"
+            )
 
     def notify_trade(self, trade):
         if trade.isclosed:

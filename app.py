@@ -277,7 +277,7 @@ def display_best_strategies_report(strategy_reports, ticker, timeframe):
                 ),
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
         return display_df
     else:
         st.info("No strategies met the criteria (win rate > 50% and > 10 trades)")
@@ -3182,7 +3182,7 @@ def display_strategy_comparison(results, ticker):
                         barmode="group",
                         height=500,
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
 
                 except Exception as e:
                     st.error(f"Error accessing walk-forward performance data: {str(e)}")
@@ -3232,7 +3232,7 @@ def display_strategy_comparison(results, ticker):
                         barmode="group",
                         height=500,
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
 
             else:
                 st.warning(
@@ -3280,7 +3280,7 @@ def display_strategy_comparison(results, ticker):
                     barmode="group",
                     height=500,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
         else:
             st.warning(
                 "No walk-forward windows generated. Check data sufficiency or parameters."
@@ -3813,7 +3813,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                 color_discrete_sequence=["#1f77b4"],
             )
             fig.update_layout(xaxis_title="Month", yaxis_title="Return (%)", height=500)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
 
             # Monthly return metrics
             st.write("### Monthly Return Metrics")
@@ -4033,7 +4033,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         showlegend=True,
                         height=500,
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
                 else:
                     st.info("No equity curve data available")
 
@@ -4141,7 +4141,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         fig.update_layout(
                             xaxis_title="Month", yaxis_title="Return (%)", height=400
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
 
                         # Display monthly returns table
                         monthly_pnl["return_pct"] = monthly_pnl["return_pct"].apply(
@@ -4258,7 +4258,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         fig.update_layout(
                             xaxis_title="Month", yaxis_title="Return (%)", height=400
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
 
                         # Display monthly returns table
                         monthly_pnl["return_pct"] = monthly_pnl["return_pct"].apply(
@@ -4301,7 +4301,9 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                                 yaxis_title="Profit/Loss",
                                 height=400,
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(
+                                fig, use_container_width=True, key=uuid.uuid4()
+                            )
 
                         # Day of week analysis
                         st.write("#### Day of Week Returns")
@@ -4337,7 +4339,9 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                                 yaxis_title="Profit/Loss",
                                 height=400,
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(
+                                fig, use_container_width=True, key=uuid.uuid4()
+                            )
 
                         # Monthly analysis
                         st.write("#### Monthly Returns")
@@ -4361,7 +4365,9 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                                 yaxis_title="Profit/Loss",
                                 height=400,
                             )
-                            st.plotly_chart(fig, use_container_width=True)
+                            st.plotly_chart(
+                                fig, use_container_width=True, key=uuid.uuid4()
+                            )
                     else:
                         st.warning(
                             "Trade data missing 'entry_time' field for time analysis"
@@ -4714,7 +4720,7 @@ def display_complete_backtest_summary(results, ticker, timeframe):
                 barmode="group",
                 legend_title="Strategies",
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
         else:
             st.info("No trading time analysis available")
 
@@ -5286,7 +5292,7 @@ def run_backtest_analysis(
             st.write("### 📊 Trading Time Analysis")
             time_chart = plot_time_analysis(time_analysis)
             if time_chart:
-                st.plotly_chart(time_chart, use_container_width=True)
+                st.plotly_chart(time_chart, use_container_width=True, key=uuid.uuid4())
         else:
             st.warning(
                 f"Could not analyze best times: {time_analysis.get('error', 'Unknown error')}"
@@ -5355,7 +5361,7 @@ def run_optimization_analysis(
         st.write("### 🗺️ Parameter Optimization Landscape")
         contour_fig = plot_contour(results["study"])
         if contour_fig:
-            st.plotly_chart(contour_fig, use_container_width=True)
+            st.plotly_chart(contour_fig, use_container_width=True, key=uuid.uuid4())
         else:
             st.warning("Could not generate contour plot")
 
@@ -5730,7 +5736,7 @@ def run_walkforward_analysis(
                     showlegend=True,
                     height=400,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
             else:
                 st.info("No in-sample equity curve data available")
 
@@ -5757,7 +5763,7 @@ def run_walkforward_analysis(
                     showlegend=True,
                     height=400,
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
             else:
                 st.info("No out-of-sample equity curve data available")
 
@@ -5826,7 +5832,7 @@ def run_walkforward_analysis(
                 barmode="group",
                 height=500,
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
 
             # Show monthly return statistics
             st.write("### Monthly Return Statistics")
@@ -6095,7 +6101,7 @@ def run_walkforward_analysis(
                         showlegend=True,
                         height=400,
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
                 else:
                     st.info("No equity curve data available")
 

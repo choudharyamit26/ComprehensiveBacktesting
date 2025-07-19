@@ -60,12 +60,6 @@ class MACDBollinger(bt.Strategy):
     - bb_dev (float): Bollinger Bands standard deviation (default: 2.0)
     - bb_bandwidth (float): Bandwidth threshold for squeeze (default: 0.1)
     - verbose (bool): Enable detailed logging (default: False)
-
-    Usage:
-    ======
-    cerebro = bt.Cerebro()
-    cerebro.addstrategy(MACDBollinger, bb_period=30, bb_dev=2.5)
-    cerebro.run()
     """
 
     params = (
@@ -77,6 +71,15 @@ class MACDBollinger(bt.Strategy):
         ("bb_bandwidth", 0.1),
         ("verbose", False),
     )
+
+    optimization_params = {
+        "fast_period": {"type": "int", "low": 8, "high": 16, "step": 1},
+        "slow_period": {"type": "int", "low": 20, "high": 35, "step": 1},
+        "signal_period": {"type": "int", "low": 6, "high": 12, "step": 1},
+        "bb_period": {"type": "int", "low": 10, "high": 50, "step": 1},
+        "bb_dev": {"type": "float", "low": 1.5, "high": 3.0},
+        "bb_bandwidth": {"type": "float", "low": 0.05, "high": 0.2},
+    }
 
     def __init__(self, tickers=None, analyzers=None, **kwargs):
         # Initialize MACD indicator
