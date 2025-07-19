@@ -23,7 +23,11 @@ USAGE:
 """
 
 import ast
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import StringIO
 import os
+import sys
+import uuid
 import yfinance as yf
 import streamlit as st
 import pandas as pd
@@ -39,6 +43,11 @@ from comprehensive_backtesting.utils import DEFAULT_TICKERS
 from comprehensive_backtesting.walk_forward_analysis import (
     WalkForwardAnalysis,
     calculate_trade_statistics,
+)
+from intraday_stock_filter_nifty import (
+    process_ticker,
+    read_stocks_from_csv,
+    select_stocks_for_intraday,
 )
 
 matplotlib.use("Agg")
@@ -62,6 +71,217 @@ logger = logging.getLogger(__name__)
 
 # Set timezone for IST
 IST = pytz.timezone("Asia/Kolkata")
+
+
+def get_strategy_params(strategy_instance):
+    """Extract parameters from a strategy instance"""
+    try:
+        # For Backtrader strategies
+        if hasattr(strategy_instance, "params") and hasattr(
+            strategy_instance.params, "_getkwargs"
+        ):
+            return strategy_instance.params._getkwargs()
+        # For our custom strategies
+        elif hasattr(strategy_instance, "params"):
+            return strategy_instance.params
+        # For dictionary-based results (like walk-forward)
+        elif isinstance(strategy_instance, dict) and "params" in strategy_instance:
+            return strategy_instance["params"]
+        else:
+            return {}
+    except Exception as e:
+        logger.error(f"Error getting strategy params: {str(e)}")
+        return {}
+
+
+def generate_strategy_report(strategy_result, strategy_name, ticker, timeframe):
+    """Generate a report for a strategy if it meets criteria"""
+    try:
+        # Get parameters from the strategy
+        params = get_strategy_params(strategy_result)
+
+        # Initialize analyzer based on result type
+        if isinstance(strategy_result, dict):
+            report = strategy_result
+            summary = report.get("summary", {})
+            trade_analysis = report.get("trade_analysis", {})
+        else:
+            analyzer = PerformanceAnalyzer(strategy_result)
+            report = analyzer.generate_full_report()
+            summary = report.get("summary", {})
+            trade_analysis = report.get("trade_analysis", {})
+
+        total_trades = trade_analysis.get("total_trades", 0)
+        win_rate = trade_analysis.get("win_rate_percent", 0)
+
+        if total_trades > 10 and win_rate > 50:
+            params_str = ", ".join([f"{k}={v}" for k, v in params.items()])
+
+            # Get detailed trade analysis
+            detailed_trade_analysis = analyze_best_trades(strategy_result)
+            if "error" in detailed_trade_analysis:
+                logger.warning(
+                    f"Could not get detailed trade analysis: {detailed_trade_analysis['error']}"
+                )
+                detailed_trade_analysis = {}
+
+            return {
+                "Strategy": strategy_name,
+                "Ticker": ticker,
+                "Timeframe": timeframe,
+                "Total Trades": total_trades,
+                "Win Rate (%)": win_rate,
+                "Total Return (%)": summary.get("total_return_pct", 0),
+                "Sharpe Ratio": summary.get("sharpe_ratio", 0),
+                "Max Drawdown (%)": summary.get("max_drawdown_pct", 0),
+                "Profit Factor": trade_analysis.get("profit_factor", 0),
+                "Avg Trade Duration": trade_analysis.get("avg_trade_duration", 0),
+                "Best Trade Return (%)": trade_analysis.get("best_trade_return_pct", 0),
+                "Worst Trade Return (%)": trade_analysis.get(
+                    "worst_trade_return_pct", 0
+                ),
+                "Total P&L": detailed_trade_analysis.get("total_pnl", 0),
+                "Winning Trades": detailed_trade_analysis.get("winning_trades", 0),
+                "Losing Trades": detailed_trade_analysis.get("losing_trades", 0),
+                "Avg Winning Trade": detailed_trade_analysis.get(
+                    "avg_winning_trade", 0
+                ),
+                "Avg Losing Trade": detailed_trade_analysis.get("avg_losing_trade", 0),
+                "Best Trade P&L": detailed_trade_analysis.get("best_trade_pnl", 0),
+                "Worst Trade P&L": detailed_trade_analysis.get("worst_trade_pnl", 0),
+                "Avg Holding (Bars)": detailed_trade_analysis.get(
+                    "avg_holding_bars", 0
+                ),
+                "Avg Winning Hold (Bars)": detailed_trade_analysis.get(
+                    "avg_holding_won", 0
+                ),
+                "Avg Losing Hold (Bars)": detailed_trade_analysis.get(
+                    "avg_holding_lost", 0
+                ),
+                "Parameters": params_str,
+                "Params": params,
+                "Start Date": summary.get("start_date", ""),
+                "End Date": summary.get("end_date", ""),
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error generating strategy report: {str(e)}")
+        return None
+
+
+def display_best_strategies_report(strategy_reports, ticker, timeframe):
+    """Display and export best strategies report"""
+    if strategy_reports:
+        # Create DataFrame for display (without raw params dict)
+        display_df = pd.DataFrame(
+            [
+                {k: v for k, v in report.items() if k != "Params"}
+                for report in strategy_reports
+            ]
+        )
+
+        # Sort by Win Rate and Total Return for better visualization
+        display_df = display_df.sort_values(
+            by=["Win Rate (%)", "Total Return (%)"], ascending=False
+        )
+
+        # Create detailed DataFrame for export
+        export_df = pd.DataFrame(strategy_reports)
+        if "Params" in export_df.columns:
+            params_df = pd.json_normalize(export_df["Params"])
+            if not params_df.empty:
+                export_df = pd.concat(
+                    [export_df.drop(["Params"], axis=1), params_df], axis=1
+                )
+            else:
+                export_df = export_df.drop(["Params"], axis=1)
+
+        st.subheader(f"📊 Best Performing Strategies for {ticker} ({timeframe})")
+        st.write(
+            "Strategies with win rate > 50% and > 10 trades, sorted by Win Rate and Total Return"
+        )
+        st.dataframe(display_df, use_container_width=True)
+
+        # Create CSV and download button
+        uuid_str = str(uuid.uuid4())
+        csv = export_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Export Full Report (CSV)",
+            data=csv,
+            file_name=f"{ticker}_{timeframe}_best_strategies.csv",
+            mime="text/csv",
+            key=f"{uuid_str}_export_best_strategies",
+        )
+        # Display a chart of key metrics for top strategies using Plotly
+        if not display_df.empty:
+            st.write("### 📊 Strategy Performance Comparison")
+            chart_data = display_df[
+                [
+                    "Strategy",
+                    "Win Rate (%)",
+                    "Total Return (%)",
+                    "Sharpe Ratio",
+                    "Total P&L",
+                ]
+            ]
+
+            # Create a grouped bar chart with Plotly
+            fig = go.Figure(
+                data=[
+                    go.Bar(
+                        name="Win Rate (%)",
+                        x=chart_data["Strategy"],
+                        y=chart_data["Win Rate (%)"],
+                        marker_color="rgba(75, 192, 192, 0.6)",
+                        marker_line_color="rgba(75, 192, 192, 1)",
+                        marker_line_width=1,
+                    ),
+                    go.Bar(
+                        name="Total Return (%)",
+                        x=chart_data["Strategy"],
+                        y=chart_data["Total Return (%)"],
+                        marker_color="rgba(54, 162, 235, 0.6)",
+                        marker_line_color="rgba(54, 162, 235, 1)",
+                        marker_line_width=1,
+                    ),
+                    go.Bar(
+                        name="Sharpe Ratio",
+                        x=chart_data["Strategy"],
+                        y=chart_data["Sharpe Ratio"],
+                        marker_color="rgba(255, 99, 132, 0.6)",
+                        marker_line_color="rgba(255, 99, 132, 1)",
+                        marker_line_width=1,
+                    ),
+                    go.Bar(
+                        name="Total P&L",
+                        x=chart_data["Strategy"],
+                        y=chart_data["Total P&L"],
+                        marker_color="rgba(153, 102, 255, 0.6)",
+                        marker_line_color="rgba(153, 102, 255, 1)",
+                        marker_line_width=1,
+                    ),
+                ]
+            )
+
+            fig.update_layout(
+                barmode="group",
+                title=f"Performance Metrics for {ticker} ({timeframe})",
+                xaxis_title="Strategy",
+                yaxis_title="Value",
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5
+                ),
+                margin=dict(t=100),
+                template=(
+                    "plotly_dark" if st.get_option("theme.base") == "dark" else "plotly"
+                ),
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+        return display_df
+    else:
+        st.info("No strategies met the criteria (win rate > 50% and > 10 trades)")
+        return pd.DataFrame()
 
 
 def create_parameter_evolution_table(wf_results):
@@ -3450,7 +3670,13 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
     progress_bar.progress(100)
 
     # Walk-Forward Summary Visualization
-    st.subheader("📊 Walk-Forward Analysis Summary" + " " + ticker + " Using strategy: " + params["selected_strategy"])
+    st.subheader(
+        "📊 Walk-Forward Analysis Summary"
+        + " "
+        + ticker
+        + " Using strategy: "
+        + params["selected_strategy"]
+    )
 
     # Display overall summary statistics
     if summary_stats:
@@ -4495,27 +4721,82 @@ def display_complete_backtest_summary(results, ticker, timeframe):
 
 def complete_backtest(data, progress_bar, params, ticker):
     """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
-    # Run backtest
-    for strategy in params["selected_strategies"]:
-        data = data.copy()  # Ensure data is not modified in place
-        params = params.copy()  # Ensure params is not modified in place
-        results, params = run_complete_backtest_UI(data, params["n_trials"], ticker, params, strategy)
-        if not results:
-            st.error("Complete backtest failed")
-            return
+    strategy_reports = []
 
-        display_composite_results(results, data, ticker, params["timeframe"])
+    for strategy in params["selected_strategies"]:
+        data_copy = data.copy()
+        params_copy = params.copy()
+
+        # Run complete backtest
+        results = run_complete_backtest(
+            data=data_copy,
+            ticker=ticker,
+            start_date=params_copy["start_date"],
+            end_date=params_copy["end_date"],
+            strategy_class=strategy,
+            interval=params_copy["timeframe"],
+            n_trials=params_copy["n_trials"],
+        )
+
+        if not results:
+            st.error(f"Complete backtest failed for {strategy.__name__}")
+            continue
+
+        # Display results (existing visualizations)
+        display_composite_results(results, data_copy, ticker, params_copy["timeframe"])
         display_parameter_evolution(results, ticker)
         display_strategy_comparison(results, ticker)
         progress_bar.progress(60)
-        display_complete_backtest_summary(results, ticker, params["timeframe"])
-        display_basic_results(results, data, ticker)
+        display_complete_backtest_summary(results, ticker, params_copy["timeframe"])
+        display_basic_results(results, data_copy, ticker)
         progress_bar.progress(80)
-        display_optimized_results(results, data, ticker, params["timeframe"])
+        display_optimized_results(results, data_copy, ticker, params_copy["timeframe"])
         display_walkforward_results(
-            results, ticker, params["timeframe"], params, progress_bar
+            results, ticker, params_copy["timeframe"], params_copy, progress_bar
         )
-        progress_bar.progress(100)
+
+        # Generate reports for all strategy types
+        # 1. Basic strategy
+        if "basic" in results:
+            report = generate_strategy_report(
+                results["basic"],
+                f"Basic {strategy.__name__}",
+                ticker,
+                params_copy["timeframe"],
+            )
+            if report:
+                strategy_reports.append(report)
+
+        # 2. Optimized strategy
+        if "optimization" in results and "results" in results["optimization"]:
+            report = generate_strategy_report(
+                results["optimization"]["results"],
+                f"Optimized {strategy.__name__}",
+                ticker,
+                params_copy["timeframe"],
+            )
+            if report:
+                strategy_reports.append(report)
+
+        # 3. Walk-forward windows
+        if "walk_forward" in results and "windows" in results["walk_forward"]:
+            for i, window in enumerate(results["walk_forward"]["windows"]):
+                if window.get("valid") and "out_sample_performance" in window:
+                    report = generate_strategy_report(
+                        window["out_sample_performance"],
+                        f"WF {strategy.__name__} Window {i+1}",
+                        ticker,
+                        params_copy["timeframe"],
+                    )
+                    if report:
+                        strategy_reports.append(report)
+
+        progress_bar.progress(90)
+
+    # Display consolidated report for all strategies
+    st.subheader("📊 Complete Backtest - Best Strategies Report")
+    display_best_strategies_report(strategy_reports, ticker, params["timeframe"])
+    progress_bar.progress(100)
 
 
 def setup_page_config():
@@ -4689,9 +4970,7 @@ def render_sidebar():
     strategy_names = list(STRATEGY_REGISTRY.keys())
     strategy_options = ["Select All"] + strategy_names
     selected_strategy = st.sidebar.multiselect(
-        "Select Strategy", 
-        strategy_options, 
-        default=["Select All"]
+        "Select Strategy", strategy_options, default=["Select All"]
     )
     if "Select All" in selected_strategy:
         selected_strategy = strategy_names
@@ -4846,10 +5125,15 @@ def run_backtest_analysis(
     status_text.text("Running backtest...")
     data = data.copy()  # Ensure we don't modify the original data
     ticker = ticker  # Ensure we don't modify the original ticker
-    start_date=params["start_date"].strftime("%Y-%m-%d")
-    end_date=params["end_date"].strftime("%Y-%m-%d")
-    interval=params["timeframe"]
-    for strategy in params["selected_strategy"]:
+    start_date = params["start_date"].strftime("%Y-%m-%d")
+    end_date = params["end_date"].strftime("%Y-%m-%d")
+    interval = params["timeframe"]
+    stratgies_length = len(params["selected_strategy"])
+    # Collect all strategy reports
+    strategy_reports = []
+    for idx, strategy in enumerate(params["selected_strategy"]):
+        progress_bar.progress(int((idx / stratgies_length) * 100))
+
         results, cerebro = run_basic_backtest(
             data=data,
             strategy_class=strategy,
@@ -4858,70 +5142,37 @@ def run_backtest_analysis(
             end_date=end_date,
             interval=interval,
         )
-        progress_bar.progress(100)
-        status_text.text("Backtest complete!")
-        st.toast("Backtesting complete")
 
         # Initialize PerformanceAnalyzer with results
         analyzer = PerformanceAnalyzer(results[0])
         report = analyzer.generate_full_report()
-        # Display report as table instead of JSON
-        print("Backtest Report:", ticker)
-        st.write("### Backtest Results Summary " + " " + ticker + " Using Strategy: " + strategy)
+        # Generate strategy report
+        strategy_report = generate_strategy_report(
+            results, strategy, ticker, interval  # Use strategy class name
+        )
+        if strategy_report:
+            strategy_reports.append(strategy_report)
+
+        # Display individual strategy results
+        st.write(
+            f"### Backtest Results Summary for {ticker} Using Strategy: {strategy}"
+        )
         summary_table = create_summary_table(report)
-        st.table(summary_table)  # Changed to st.table
-
-        # Export summary table
-        # if st.button("Export Summary Table"):
-        #     csv_data = summary_table.to_csv(index=False)
-        #     st.download_button(
-        #         label="Download Summary as CSV",
-        #         data=csv_data,
-        #         file_name=f"{params['ticker']}_backtest_summary.csv",
-        #         mime="text/csv",
-        #     )
-
-        # Enhanced Candlestick Chart with Technical Indicators
-        # st.write("### 📈 Enhanced Chart with Technical Indicators & Trades")
-        # plotly_fig = create_candlestick_chart_with_trades(data, results)
-        # if plotly_fig:
-        #     st.plotly_chart(plotly_fig, use_container_width=True)
-        # Export plot
-        # if st.button("Export Enhanced Chart"):
-        #     buf = BytesIO()
-        #     plotly_fig.write_image(buf, format="png")
-        #     st.download_button(
-        #         label="Download Enhanced Chart as PNG",
-        #         data=buf.getvalue(),
-        #         file_name=f"{params['ticker']}_enhanced_backtest_chart.png",
-        #         mime="image/png",
-        #     )
-        # else:
-        #     st.warning("Could not generate chart")
+        st.table(summary_table)
 
         # Dynamic Technical Indicators Table
         st.write("### 📊 Technical Indicators - Latest Values")
-        strategy = get_strategy(results)
-        indicators_df = create_dynamic_indicators_table(data, strategy)
+        strategy_instance = get_strategy(results)
+        indicators_df = create_dynamic_indicators_table(data, strategy_instance)
         if not indicators_df.empty:
             st.dataframe(indicators_df, use_container_width=True)
 
-            # # Export indicators table
-            # csv_data = indicators_df.to_csv(index=False)
-            # st.download_button(
-            #     label="Download Indicators Table as CSV",
-            #     data=csv_data,
-            #     file_name=f"{params['ticker']}_indicators_table.csv",
-            #     mime="text/csv",
-            # )
-
             # Show detected indicators summary
-            detected_indicators = detect_strategy_indicators(strategy)
+            detected_indicators = detect_strategy_indicators(strategy_instance)
             if detected_indicators:
                 st.write("**🔍 Detected Strategy Indicators:**")
                 indicator_summary = []
                 for name, info in detected_indicators.items():
-                    # Filter out non-user-friendly params
                     params = info.get("params", {})
                     user_params = {
                         k: v
@@ -4933,12 +5184,11 @@ def run_backtest_analysis(
                             or "method" in str(type(v)).lower()
                         )
                     }
-                    if user_params:
-                        params_str = ", ".join(
-                            [f"{k} = {v}" for k, v in user_params.items()]
-                        )
-                    else:
-                        params_str = "No parameters"
+                    params_str = (
+                        ", ".join([f"{k} = {v}" for k, v in user_params.items()])
+                        if user_params
+                        else "No parameters"
+                    )
                     indicator_summary.append(
                         f"- **{info['type']}** (`{name}`): {params_str}"
                     )
@@ -4955,7 +5205,7 @@ def run_backtest_analysis(
             if trades_error:
                 st.warning(f"Could not create trades table: {trades_error}")
             elif not trades_df.empty:
-                # Apply styling to highlight entry and exit indicators
+
                 def highlight_columns(col):
                     if "Entry" in col:
                         return ["background-color: #e8f5e9"] * len(col)
@@ -4965,15 +5215,6 @@ def run_backtest_analysis(
 
                 styled_trades = trades_df.style.apply(highlight_columns, axis=0)
                 st.dataframe(styled_trades, use_container_width=True)
-
-                # Export trades table
-                # csv_data = trades_df.to_csv(index=False)
-                # st.download_button(
-                #     label="Download Trades Table as CSV",
-                #     data=csv_data,
-                #     file_name=f"{ticker}_trades_table.csv",
-                #     mime="text/csv",
-                # )
             else:
                 st.info("No trades executed during the backtest period.")
         except Exception as e:
@@ -4985,11 +5226,9 @@ def run_backtest_analysis(
         best_trades_analysis = analyze_best_trades(results)
         if "error" not in best_trades_analysis:
             col1, col2, col3, col4 = st.columns(4)
-
             with col1:
                 st.metric("Total Trades", best_trades_analysis["total_trades"])
                 st.metric("Winning Trades", best_trades_analysis["winning_trades"])
-
             with col2:
                 win_rate = (
                     (
@@ -5002,14 +5241,9 @@ def run_backtest_analysis(
                 )
                 st.metric("Win Rate", f"{win_rate:.1f}%")
                 st.metric("Losing Trades", best_trades_analysis["losing_trades"])
-
             with col3:
                 st.metric("Total P&L", f"{best_trades_analysis['total_pnl']:.2f}")
-                st.metric(
-                    "Best Trade",
-                    f"{best_trades_analysis['best_trade_pnl']:.2f}",
-                )
-
+                st.metric("Best Trade", f"{best_trades_analysis['best_trade_pnl']:.2f}")
             with col4:
                 st.metric(
                     "Avg Winning Trade",
@@ -5025,23 +5259,19 @@ def run_backtest_analysis(
         time_analysis = analyze_best_time_ranges(results)
         if "error" not in time_analysis:
             hours_df, days_df, months_df = create_best_times_table(time_analysis)
-
             col1, col2, col3 = st.columns(3)
-
             with col1:
                 st.write("**🕐 Best Hours to Trade**")
                 if hours_df is not None and not hours_df.empty:
                     st.dataframe(hours_df, use_container_width=True)
                 else:
                     st.info("No hourly data available")
-
             with col2:
                 st.write("**📅 Best Days to Trade**")
                 if days_df is not None and not days_df.empty:
                     st.dataframe(days_df, use_container_width=True)
                 else:
                     st.info("No daily data available")
-
             with col3:
                 st.write("**📆 Best Months to Trade**")
                 if months_df is not None and not months_df.empty:
@@ -5049,7 +5279,6 @@ def run_backtest_analysis(
                 else:
                     st.info("No monthly data available")
 
-            # Time Analysis Chart
             st.write("### 📊 Trading Time Analysis")
             time_chart = plot_time_analysis(time_analysis)
             if time_chart:
@@ -5059,15 +5288,13 @@ def run_backtest_analysis(
                 f"Could not analyze best times: {time_analysis.get('error', 'Unknown error')}"
             )
 
-        # Export option
-        # if st.button("Export Full Backtest Report"):
-        #     report_json = json.dumps(report, indent=2, default=str)
-        #     st.download_button(
-        #         label="Download Full Report as JSON",
-        #         data=report_json,
-        #         file_name=f"{params['ticker']}_backtest_report.json",
-        #         mime="application/json",
-        #     )
+    # Update progress to 100% and show completion
+    progress_bar.progress(100)
+    status_text.text("Backtest complete!")
+    st.toast("Backtesting complete")
+
+    # Display best strategies report after all strategies are processed
+    display_best_strategies_report(strategy_reports, ticker, interval)
 
 
 def run_optimization_analysis(
@@ -5077,10 +5304,10 @@ def run_optimization_analysis(
     status_text.text("Starting optimization...")
     data = data.copy()  # Ensure we don't modify the original data
     ticker = ticker  # Ensure we don't modify the original ticker
-    start_date=params["start_date"].strftime("%Y-%m-%d")
-    end_date=params["end_date"].strftime("%Y-%m-%d")
-    interval=params["timeframe"]
-    n_trials=params["n_trials"]
+    start_date = params["start_date"].strftime("%Y-%m-%d")
+    end_date = params["end_date"].strftime("%Y-%m-%d")
+    interval = params["timeframe"]
+    n_trials = params["n_trials"]
 
     for strategy in params["selected_strategy"]:
         results = run_parameter_optimization(
@@ -5108,7 +5335,13 @@ def run_optimization_analysis(
         report = analyzer.generate_full_report()
 
         # Display report as table instead of JSON
-        st.write("### Optimization Results Summary" + " " + ticker + " Using Strategy: " + strategy)
+        st.write(
+            "### Optimization Results Summary"
+            + " "
+            + ticker
+            + " Using Strategy: "
+            + strategy
+        )
         summary_table = create_summary_table(report)
         st.table(summary_table)  # Changed to st.table
 
@@ -5183,7 +5416,9 @@ def run_optimization_analysis(
                         )
                     }
                     if user_params:
-                        params_str = ", ".join([f"{k}={v}" for k, v in user_params.items()])
+                        params_str = ", ".join(
+                            [f"{k}={v}" for k, v in user_params.items()]
+                        )
                     else:
                         params_str = "No parameters"
                     opt_indicator_summary.append(
@@ -5232,9 +5467,13 @@ def run_optimization_analysis(
         # Comprehensive Trades Table for Optimized Strategy
         st.write("### 📊 Optimized Strategy - Detailed Trades Table")
         try:
-            opt_trades_df, opt_trades_error = create_trades_table(results["results"], data)
+            opt_trades_df, opt_trades_error = create_trades_table(
+                results["results"], data
+            )
             if opt_trades_error:
-                st.warning(f"Could not create optimized trades table: {opt_trades_error}")
+                st.warning(
+                    f"Could not create optimized trades table: {opt_trades_error}"
+                )
             elif not opt_trades_df.empty:
                 # Apply styling to highlight entry and exit indicators
                 def highlight_columns(col):
@@ -5351,6 +5590,21 @@ def run_optimization_analysis(
         #         mime="application/json",
         #     )
 
+        strategy_reports = []
+        report = generate_strategy_report(
+            results["results"],
+            "Optimized Strategy",
+            params["ticker"],
+            params["timeframe"],
+        )
+        if report:
+            strategy_reports.append(report)
+
+        # Display the report
+        display_best_strategies_report(
+            strategy_reports, params["ticker"], params["timeframe"]
+        )
+
 
 def display_parameter_optimization_results(results, progress_bar, status_text):
     """Display parameter optimization results when walk-forward fails"""
@@ -5387,7 +5641,6 @@ def run_walkforward_analysis(
     status_text.text("Starting walk-forward analysis...")
     data = data.copy()  # Ensure we don't modify the original data
     ticker = ticker  # Ensure we don't modify the original ticker
-
 
     for strategy in params["selected_strategy"]:
         from comprehensive_backtesting.registry import get_strategy
@@ -5449,7 +5702,13 @@ def run_walkforward_analysis(
             return
 
         # Walk-Forward Summary Visualization
-        st.subheader("📊 Walk-Forward Analysis Summary" + " " + ticker  + "Using strategy: "+ strategy)
+        st.subheader(
+            "📊 Walk-Forward Analysis Summary"
+            + " "
+            + ticker
+            + "Using strategy: "
+            + strategy
+        )
 
         # 1. Parameter evolution table
         st.write("### ⚙️ Parameter Evolution Across Windows")
@@ -5469,7 +5728,9 @@ def run_walkforward_analysis(
             )
 
             # Create display DataFrame without the raw best_params column
-            display_df = param_evolution_df.drop(columns=["best_params"], errors="ignore")
+            display_df = param_evolution_df.drop(
+                columns=["best_params"], errors="ignore"
+            )
 
             # Highlight best return in each window and format as percent
             styled_df = display_df.style.highlight_max(
@@ -5494,7 +5755,10 @@ def run_walkforward_analysis(
 
         col1, col2 = st.columns(2)
         with col1:
-            if hasattr(wf, "all_in_sample_equity") and not wf.all_in_sample_equity.empty:
+            if (
+                hasattr(wf, "all_in_sample_equity")
+                and not wf.all_in_sample_equity.empty
+            ):
                 fig = go.Figure()
                 for column in wf.all_in_sample_equity.columns:
                     fig.add_trace(
@@ -5518,7 +5782,10 @@ def run_walkforward_analysis(
                 st.info("No in-sample equity curve data available")
 
         with col2:
-            if hasattr(wf, "all_out_sample_equity") and not wf.all_out_sample_equity.empty:
+            if (
+                hasattr(wf, "all_out_sample_equity")
+                and not wf.all_out_sample_equity.empty
+            ):
                 fig = go.Figure()
                 for column in wf.all_out_sample_equity.columns:
                     fig.add_trace(
@@ -5561,7 +5828,9 @@ def run_walkforward_analysis(
                 # Calculate monthly P&L
                 monthly_pnl = df.groupby("month")["pnl_net"].sum().reset_index()
                 monthly_pnl["month"] = monthly_pnl["month"].dt.to_timestamp()
-                monthly_pnl["return_pct"] = (monthly_pnl["pnl_net"] / initial_cash) * 100
+                monthly_pnl["return_pct"] = (
+                    monthly_pnl["pnl_net"] / initial_cash
+                ) * 100
 
                 return monthly_pnl
             except Exception as e:
@@ -5614,9 +5883,9 @@ def run_walkforward_analysis(
                 if not in_sample_monthly.empty:
                     st.write("**In-Sample Monthly Returns**")
                     st.dataframe(
-                        in_sample_monthly.set_index("month")[["return_pct"]].style.format(
-                            {"return_pct": "{:.2f}%"}
-                        ),
+                        in_sample_monthly.set_index("month")[
+                            ["return_pct"]
+                        ].style.format({"return_pct": "{:.2f}%"}),
                         use_container_width=True,
                     )
                 else:
@@ -5626,9 +5895,9 @@ def run_walkforward_analysis(
                 if not out_sample_monthly.empty:
                     st.write("**Out-of-Sample Monthly Returns**")
                     st.dataframe(
-                        out_sample_monthly.set_index("month")[["return_pct"]].style.format(
-                            {"return_pct": "{:.2f}%"}
-                        ),
+                        out_sample_monthly.set_index("month")[
+                            ["return_pct"]
+                        ].style.format({"return_pct": "{:.2f}%"}),
                         use_container_width=True,
                     )
                 else:
@@ -5716,9 +5985,12 @@ def run_walkforward_analysis(
                         except Exception:
                             return str(val) + suffix
 
-                    st.metric("Return", safe_metric(metrics.get("total_return"), "{:.2f}"))
                     st.metric(
-                        "Sharpe Ratio", safe_metric(metrics.get("sharpe_ratio"), "{:.2f}")
+                        "Return", safe_metric(metrics.get("total_return"), "{:.2f}")
+                    )
+                    st.metric(
+                        "Sharpe Ratio",
+                        safe_metric(metrics.get("sharpe_ratio"), "{:.2f}"),
                     )
                     st.metric(
                         "Max Drawdown",
@@ -5727,28 +5999,40 @@ def run_walkforward_analysis(
 
                 # Trade Statistics Summary
                 in_sample_stats = calculate_trade_statistics(result["in_sample_trades"])
-                out_sample_stats = calculate_trade_statistics(result["out_sample_trades"])
+                out_sample_stats = calculate_trade_statistics(
+                    result["out_sample_trades"]
+                )
 
                 st.write("### 📊 Trade Statistics")
                 col1, col2 = st.columns(2)
                 with col1:
                     st.write("**In-Sample**")
                     st.metric("Total Trades", in_sample_stats.get("total_trades", 0))
-                    st.metric("Win Rate", f"{in_sample_stats.get('win_rate', 0)*100:.1f}%")
-                    st.metric("Net Profit", f"{in_sample_stats.get('net_profit', 0):.2f}")
+                    st.metric(
+                        "Win Rate", f"{in_sample_stats.get('win_rate', 0)*100:.1f}%"
+                    )
+                    st.metric(
+                        "Net Profit", f"{in_sample_stats.get('net_profit', 0):.2f}"
+                    )
                     st.metric("Avg Win", f"{in_sample_stats.get('avg_win', 0):.2f}")
                     st.metric(
-                        "Profit Factor", f"{in_sample_stats.get('profit_factor', 0):.2f}"
+                        "Profit Factor",
+                        f"{in_sample_stats.get('profit_factor', 0):.2f}",
                     )
 
                 with col2:
                     st.write("**Out-of-Sample**")
                     st.metric("Total Trades", out_sample_stats.get("total_trades", 0))
-                    st.metric("Win Rate", f"{out_sample_stats.get('win_rate', 0)*100:.1f}%")
-                    st.metric("Net Profit", f"{out_sample_stats.get('net_profit', 0):.2f}")
+                    st.metric(
+                        "Win Rate", f"{out_sample_stats.get('win_rate', 0)*100:.1f}%"
+                    )
+                    st.metric(
+                        "Net Profit", f"{out_sample_stats.get('net_profit', 0):.2f}"
+                    )
                     st.metric("Avg Win", f"{out_sample_stats.get('avg_win', 0):.2f}")
                     st.metric(
-                        "Profit Factor", f"{out_sample_stats.get('profit_factor', 0):.2f}"
+                        "Profit Factor",
+                        f"{out_sample_stats.get('profit_factor', 0):.2f}",
                     )
 
                 # Equity curve for this window
@@ -5878,7 +6162,9 @@ def run_walkforward_analysis(
                             ]
                             for col in datetime_cols:
                                 if pd.api.types.is_datetime64_any_dtype(df_in[col]):
-                                    df_in[col] = df_in[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+                                    df_in[col] = df_in[col].dt.strftime(
+                                        "%Y-%m-%d %H:%M:%S"
+                                    )
 
                             # Format numeric columns
                             num_cols = [
@@ -5892,7 +6178,9 @@ def run_walkforward_analysis(
                                 if col in df_in.columns:
                                     df_in[col] = df_in[col].apply(
                                         lambda x: (
-                                            f"{x:.4f}" if isinstance(x, (int, float)) else x
+                                            f"{x:.4f}"
+                                            if isinstance(x, (int, float))
+                                            else x
                                         )
                                     )
 
@@ -5941,13 +6229,17 @@ def run_walkforward_analysis(
                                 if col in df_out.columns:
                                     df_out[col] = df_out[col].apply(
                                         lambda x: (
-                                            f"{x:.4f}" if isinstance(x, (int, float)) else x
+                                            f"{x:.4f}"
+                                            if isinstance(x, (int, float))
+                                            else x
                                         )
                                     )
 
                             st.dataframe(
                                 df_out,
-                                height=min(400, 35 * len(df_out) + 35),  # Dynamic height
+                                height=min(
+                                    400, 35 * len(df_out) + 35
+                                ),  # Dynamic height
                                 use_container_width=True,
                             )
 
@@ -5972,10 +6264,14 @@ def run_walkforward_analysis(
             st.metric(
                 "In-Sample Avg Return", f"{overall['in_sample_return_avg_return']:.4f}"
             )
-            st.metric("Out-Sample Avg Return", f"{overall['out_sample_avg_return']:.4f}")
+            st.metric(
+                "Out-Sample Avg Return", f"{overall['out_sample_avg_return']:.4f}"
+            )
         with col2:
             if overall["in_sample_avg_sharpe"] is not None:
-                st.metric("In-Sample Avg Sharpe", f"{overall['in_sample_avg_sharpe']:.4f}")
+                st.metric(
+                    "In-Sample Avg Sharpe", f"{overall['in_sample_avg_sharpe']:.4f}"
+                )
             if overall["out_sample_avg_sharpe"] is not None:
                 st.metric(
                     "Out-Sample Avg Sharpe", f"{overall['out_sample_avg_sharpe']:.4f}"
@@ -6006,7 +6302,9 @@ def run_walkforward_analysis(
 
         with col2:
             if all_out_sample:
-                csv_out = pd.DataFrame(all_out_sample).to_csv(index=False).encode("utf-8")
+                csv_out = (
+                    pd.DataFrame(all_out_sample).to_csv(index=False).encode("utf-8")
+                )
                 # st.download_button(
                 #     label="Download All Out-Sample Trades",
                 #     data=csv_out,
@@ -6022,10 +6320,14 @@ def run_walkforward_analysis(
                 monthly_returns = pd.DataFrame()
                 if not in_sample_monthly.empty:
                     monthly_returns["in_sample_month"] = in_sample_monthly["month"]
-                    monthly_returns["in_sample_return"] = in_sample_monthly["return_pct"]
+                    monthly_returns["in_sample_return"] = in_sample_monthly[
+                        "return_pct"
+                    ]
                 if not out_sample_monthly.empty:
                     monthly_returns["out_sample_month"] = out_sample_monthly["month"]
-                    monthly_returns["out_sample_return"] = out_sample_monthly["return_pct"]
+                    monthly_returns["out_sample_return"] = out_sample_monthly[
+                        "return_pct"
+                    ]
 
                 csv_monthly = monthly_returns.to_csv(index=False).encode("utf-8")
                 # st.download_button(
@@ -6036,7 +6338,22 @@ def run_walkforward_analysis(
                 # )
             else:
                 st.info("No monthly returns")
+        strategy_reports = []
+        for i, window in enumerate(wf["windows"]):
+            if window.get("valid") and "out_sample_performance" in window:
+                report = generate_strategy_report(
+                    window["out_sample_performance"],
+                    f"Walk-Forward Window {i+1}",
+                    params["ticker"],
+                    params["timeframe"],
+                )
+                if report:
+                    strategy_reports.append(report)
 
+        # Display the report
+        display_best_strategies_report(
+            strategy_reports, params["ticker"], params["timeframe"]
+        )
         progress_bar.progress(100)
         status_text.text("Walk-forward analysis complete!")
         st.toast("Walk-forward analysis complete")
@@ -6126,6 +6443,298 @@ def run_analysis(params):
         status_text.text("Analysis failed.")
 
 
+def run_filter_backtest(params):
+    """Run the filter and backtest based on user parameters."""
+    progress_bar = st.progress(0)
+    status_text = st.text("Starting stock selection and backtest...")
+
+    # Container for capturing print outputs
+    output_container = st.empty()
+
+    # Capture print outputs
+    old_stdout = sys.stdout
+    sys.stdout = mystdout = StringIO()
+
+    try:
+        # Integrate select_stocks_for_intraday
+        selected_stocks = select_stocks_for_intraday_ui(
+            csv_file="ind_nifty50list.csv",
+            output_container=output_container,
+            progress_bar=progress_bar,
+            status_text=status_text,
+        )
+
+        # Restore stdout
+        sys.stdout = old_stdout
+
+        # Display captured console output
+        output_container.text(mystdout.getvalue())
+
+        if not selected_stocks:
+            progress_bar.progress(0)
+            st.error("No stocks selected for intraday trading.")
+            return
+
+        # Display selected stocks in a table
+        if selected_stocks:
+            st.subheader("Selected Stocks for Intraday Trading")
+            df = pd.DataFrame(selected_stocks)
+            column_order = [
+                "Stock",
+                "Signal",
+                "Recommendation",
+                "Recommendation Score",
+                "Current Price",
+                "Daily Range %",
+                "ATR %",
+                "Avg Volume",
+                "Relative Volume",
+                "RSI",
+            ]
+            df = df[column_order]
+            st.dataframe(df)
+            st.success(f"Total Selected Stocks: {len(selected_stocks)}")
+
+        progress_bar.progress(20)
+        status_text.text("Stocks selected for intraday trading.")
+
+        progress_bar.progress(30)
+        status_text.text("Fetching data for backtest...")
+
+        for ticker in selected_stocks:
+            ticker = ticker["Stock"].strip() + ".NS"
+            if not ticker:
+                st.sidebar.error("Ticker cannot be empty.")
+                return
+
+            # Fetch data
+            data = get_data_sync(
+                ticker,
+                params["start_date"],
+                params["end_date"],
+                interval=params["timeframe"],
+            )
+
+            # Validate data
+            if data.empty:
+                st.error(f"No data available for {ticker} in the selected date range.")
+                progress_bar.progress(0)
+                status_text.text("Analysis failed - no data")
+                return
+
+            required_columns = ["Open", "High", "Low", "Close", "Volume"]
+            if not all(col in data.columns for col in required_columns):
+                missing = [col for col in required_columns if col not in data.columns]
+                st.error(f"Missing required columns for {ticker}: {', '.join(missing)}")
+                progress_bar.progress(0)
+                status_text.text("Analysis failed - invalid data")
+                return
+
+            progress_bar.progress(40)
+            status_text.text(f"Preparing analyzers for {ticker}...")
+
+            # Prepare analyzer configuration
+            analyzer_config = [
+                (params["available_analyzers"][name], {"_name": name.lower()})
+                for name in params["selected_analyzers"]
+            ]
+
+            # Run analysis based on type
+            if params["analysis_type"] == "Backtest":
+                progress_bar.progress(50)
+                status_text.text(f"Running Backtest for {ticker}...")
+                run_backtest_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+
+        progress_bar.progress(100)
+        status_text.text("Filter and backtest complete!")
+        st.toast("Filter and backtest complete")
+
+    finally:
+        sys.stdout = old_stdout
+
+
+def select_stocks_for_intraday_ui(
+    csv_file="ind_nifty500list.csv",
+    output_container=None,
+    progress_bar=None,
+    status_text=None,
+):
+    """Modified select_stocks_for_intraday to update Streamlit UI."""
+    print("🚀 Starting stock selection for intraday trading...")
+    print(f"📅 Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    if output_container:
+        output_container.text("Starting stock selection for intraday trading...")
+
+    validated_csv = "validated_nifty500_tickers.csv"
+    if os.path.exists(validated_csv):
+        csv_file = validated_csv
+        print(f"📂 Using validated tickers from '{csv_file}'")
+    else:
+        print(f"📂 Validated CSV not found, using '{csv_file}'")
+
+    tickers = read_stocks_from_csv(csv_file)
+    if not tickers:
+        print("❌ No stock tickers found. Exiting...")
+        if output_container:
+            output_container.text("No stock tickers found.")
+        return []
+
+    print(f"\n🔍 Analyzing {len(tickers)} stocks with parallel processing...")
+    if status_text:
+        status_text.text(f"Analyzing {len(tickers)} stocks...")
+
+    selected_stocks = []
+    processed_count = 0
+    selected_count = 0
+    buy_signals = 0
+    sell_signals = 0
+    signal_priority = {"BUY": 1, "SELL": 2, "NEUTRAL": 3}
+
+    def progress_callback(ticker, selected, status):
+        nonlocal processed_count, selected_count, buy_signals, sell_signals
+        processed_count += 1
+
+        if selected:
+            selected_count += 1
+            if status == "BUY":
+                buy_signals += 1
+            elif status == "SELL":
+                sell_signals += 1
+
+        if processed_count % 10 == 0 or processed_count == len(tickers):
+            progress_pct = (processed_count / len(tickers)) * 100
+            progress_msg = (
+                f"Progress: {processed_count}/{len(tickers)} ({progress_pct:.1f}%) | "
+                f"Selected: {selected_count} | 🟢 BUY: {buy_signals} | 🔴 SELL: {sell_signals}"
+            )
+            print(progress_msg)
+            if progress_bar:
+                progress_bar.progress(int(progress_pct))
+            if output_container:
+                output_container.text(progress_msg)
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(process_ticker, ticker, progress_callback): ticker
+            for ticker in tickers
+        }
+
+        for future in as_completed(futures):
+            ticker = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    selected_stocks.append(result)
+            except Exception as e:
+                print(f"\n❌ Error processing {ticker}: {e}")
+                if output_container:
+                    output_container.text(f"Error processing {ticker}: {e}")
+
+    selected_stocks.sort(
+        key=lambda x: (-x["Recommendation Score"], signal_priority.get(x["Signal"], 3))
+    )
+
+    if selected_stocks:
+        print("\n" + "=" * 140)
+        print("🎯 SELECTED STOCKS FOR INTRADAY TRADING (BUY/SELL SIGNALS ONLY)")
+        print("=" * 140)
+        print(
+            f"{'No':<3} {'Stock':<10} {'Signal':<6} {'Recommendation':<16} {'Score':<5} {'Price':<8} {'Range%':<7} {'ATR%':<6} {'Volume':<10} {'RelVol':<6} {'RSI':<5}"
+        )
+        print("-" * 140)
+
+        for i, stock in enumerate(selected_stocks, 1):
+            signal_color = "🟢" if stock["Signal"] == "BUY" else "🔴"
+            print(
+                f"{i:<3} {stock['Stock']:<10} {signal_color}{stock['Signal']:<5} "
+                f"{stock['Recommendation']:<16} {stock['Recommendation Score']:<5} "
+                f"₹{stock['Current Price']:<7.2f} {stock['Daily Range %']:<6.2f}% "
+                f"{stock['ATR %']:<5.2f}% {stock['Avg Volume']:>9,} "
+                f"{stock['Relative Volume']:<5.2f} {stock['RSI'] or 'N/A':<5}"
+            )
+
+        buy_count = sum(1 for stock in selected_stocks if stock["Signal"] == "BUY")
+        sell_count = sum(1 for stock in selected_stocks if stock["Signal"] == "SELL")
+
+        strong_buy = sum(
+            1 for stock in selected_stocks if "STRONG BUY" in stock["Recommendation"]
+        )
+        strong_sell = sum(
+            1 for stock in selected_stocks if "STRONG SELL" in stock["Recommendation"]
+        )
+        good_buy = sum(
+            1 for stock in selected_stocks if "GOOD BUY" in stock["Recommendation"]
+        )
+        good_sell = sum(
+            1 for stock in selected_stocks if "GOOD SELL" in stock["Recommendation"]
+        )
+
+        print("\n" + "=" * 140)
+        print("📈 SIGNAL SUMMARY:")
+        print(
+            f"🟢 BUY Signals: {buy_count} (🔥 Strong: {strong_buy}, ⭐ Good: {good_buy})"
+        )
+        print(
+            f"🔴 SELL Signals: {sell_count} (🔥 Strong: {strong_sell}, ⭐ Good: {good_sell})"
+        )
+        print(f"📊 Total Selected: {len(selected_stocks)} stocks")
+        print(f"🎯 Success Rate: {(len(selected_stocks)/len(tickers)*100):.1f}%")
+
+        if len(selected_stocks) > 0:
+            print(f"\n🏆 TOP 5 RECOMMENDATIONS:")
+            for i, stock in enumerate(selected_stocks[:5], 1):
+                signal_emoji = "🟢" if stock["Signal"] == "BUY" else "🔴"
+                print(
+                    f"{i}. {stock['Stock']} - {stock['Recommendation']} (Score: {stock['Recommendation Score']}) {signal_emoji}"
+                )
+
+        print("=" * 140)
+
+        df = pd.DataFrame(selected_stocks)
+        column_order = [
+            "Stock",
+            "Signal",
+            "Recommendation",
+            "Recommendation Score",
+            "Current Price",
+            "Daily Range %",
+            "ATR %",
+            "Avg Volume",
+            "Relative Volume",
+            "Momentum %",
+            "RSI",
+            "MA5",
+            "MA20",
+            "Signal Strength",
+        ]
+        df = df[column_order]
+        df.to_csv("selected_stocks_with_recommendations.csv", index=False)
+        print("💾 Results saved to 'selected_stocks_with_recommendations.csv'")
+
+        if status_text:
+            status_text.text("Stock selection complete!")
+
+    else:
+        print("\n" + "=" * 80)
+        print("🎯 SELECTED STOCKS FOR INTRADAY TRADING")
+        print("=" * 80)
+        print("❌ No stocks with BUY/SELL signals meet the criteria.")
+        print("\n💡 Try adjusting the filtering criteria:")
+        print("- Lower the minimum daily range requirement")
+        print("- Reduce the minimum volume requirement")
+        print("- Adjust the price range filters")
+        print("- Check market conditions (trending vs sideways)")
+        if output_container:
+            output_container.text("No stocks with BUY/SELL signals meet the criteria.")
+        if status_text:
+            status_text.text("No stocks selected.")
+
+    return selected_stocks
+
+
 def main():
     """Main application function."""
     setup_page_config()
@@ -6138,6 +6747,9 @@ def main():
     # Add run button
     if st.sidebar.button("Run Analysis"):
         run_analysis(params)
+    # Add filter and Run Backtest button
+    if st.sidebar.button("Filter Stocks and Backtest"):
+        run_filter_backtest(params)
 
 
 if __name__ == "__main__":

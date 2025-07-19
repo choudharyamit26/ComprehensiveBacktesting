@@ -722,7 +722,7 @@ def select_stocks_for_intraday(csv_file="ind_nifty500list.csv"):
         df = df[column_order]
         df.to_csv("selected_stocks_with_recommendations.csv", index=False)
         print("💾 Results saved to 'selected_stocks_with_recommendations.csv'")
-
+        return selected_stocks
     else:
         print("\n" + "=" * 80)
         print("🎯 SELECTED STOCKS FOR INTRADAY TRADING")
