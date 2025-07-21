@@ -28,7 +28,6 @@ from io import StringIO
 import os
 import sys
 import uuid
-import yfinance as yf
 import streamlit as st
 import pandas as pd
 import plotly.graph_objs as go
@@ -47,7 +46,6 @@ from comprehensive_backtesting.walk_forward_analysis import (
 from intraday_stock_filter_nifty import (
     process_ticker,
     read_stocks_from_csv,
-    select_stocks_for_intraday,
 )
 
 matplotlib.use("Agg")
@@ -58,6 +56,8 @@ from comprehensive_backtesting.registry import STRATEGY_REGISTRY
 from comprehensive_backtesting.data import get_data_sync
 from comprehensive_backtesting.reports import PerformanceAnalyzer
 import numpy as np
+from collections import defaultdict
+
 from comprehensive_backtesting.backtesting import (
     run_basic_backtest,
     run_complete_backtest,
@@ -71,6 +71,150 @@ logger = logging.getLogger(__name__)
 
 # Set timezone for IST
 IST = pytz.timezone("Asia/Kolkata")
+
+
+STRATEGY_RESULTS = defaultdict(
+    lambda: {"backtest": None, "optimization": None, "walkforward": None}
+)
+
+
+def extract_report_metrics(report):
+    """Extract key metrics from a strategy report with robust handling"""
+
+    def safe_float(value, default=0):
+        """Safely convert various value types to float"""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            # Clean percentage signs and commas
+            cleaned = value.replace("%", "").replace(",", "").strip()
+            try:
+                return float(cleaned)
+            except ValueError:
+                return default
+        return default
+
+    def safe_percentage(value, default=0):
+        """Safely convert percentage values to decimal format (0-1 range)"""
+        if isinstance(value, (int, float)):
+            # If value is > 1, assume it's in percentage format (65.5 -> 0.655)
+            return float(value) / 100 if value > 1 else float(value)
+        if isinstance(value, str):
+            # Clean percentage signs and commas
+            cleaned = value.replace("%", "").replace(",", "").strip()
+            try:
+                val = float(cleaned)
+                # Convert to decimal if it appears to be in percentage format
+                return val / 100 if val > 1 else val
+            except ValueError:
+                return default
+        return default
+
+    return {
+        "win_rate": safe_percentage(
+            report.get("Win Rate (%)", 0)
+        ),  # Fixed: Now uses safe_percentage
+        "sharpe_ratio": safe_float(report.get("Sharpe Ratio", 0)),
+        "total_return_pct": safe_float(report.get("Total Return (%)", 0)),
+        "max_drawdown_pct": safe_float(report.get("Max Drawdown (%)", 0)),
+        "profit_factor": safe_float(report.get("Profit Factor", 0)),
+        "total_pnl": safe_float(report.get("Total P&L", 0)),
+        "total_trades": safe_float(report.get("Total Trades", 0), default=0),
+        "avg_win": safe_float(report.get("Avg Winning Trade", 0)),
+        "avg_loss": safe_float(report.get("Avg Losing Trade", 0)),
+        "win_loss_ratio": safe_float(report.get("Win/Loss Ratio", 0)),
+        "winning_trades": safe_float(report.get("Winning Trades", 0)),
+        "losing_trades": safe_float(report.get("Losing Trades", 0)),
+        "best_trade_pnl": safe_float(report.get("Best Trade P&L", 0)),
+        "worst_trade_pnl": safe_float(report.get("Worst Trade P&L", 0)),
+        "strategy_name": report.get("Strategy", ""),
+    }
+
+
+def create_consolidated_metrics(all_metrics):
+    """Create consolidated metrics DataFrame with composite scores"""
+    consolidated = []
+
+    for metric_set in all_metrics:
+        record = {"Ticker": metric_set["Ticker"], "Strategy": metric_set["Strategy"]}
+
+        # Backtest metrics
+        bt = metric_set.get("backtest", {})
+        record.update({f"BT_{k}": v for k, v in bt.items()})
+
+        # Optimization metrics
+        opt = metric_set.get("optimization", {})
+        record.update({f"OPT_{k}": v for k, v in opt.items()})
+
+        # Walkforward metrics
+        wf = metric_set.get("walkforward", {})
+        record.update({f"WF_{k}": v for k, v in wf.items()})
+
+        # Composite scores - include negative values
+        win_rates = []
+        if "win_rate" in bt and bt["win_rate"] is not None:
+            win_rates.append(float(bt["win_rate"]) * 0.2)  # 20% weight
+        if "win_rate" in opt and opt["win_rate"] is not None:
+            win_rates.append(float(opt["win_rate"]) * 0.3)  # 30% weight
+        if "win_rate" in wf and wf["win_rate"] is not None:
+            win_rates.append(float(wf["win_rate"]) * 0.5)  # 50% weight
+        record["Composite_Win_Rate"] = sum(win_rates) if win_rates else 0
+
+        # Sharpe composite - include negative values
+        sharpe_contrib = []
+        if "sharpe_ratio" in bt and bt["sharpe_ratio"] is not None:
+            sharpe_contrib.append(float(bt["sharpe_ratio"]) * 0.3)
+        if "sharpe_ratio" in wf and wf["sharpe_ratio"] is not None:
+            sharpe_contrib.append(float(wf["sharpe_ratio"]) * 0.7)
+        record["Composite_Sharpe"] = sum(sharpe_contrib) if sharpe_contrib else 0
+
+        # Degradation metric - compare optimization vs walkforward
+        opt_return = (
+            float(opt.get("total_return_pct", 0))
+            if opt.get("total_return_pct") is not None
+            else 0
+        )
+        wf_return = (
+            float(wf.get("total_return_pct", 0))
+            if wf.get("total_return_pct") is not None
+            else 0
+        )
+        record["Degradation_Pct"] = opt_return - wf_return
+
+        consolidated.append(record)
+
+    if not consolidated:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(consolidated)
+
+    # Sort by composite scores
+    if "Composite_Win_Rate" in df.columns:
+        df = df.sort_values("Composite_Win_Rate", ascending=False)
+
+    # Column ordering
+    column_order = [
+        "Ticker",
+        "Strategy",
+        "Composite_Win_Rate",
+        "Composite_Sharpe",
+        "Degradation_Pct",
+        "BT_win_rate",
+        "BT_sharpe_ratio",
+        "BT_total_return_pct",
+        "BT_profit_factor",
+        "OPT_win_rate",
+        "OPT_sharpe_ratio",
+        "OPT_total_return_pct",
+        "OPT_profit_factor",
+        "WF_win_rate",
+        "WF_sharpe_ratio",
+        "WF_total_return_pct",
+        "WF_profit_factor",
+    ]
+
+    # Return only existing columns
+    return df[[col for col in column_order if col in df.columns]]
 
 
 def get_strategy_params(strategy_instance):
@@ -5058,7 +5202,7 @@ def render_sidebar():
             help="Choose whether to optimize all parameters or only selected ones",
         )
     else:
-        n_trials = 10
+        n_trials = 20
 
     # Timeframe selection
     timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "4h", "1d"])
@@ -5554,6 +5698,7 @@ def run_optimization_analysis(
     # Display best strategies report after all strategies are processed
     st.subheader("📊 Optimization - Best Strategies Report")
     display_best_strategies_report(strategy_reports, ticker, interval)
+    return strategy_reports
 
 
 def display_parameter_optimization_results(results, progress_bar, status_text):
@@ -6234,6 +6379,7 @@ def run_walkforward_analysis(
     # Display best strategies report after all strategies are processed
     st.subheader("📊 Walk-Forward - Best Strategies Report")
     display_best_strategies_report(strategy_reports, ticker, params["timeframe"])
+    return strategy_reports
 
 
 def run_analysis(params):
@@ -6332,6 +6478,9 @@ def run_filter_backtest(params):
     old_stdout = sys.stdout
     sys.stdout = mystdout = StringIO()
 
+    # Dictionary to store all strategy metrics
+    strategy_metrics = {}
+
     try:
         # Integrate select_stocks_for_intraday
         selected_stocks = select_stocks_for_intraday_ui(
@@ -6378,8 +6527,11 @@ def run_filter_backtest(params):
         progress_bar.progress(30)
         status_text.text("Fetching data for backtest...")
 
-        for ticker in selected_stocks:
-            ticker = ticker["Stock"].strip() + ".NS"
+        # Initialize metrics storage
+        all_metrics = []
+
+        for stock in selected_stocks:
+            ticker = stock["Stock"].strip() + ".NS"
             if not ticker:
                 st.sidebar.error("Ticker cannot be empty.")
                 return
@@ -6397,7 +6549,7 @@ def run_filter_backtest(params):
                 st.error(f"No data available for {ticker} in the selected date range.")
                 progress_bar.progress(0)
                 status_text.text("Analysis failed - no data")
-                return
+                continue  # Skip to next stock instead of returning
 
             required_columns = ["Open", "High", "Low", "Close", "Volume"]
             if not all(col in data.columns for col in required_columns):
@@ -6405,7 +6557,7 @@ def run_filter_backtest(params):
                 st.error(f"Missing required columns for {ticker}: {', '.join(missing)}")
                 progress_bar.progress(0)
                 status_text.text("Analysis failed - invalid data")
-                return
+                continue  # Skip to next stock
 
             progress_bar.progress(40)
             status_text.text(f"Preparing analyzers for {ticker}...")
@@ -6418,27 +6570,135 @@ def run_filter_backtest(params):
 
             progress_bar.progress(50)
             status_text.text(f"Running Backtest for {ticker}...")
-            strategy_report = run_backtest_analysis(
-                params, data, analyzer_config, progress_bar, status_text, ticker
-            )
+            try:
+                strategy_report_bt = run_backtest_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+            except Exception as e:
+                st.error(f"Backtest failed for {ticker}: {str(e)}")
+                continue
+
+            # Store backtest metrics
+            for report in strategy_report_bt:
+                strategy_name = report["Strategy"]
+                key = (ticker, strategy_name)
+                strategy_metrics[key] = {"backtest": extract_report_metrics(report)}
+
             progress_bar.progress(65)
-            best_stratgies = []
-            for stratgies in strategy_report:
-                best_stratgies.append(stratgies["Strategy"])
-            params["selected_strategy"] = best_stratgies
-            status_text.text("Running  Backtest ...")
-            run_optimization_analysis(
-                params, data, analyzer_config, progress_bar, status_text, ticker
-            )
+            best_strategies = []
+            for strategy in strategy_report_bt:
+                best_strategies.append(strategy["Strategy"])
+            params["selected_strategy"] = best_strategies
+
+            status_text.text("Running Optimization...")
+            try:
+                strategy_report_opt = run_optimization_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+            except Exception as e:
+                st.error(f"Optimization failed for {ticker}: {str(e)}")
+                continue
+
+            # Store optimization metrics
+            for report in strategy_report_opt:
+                strategy_name = report["Strategy"]
+                key = (ticker, strategy_name)
+                if key in strategy_metrics:
+                    strategy_metrics[key]["optimization"] = extract_report_metrics(
+                        report
+                    )
+                else:
+                    strategy_metrics[key] = {
+                        "optimization": extract_report_metrics(report)
+                    }
+
             progress_bar.progress(80)
-            status_text.text("Running  Walk-Forward Analysis ...")
-            run_walkforward_analysis(
-                params, data, analyzer_config, progress_bar, status_text, ticker
+            status_text.text("Running Walk-Forward Analysis...")
+            try:
+                strategy_report_wf = run_walkforward_analysis(
+                    params, data, analyzer_config, progress_bar, status_text, ticker
+                )
+            except Exception as e:
+                st.error(f"Walkforward analysis failed for {ticker}: {str(e)}")
+                continue
+
+            # Store walkforward metrics
+            for report in strategy_report_wf:
+                strategy_name = report["Strategy"]
+                key = (ticker, strategy_name)
+                if key in strategy_metrics:
+                    strategy_metrics[key]["walkforward"] = extract_report_metrics(
+                        report
+                    )
+                else:
+                    strategy_metrics[key] = {
+                        "walkforward": extract_report_metrics(report)
+                    }
+
+            # Add metrics to consolidated list
+            for key, metrics in strategy_metrics.items():
+                if key[0] == ticker:  # Only add metrics for current ticker
+                    all_metrics.append(
+                        {"Ticker": key[0], "Strategy": key[1], **metrics}
+                    )
+
+        # Generate consolidated report
+        progress_bar.progress(95)
+        status_text.text("Consolidating strategy metrics...")
+
+        if all_metrics:
+            consolidated_df = create_consolidated_metrics(all_metrics)
+
+            st.subheader("📊 Consolidated Strategy Performance Metrics")
+
+            # Improved formatting for display
+            format_dict = {}
+            for col in consolidated_df.columns:
+                if "win_rate" in col.lower():
+                    format_dict[col] = "{:.2%}"  # Format as percentage (0.655 -> 65.5%)
+                elif "composite_win_rate" in col.lower():
+                    format_dict[col] = (
+                        "{:.2%}"  # Format composite win rate as percentage
+                    )
+                elif "ratio" in col.lower() and "sharpe" in col.lower():
+                    format_dict[col] = "{:.3f}"  # Sharpe ratios to 3 decimal places
+                elif (
+                    "pct" in col.lower()
+                    or "return" in col.lower()
+                    or "degradation" in col.lower()
+                ):
+                    format_dict[col] = "{:.2f}%"
+                elif "sharpe" in col.lower():
+                    format_dict[col] = "{:.3f}"
+                elif "factor" in col.lower():
+                    format_dict[col] = "{:.2f}"
+
+            styled_df = (
+                consolidated_df.style.format(format_dict)
+                .background_gradient(subset=["Composite_Win_Rate"], cmap="YlGn")
+                .background_gradient(subset=["Composite_Sharpe"], cmap="Blues")
             )
+
+            st.dataframe(styled_df, height=600)
+
+            # Add download button
+            csv = consolidated_df.to_csv(index=False)
+            st.download_button(
+                label="Download Strategy Metrics",
+                data=csv,
+                file_name="strategy_performance_metrics.csv",
+                mime="text/csv",
+            )
+        else:
+            st.warning("No strategy performance metrics available for consolidation")
+
         progress_bar.progress(100)
         status_text.text("Filter and backtest complete!")
         st.toast("Filter and backtest complete")
 
+    except Exception as e:
+        st.error(f"Critical error in backtest pipeline: {str(e)}")
+        logger.exception("Backtest pipeline failed")
     finally:
         sys.stdout = old_stdout
 
@@ -6449,7 +6709,7 @@ def select_stocks_for_intraday_ui(
     progress_bar=None,
     status_text=None,
 ):
-    """Modified select_stocks_for_intraday to update Streamlit UI."""
+    """Modified select_stocks_for_intraday to update Streamlit UI with Buy At and Sell At columns."""
     print("🚀 Starting stock selection for intraday trading...")
     print(f"📅 Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -6515,6 +6775,21 @@ def select_stocks_for_intraday_ui(
             try:
                 result = future.result()
                 if result:
+                    # Add Buy At and Sell At prices
+                    current_price = result["Current Price"]
+                    if result["Signal"] == "BUY":
+                        result["Buy At"] = (
+                            current_price * 1.01
+                        )  # 1% above current price
+                        result["Sell At"] = None
+                    elif result["Signal"] == "SELL":
+                        result["Buy At"] = None
+                        result["Sell At"] = (
+                            current_price * 0.99
+                        )  # 1% below current price
+                    else:
+                        result["Buy At"] = None
+                        result["Sell At"] = None
                     selected_stocks.append(result)
             except Exception as e:
                 print(f"\n❌ Error processing {ticker}: {e}")
@@ -6526,22 +6801,26 @@ def select_stocks_for_intraday_ui(
     )
 
     if selected_stocks:
-        print("\n" + "=" * 140)
+        print("\n" + "=" * 160)
         print("🎯 SELECTED STOCKS FOR INTRADAY TRADING (BUY/SELL SIGNALS ONLY)")
-        print("=" * 140)
+        print("=" * 160)
         print(
-            f"{'No':<3} {'Stock':<10} {'Signal':<6} {'Recommendation':<16} {'Score':<5} {'Price':<8} {'Range%':<7} {'ATR%':<6} {'Volume':<10} {'RelVol':<6} {'RSI':<5}"
+            f"{'No':<3} {'Stock':<10} {'Signal':<6} {'Recommendation':<16} {'Score':<5} {'Price':<8} "
+            f"{'Buy At':<8} {'Sell At':<8} {'Range%':<7} {'ATR%':<6} {'Volume':<10} {'RelVol':<6} {'RSI':<5}"
         )
-        print("-" * 140)
+        print("-" * 160)
 
         for i, stock in enumerate(selected_stocks, 1):
             signal_color = "🟢" if stock["Signal"] == "BUY" else "🔴"
+            buy_at = f"₹{stock['Buy At']:<7.2f}" if stock["Buy At"] else "N/A"
+            sell_at = f"₹{stock['Sell At']:<7.2f}" if stock["Sell At"] else "N/A"
             print(
                 f"{i:<3} {stock['Stock']:<10} {signal_color}{stock['Signal']:<5} "
                 f"{stock['Recommendation']:<16} {stock['Recommendation Score']:<5} "
-                f"₹{stock['Current Price']:<7.2f} {stock['Daily Range %']:<6.2f}% "
-                f"{stock['ATR %']:<5.2f}% {stock['Avg Volume']:>9,} "
-                f"{stock['Relative Volume']:<5.2f} {stock['RSI'] or 'N/A':<5}"
+                f"₹{stock['Current Price']:<7.2f} {buy_at:<8} {sell_at:<8} "
+                f"{stock['Daily Range %']:<6.2f}% {stock['ATR %']:<5.2f}% "
+                f"{stock['Avg Volume']:>9,} {stock['Relative Volume']:<5.2f} "
+                f"{stock['RSI'] or 'N/A':<5}"
             )
 
         buy_count = sum(1 for stock in selected_stocks if stock["Signal"] == "BUY")
@@ -6560,7 +6839,7 @@ def select_stocks_for_intraday_ui(
             1 for stock in selected_stocks if "GOOD SELL" in stock["Recommendation"]
         )
 
-        print("\n" + "=" * 140)
+        print("\n" + "=" * 160)
         print("📈 SIGNAL SUMMARY:")
         print(
             f"🟢 BUY Signals: {buy_count} (🔥 Strong: {strong_buy}, ⭐ Good: {good_buy})"
@@ -6579,7 +6858,7 @@ def select_stocks_for_intraday_ui(
                     f"{i}. {stock['Stock']} - {stock['Recommendation']} (Score: {stock['Recommendation Score']}) {signal_emoji}"
                 )
 
-        print("=" * 140)
+        print("=" * 160)
 
         df = pd.DataFrame(selected_stocks)
         column_order = [
@@ -6588,6 +6867,8 @@ def select_stocks_for_intraday_ui(
             "Recommendation",
             "Recommendation Score",
             "Current Price",
+            "Buy At",
+            "Sell At",
             "Daily Range %",
             "ATR %",
             "Avg Volume",

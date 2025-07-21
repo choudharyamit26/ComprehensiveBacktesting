@@ -3,7 +3,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from datetime import timedelta
-from multiprocessing import Pool
+from multiprocessing import Pool, get_context
 
 from comprehensive_backtesting.registry import get_strategy
 
@@ -141,6 +141,7 @@ def process_window(args):
         initial_cash,
         commission,
         n_trials,
+        _,
     ) = args
 
     # Resolve strategy class from name (multiprocessing safe)
@@ -423,6 +424,7 @@ class WalkForwardAnalysis:
         self.gap_period = int(self.window_length * gap_ratio)
         self.testing_period = int(self.window_length * testing_ratio)
         self.step_period = int(self.testing_period * step_ratio)
+        self.module_name = __name__
 
         # Debug print for period calculations
         print(f"Total days: {total_days}")
@@ -431,6 +433,7 @@ class WalkForwardAnalysis:
         print(f"Gap period: {self.gap_period} days")
         print(f"Testing period: {self.testing_period} days")
         print(f"Step period: {self.step_period} days")
+        print(f"Module name: {self.module_name}")
 
     def run_analysis(self):
         windows = []
@@ -461,7 +464,10 @@ class WalkForwardAnalysis:
             walk_forward_num += 1
 
         print(f"Generated {len(windows)} windows")
-        with Pool(processes=4) as pool:
+        ctx = get_context("spawn")
+        import multiprocessing as mp
+
+        with ctx.Pool(processes=min(4, mp.cpu_count())) as pool:
             args = [
                 (
                     w[0],
@@ -476,6 +482,7 @@ class WalkForwardAnalysis:
                     self.initial_cash,
                     self.commission,
                     self.n_trials,
+                    self.module_name,  # Pass module name
                 )
                 for w in windows
             ]
