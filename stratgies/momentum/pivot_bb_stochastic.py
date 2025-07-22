@@ -11,6 +11,18 @@ trade_logger = logging.getLogger("trade_logger")
 
 
 class PivotPoint(bt.Indicator):
+    """
+    Custom Pivot Point indicator that calculates pivot levels based on historical high, low, and close prices.
+
+    Lines:
+        pivot: Main pivot point level
+        r1: First resistance level
+        s1: First support level
+
+    Parameters:
+        period (int): Number of periods to look back for high/low calculation (default: 20)
+    """
+
     lines = ("pivot", "r1", "s1")
     params = (("period", 20),)
 
@@ -32,34 +44,126 @@ class PivotPoint(bt.Indicator):
 
 class Pivot_BB_Stochastic(bt.Strategy):
     """
-    Pivot + Bollinger Bands + Stochastic Strategy
-    Strategy Type: PIVOT + VOLATILITY + MOMENTUM
+    Pivot Point + Bollinger Bands + Stochastic Oscillator Trading Strategy
+
+    STRATEGY OVERVIEW:
+    ==================
+    This is a multi-indicator convergence strategy that combines pivot point analysis,
+    Bollinger Bands volatility measurement, and Stochastic momentum oscillator to
+    identify high-probability trading opportunities.
+
+    STRATEGY TYPE: PIVOT + VOLATILITY + MOMENTUM
     ============================================
-    This strategy combines pivot points, Bollinger Bands, and Stochastic oscillator.
 
-    Strategy Logic:
+    CORE CONCEPT:
+    =============
+    The strategy looks for convergence of three different market aspects:
+    1. Price action around key pivot levels (support/resistance)
+    2. Volatility breakouts using Bollinger Bands
+    3. Momentum confirmation via Stochastic oscillator
+
+    ENTRY SIGNALS:
     ==============
-    Long Entry: Price at/near pivot + Price at/above upper BB + Stochastic %K > %D
-    Short Entry: Price at/near pivot + Price at/below lower BB + Stochastic %K < %D
-    Exit: Price reaches next pivot level or Stochastic reversal
 
-    Parameters:
-    ==========
-    - pivot_period (int): Pivot point calculation period (default: 20)
-    - bb_period (int): Bollinger Bands period (default: 20)
-    - bb_stddev (float): Bollinger Bands standard deviation (default: 2.0)
-    - stoch_k (int): Stochastic %K period (default: 14)
-    - stoch_d (int): Stochastic %D period (default: 3)
-    - verbose (bool): Enable detailed logging (default: False)
+    Long Entry Conditions (ALL must be met):
+    - Price is at or near the pivot point (within 1% tolerance)
+    - Price touches or exceeds the upper Bollinger Band (volatility breakout upward)
+    - Stochastic %K line is above %D line (bullish momentum)
+
+    Short Entry Conditions (ALL must be met):
+    - Price is at or near the pivot point (within 1% tolerance)
+    - Price touches or goes below the lower Bollinger Band (volatility breakout downward)
+    - Stochastic %K line is below %D line (bearish momentum)
+
+    EXIT SIGNALS:
+    =============
+
+    Long Position Exits:
+    - Price reaches the R1 resistance level (profit target)
+    - Stochastic momentum reverses (%K drops below %D)
+
+    Short Position Exits:
+    - Price reaches the S1 support level (profit target)
+    - Stochastic momentum reverses (%K rises above %D)
+
+    RISK MANAGEMENT:
+    ================
+    - Automatic position closure at 15:15 IST (before market close)
+    - Trading only during market hours: 9:15 AM to 3:05 PM IST
+    - No new positions opened near market close
+    - Single position limit (no position pyramiding)
+
+    MARKET LOGIC:
+    =============
+    The strategy is based on the principle that:
+    1. Pivot points act as natural support/resistance levels
+    2. Bollinger Band touches indicate potential volatility breakouts
+    3. Stochastic oscillator confirms the momentum direction
+    4. When all three align, it suggests a high-probability trade setup
+
+    TIMEFRAME SUITABILITY:
+    ======================
+    Best suited for:
+    - Intraday trading on 5-minute to 15-minute charts
+    - Liquid instruments with good volatility
+    - Markets with clear trending behavior
+
+    PERFORMANCE CHARACTERISTICS:
+    ============================
+    - Higher win rate during trending market conditions
+    - May generate false signals in sideways/ranging markets
+    - Profit targets based on pivot levels provide natural risk/reward ratios
+    - Momentum confirmation helps reduce whipsaw trades
+
+    OPTIMIZATION PARAMETERS:
+    ========================
+    - pivot_period: Affects sensitivity of pivot point calculations
+    - bb_period: Controls Bollinger Bands responsiveness to price changes
+    - bb_stddev: Adjusts the width of Bollinger Bands (volatility threshold)
+    - stoch_k: Fast stochastic period (momentum sensitivity)
+    - stoch_d: Slow stochastic period (signal smoothing)
+
+    PARAMETER DEFAULTS:
+    ===================
+    - pivot_period: 20 (balanced between responsiveness and stability)
+    - bb_period: 20 (standard Bollinger Bands period)
+    - bb_stddev: 2.0 (captures ~95% of price action within bands)
+    - stoch_k: 14 (classic stochastic period)
+    - stoch_d: 3 (standard smoothing period)
+
+    IMPLEMENTATION NOTES:
+    =====================
+    - Uses custom PivotPoint indicator for dynamic pivot calculations
+    - Implements comprehensive trade logging for analysis
+    - Stores indicator data for post-trade analysis
+    - Includes parameter optimization support for backtesting
+    - Handles timezone conversion for IST market hours
+
+    USAGE EXAMPLE:
+    ==============
+    ```python
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(Pivot_BB_Stochastic,
+                       pivot_period=20,
+                       bb_period=20,
+                       bb_stddev=2.0,
+                       stoch_k=14,
+                       stoch_d=3,
+                       verbose=True)
+    ```
+
+    AUTHOR: Trading Strategy Implementation
+    VERSION: 1.0
+    LAST_UPDATED: 2025
     """
 
     params = (
-        ("pivot_period", 20),
-        ("bb_period", 20),
-        ("bb_stddev", 2.0),
-        ("stoch_k", 14),
-        ("stoch_d", 3),
-        ("verbose", False),
+        ("pivot_period", 20),  # Pivot point calculation period
+        ("bb_period", 20),  # Bollinger Bands period
+        ("bb_stddev", 2.0),  # Bollinger Bands standard deviation multiplier
+        ("stoch_k", 14),  # Stochastic %K period
+        ("stoch_d", 3),  # Stochastic %D smoothing period
+        ("verbose", False),  # Enable detailed logging
     )
 
     optimization_params = {
@@ -71,6 +175,14 @@ class Pivot_BB_Stochastic(bt.Strategy):
     }
 
     def __init__(self, tickers=None, analyzers=None, **kwargs):
+        """
+        Initialize the Pivot_BB_Stochastic strategy with all required indicators.
+
+        Args:
+            tickers: List of ticker symbols (optional)
+            analyzers: List of analyzers to attach (optional)
+            **kwargs: Additional keyword arguments
+        """
         # Initialize indicators
         self.pivot = PivotPoint(self.data, period=self.params.pivot_period)
         self.bb = btind.BollingerBands(
@@ -89,6 +201,7 @@ class Pivot_BB_Stochastic(bt.Strategy):
         logger.debug(f"BollingerBands lines: {self.bb.lines.getlinealiases()}")
         logger.debug(f"Stochastic lines: {self.stoch.lines.getlinealiases()}")
 
+        # Strategy state variables
         self.order = None
         self.order_type = None
         self.ready = False
@@ -109,6 +222,15 @@ class Pivot_BB_Stochastic(bt.Strategy):
         )
 
     def next(self):
+        """
+        Main strategy logic executed on each bar.
+
+        This method contains:
+        - Warmup period handling
+        - Market hours validation
+        - Signal generation logic
+        - Entry and exit condition evaluation
+        """
         if len(self) < self.warmup_period:
             logger.debug(
                 f"Skipping bar {len(self)}: still in warmup period (need {self.warmup_period} bars)"
@@ -241,6 +363,12 @@ class Pivot_BB_Stochastic(bt.Strategy):
                 )
 
     def notify_order(self, order):
+        """
+        Handle order execution notifications.
+
+        Args:
+            order: Order object with execution details
+        """
         if order.status in [order.Completed]:
             exec_dt = bt.num2date(order.executed.dt)
             if exec_dt.tzinfo is None:
@@ -360,6 +488,12 @@ class Pivot_BB_Stochastic(bt.Strategy):
             self.order_type = None
 
     def notify_trade(self, trade):
+        """
+        Handle trade completion notifications.
+
+        Args:
+            trade: Trade object with P&L details
+        """
         if trade.isclosed:
             trade_logger.info(
                 f"TRADE CLOSED | Ref: {trade.ref} | "
@@ -370,10 +504,25 @@ class Pivot_BB_Stochastic(bt.Strategy):
             )
 
     def get_completed_trades(self):
+        """
+        Return a copy of completed trades list for analysis.
+
+        Returns:
+            list: List of dictionaries containing trade information
+        """
         return self.completed_trades.copy()
 
     @classmethod
     def get_param_space(cls, trial):
+        """
+        Define parameter space for Optuna optimization.
+
+        Args:
+            trial: Optuna trial object
+
+        Returns:
+            dict: Parameter dictionary for optimization
+        """
         params = {
             "pivot_period": trial.suggest_int("pivot_period", 10, 30),
             "bb_period": trial.suggest_int("bb_period", 15, 25),
@@ -385,6 +534,15 @@ class Pivot_BB_Stochastic(bt.Strategy):
 
     @classmethod
     def get_min_data_points(cls, params):
+        """
+        Calculate minimum data points required for strategy initialization.
+
+        Args:
+            params (dict): Strategy parameters
+
+        Returns:
+            int: Minimum number of data points needed
+        """
         try:
             pivot_period = params.get("pivot_period", 20)
             bb_period = params.get("bb_period", 20)

@@ -391,7 +391,7 @@ class WalkForwardAnalysis:
         data,
         strategy_class,
         optimization_params,
-        optimization_metric="total_return",
+        optimization_metric="sharpe_ratio",
         training_ratio=0.5,
         gap_ratio=0.2,
         testing_ratio=0.3,

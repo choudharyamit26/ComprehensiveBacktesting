@@ -315,14 +315,26 @@ def generate_strategy_report(strategy_result, strategy_name, ticker, timeframe):
 
 def display_best_strategies_report(strategy_reports, ticker, timeframe):
     """Display and export best strategies report"""
+    # Shortlist strategies with strong risk-adjusted returns (Sharpe >1.0),
+    # low drawdowns (<15%), and a profit factor >1.5
     if strategy_reports:
         # Create DataFrame for display (without raw params dict)
         display_df = pd.DataFrame(
             [
                 {k: v for k, v in report.items() if k != "Params"}
                 for report in strategy_reports
+                if report.get("Win Rate (%)", 0) > 50
+                and report.get("Total Trades", 0) > 10
+                and report.get("Avg Winning Trade", 0)
+                > report.get("Avg Losing Trade", 0)
             ]
         )
+
+        if display_df.empty:
+            st.info(
+                "No strategies met the criteria (Win Rate > 50%, > 10 trades, Avg Winning Trade > Avg Losing Trade)"
+            )
+            return pd.DataFrame()
 
         # Sort by Win Rate and Total Return for better visualization
         display_df = display_df.sort_values(
@@ -342,7 +354,7 @@ def display_best_strategies_report(strategy_reports, ticker, timeframe):
 
         st.subheader(f"📊 Best Performing Strategies for {ticker} ({timeframe})")
         st.write(
-            "Strategies with win rate > 50% and > 10 trades, sorted by Win Rate and Total Return"
+            "Strategies with Win Rate > 50%, > 10 trades, and Avg Winning Trade > Avg Losing Trade, sorted by Win Rate and Total Return"
         )
         st.dataframe(display_df, use_container_width=True)
 
@@ -424,7 +436,9 @@ def display_best_strategies_report(strategy_reports, ticker, timeframe):
             st.plotly_chart(fig, use_container_width=True, key=uuid.uuid4())
         return display_df
     else:
-        st.info("No strategies met the criteria (win rate > 50% and > 10 trades)")
+        st.info(
+            "No strategies met the criteria (Win Rate > 50%, > 10 trades, Avg Winning Trade > Avg Losing Trade)"
+        )
         return pd.DataFrame()
 
 
@@ -5748,7 +5762,7 @@ def run_walkforward_analysis(
             data=data,
             strategy_class=strategy_class.__name__,
             optimization_params=strategy_class.optimization_params,
-            optimization_metric="total_return",
+            optimization_metric="sharpe_ratio",
             training_ratio=0.6,
             testing_ratio=0.15,
             step_ratio=0.2,

@@ -31,6 +31,11 @@ class Supertrend(bt.Indicator):
             self.lines.supertrend[0] = self.last_supertrend
             return
 
+        # Check for valid ATR value to prevent issues
+        if np.isnan(self.atr[0]) or self.atr[0] <= 0:
+            self.lines.supertrend[0] = self.last_supertrend
+            return
+
         # Calculate current bands
         curr_upper = self.mid[0] + self.params.multiplier * self.atr[0]
         curr_lower = self.mid[0] - self.params.multiplier * self.atr[0]
@@ -68,23 +73,56 @@ class ChaikinMoneyFlow(bt.Indicator):
     params = (("period", 20),)  # CMF period
 
     def __init__(self):
-        self.mfm = (
-            (self.data.close - self.data.low) - (self.data.high - self.data.close)
-        ) / (self.data.high - self.data.low)
-        self.mfv = self.mfm * self.data.volume
-        self.sum_mfv = btind.SumN(self.mfv, period=self.params.period)
-        self.sum_volume = btind.SumN(self.data.volume, period=self.params.period)
-        self.lines.cmf = self.sum_mfv / self.sum_volume
+        # Initialize MFM calculation with zero division protection
+        self.lines.cmf = self.data.close * 0  # Initialize with zeros
 
     def next(self):
-        # Handle edge case where high == low or volume is zero
-        if (
-            self.data.high[0] == self.data.low[0]
-            or self.data.volume[0] == 0
-            or np.isnan(self.mfm[0])
-        ):
-            self.mfm[0] = 0
-        if np.isnan(self.lines.cmf[0]) or self.sum_volume[0] == 0:
+        # Skip if not enough data
+        if len(self) < self.params.period:
+            self.lines.cmf[0] = 0
+            return
+
+        # Calculate CMF for the period
+        mfv_sum = 0
+        volume_sum = 0
+
+        for i in range(self.params.period):
+            idx = -i
+            high_val = self.data.high[idx]
+            low_val = self.data.low[idx]
+            close_val = self.data.close[idx]
+            volume_val = self.data.volume[idx]
+
+            # Skip if invalid data
+            if (
+                np.isnan(high_val)
+                or np.isnan(low_val)
+                or np.isnan(close_val)
+                or np.isnan(volume_val)
+                or volume_val <= 0
+            ):
+                continue
+
+            # Calculate Money Flow Multiplier with zero division protection
+            price_range = high_val - low_val
+            if price_range <= 0:  # Prevent division by zero
+                mfm = 0
+            else:
+                mfm = ((close_val - low_val) - (high_val - close_val)) / price_range
+
+            # Calculate Money Flow Volume
+            mfv = mfm * volume_val
+            mfv_sum += mfv
+            volume_sum += volume_val
+
+        # Calculate CMF with zero division protection
+        if volume_sum <= 0:
+            self.lines.cmf[0] = 0
+        else:
+            self.lines.cmf[0] = mfv_sum / volume_sum
+
+        # Handle NaN values
+        if np.isnan(self.lines.cmf[0]):
             self.lines.cmf[0] = 0
 
 
@@ -202,15 +240,30 @@ class SupertrendCCICMF(bt.Strategy):
             logger.debug(f"Order pending at bar {len(self)}")
             return
 
-        # Check for invalid indicator values
+        # Check for invalid indicator values with enhanced validation
+        supertrend_val = self.supertrend[0] if len(self.supertrend) > 0 else 0
+        cci_val = self.cci[0] if len(self.cci) > 0 else 0
+        cmf_val = self.cmf[0] if len(self.cmf) > 0 else 0
+
         if (
-            np.isnan(self.supertrend[0])
-            or np.isnan(self.cci[0])
-            or np.isnan(self.cmf[0])
+            np.isnan(supertrend_val)
+            or np.isinf(supertrend_val)
+            or np.isnan(cci_val)
+            or np.isinf(cci_val)
+            or np.isnan(cmf_val)
+            or np.isinf(cmf_val)
         ):
             logger.debug(
                 f"Invalid indicator values at bar {len(self)}: "
-                f"Supertrend={self.supertrend[0]}, CCI={self.cci[0]}, CMF={self.cmf[0]}"
+                f"Supertrend={supertrend_val}, CCI={cci_val}, CMF={cmf_val}"
+            )
+            return
+
+        # Additional safety checks for extreme values
+        if abs(cci_val) > 10000 or abs(cmf_val) > 10:
+            logger.debug(
+                f"Extreme indicator values detected at bar {len(self)}: "
+                f"CCI={cci_val}, CMF={cmf_val}"
             )
             return
 
@@ -219,22 +272,22 @@ class SupertrendCCICMF(bt.Strategy):
             {
                 "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
                 "close": self.data.close[0],
-                "supertrend": self.supertrend[0],
-                "cci": self.cci[0],
-                "cmf": self.cmf[0],
+                "supertrend": supertrend_val,
+                "cci": cci_val,
+                "cmf": cmf_val,
             }
         )
 
         # Trading Logic
-        supertrend_bullish = self.data.close[0] > self.supertrend[0]
-        supertrend_bearish = self.data.close[0] < self.supertrend[0]
+        supertrend_bullish = self.data.close[0] > supertrend_val
+        supertrend_bearish = self.data.close[0] < supertrend_val
 
         if not self.position:
             # Long Entry: Supertrend bullish + CCI > threshold + CMF > 0
             if (
                 supertrend_bullish
-                and self.cci[0] > self.params.cci_threshold
-                and self.cmf[0] > 0
+                and cci_val > self.params.cci_threshold
+                and cmf_val > 0
             ):
                 self.order = self.buy()
                 self.order_type = "enter_long"
@@ -242,15 +295,15 @@ class SupertrendCCICMF(bt.Strategy):
                     f"BUY SIGNAL (Enter Long - Supertrend + CCI + CMF) | Bar: {len(self)} | "
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
-                    f"Supertrend: {self.supertrend[0]:.2f} (Bullish) | "
-                    f"CCI: {self.cci[0]:.2f} > {self.params.cci_threshold} | "
-                    f"CMF: {self.cmf[0]:.4f} > 0"
+                    f"Supertrend: {supertrend_val:.2f} (Bullish) | "
+                    f"CCI: {cci_val:.2f} > {self.params.cci_threshold} | "
+                    f"CMF: {cmf_val:.4f} > 0"
                 )
             # Short Entry: Supertrend bearish + CCI < -threshold + CMF < 0
             elif (
                 supertrend_bearish
-                and self.cci[0] < -self.params.cci_threshold
-                and self.cmf[0] < 0
+                and cci_val < -self.params.cci_threshold
+                and cmf_val < 0
             ):
                 self.order = self.sell()
                 self.order_type = "enter_short"
@@ -258,14 +311,12 @@ class SupertrendCCICMF(bt.Strategy):
                     f"SELL SIGNAL (Enter Short - Supertrend + CCI + CMF) | Bar: {len(self)} | "
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
-                    f"Supertrend: {self.supertrend[0]:.2f} (Bearish) | "
-                    f"CCI: {self.cci[0]:.2f} < {-self.params.cci_threshold} | "
-                    f"CMF: {self.cmf[0]:.4f} < 0"
+                    f"Supertrend: {supertrend_val:.2f} (Bearish) | "
+                    f"CCI: {cci_val:.2f} < {-self.params.cci_threshold} | "
+                    f"CMF: {cmf_val:.4f} < 0"
                 )
         elif self.position.size > 0:  # Long position
-            reverse_count = sum(
-                [not supertrend_bullish, self.cci[0] < 0, self.cmf[0] < 0]
-            )
+            reverse_count = sum([not supertrend_bullish, cci_val < 0, cmf_val < 0])
             if reverse_count >= 2:
                 self.order = self.sell()
                 self.order_type = "exit_long"
@@ -277,15 +328,13 @@ class SupertrendCCICMF(bt.Strategy):
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
                     f"Reason: {exit_reason} | "
-                    f"Supertrend: {self.supertrend[0]:.2f} | "
-                    f"CCI: {self.cci[0]:.2f} | "
-                    f"CMF: {self.cmf[0]:.4f} | "
+                    f"Supertrend: {supertrend_val:.2f} | "
+                    f"CCI: {cci_val:.2f} | "
+                    f"CMF: {cmf_val:.4f} | "
                     f"Reverse Count: {reverse_count}"
                 )
         elif self.position.size < 0:  # Short position
-            reverse_count = sum(
-                [not supertrend_bearish, self.cci[0] > 0, self.cmf[0] > 0]
-            )
+            reverse_count = sum([not supertrend_bearish, cci_val > 0, cmf_val > 0])
             if reverse_count >= 2:
                 self.order = self.buy()
                 self.order_type = "exit_short"
@@ -297,9 +346,9 @@ class SupertrendCCICMF(bt.Strategy):
                     f"Time: {bar_time_ist} | "
                     f"Price: {self.data.close[0]:.2f} | "
                     f"Reason: {exit_reason} | "
-                    f"Supertrend: {self.supertrend[0]:.2f} | "
-                    f"CCI: {self.cci[0]:.2f} | "
-                    f"CMF: {self.cmf[0]:.4f} | "
+                    f"Supertrend: {supertrend_val:.2f} | "
+                    f"CCI: {cci_val:.2f} | "
+                    f"CMF: {cmf_val:.4f} | "
                     f"Reverse Count: {reverse_count}"
                 )
 
@@ -347,9 +396,9 @@ class SupertrendCCICMF(bt.Strategy):
             elif self.order_type == "exit_long" and order.issell():
                 if self.open_positions:
                     entry_info = self.open_positions.pop(0)
-                    pnl = (order.executed.price - entry_info["entry_price"]) * abs(
-                        entry_info["size"]
-                    )
+                    # Additional safety check for division
+                    size = abs(entry_info["size"]) if entry_info["size"] != 0 else 1
+                    pnl = (order.executed.price - entry_info["entry_price"]) * size
                     total_commission = entry_info["commission"] + abs(
                         order.executed.comm
                     )
@@ -360,16 +409,15 @@ class SupertrendCCICMF(bt.Strategy):
                         "exit_time": exec_dt,
                         "entry_price": entry_info["entry_price"],
                         "exit_price": order.executed.price,
-                        "size": abs(entry_info["size"]),
+                        "size": size,
                         "pnl": pnl,
                         "pnl_net": pnl_net,
                         "commission": total_commission,
                         "status": "Won" if pnl > 0 else "Lost",
                         "direction": "Long",
-                        "bars_held": (
-                            exec_dt - entry_info["entry_time"]
-                        ).total_seconds()
-                        / 60,
+                        "bars_held": max(
+                            1, (exec_dt - entry_info["entry_time"]).total_seconds() / 60
+                        ),  # Prevent zero division
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
@@ -384,9 +432,9 @@ class SupertrendCCICMF(bt.Strategy):
             elif self.order_type == "exit_short" and order.isbuy():
                 if self.open_positions:
                     entry_info = self.open_positions.pop(0)
-                    pnl = (entry_info["entry_price"] - order.executed.price) * abs(
-                        entry_info["size"]
-                    )
+                    # Additional safety check for division
+                    size = abs(entry_info["size"]) if entry_info["size"] != 0 else 1
+                    pnl = (entry_info["entry_price"] - order.executed.price) * size
                     total_commission = entry_info["commission"] + abs(
                         order.executed.comm
                     )
@@ -397,16 +445,15 @@ class SupertrendCCICMF(bt.Strategy):
                         "exit_time": exec_dt,
                         "entry_price": entry_info["entry_price"],
                         "exit_price": order.executed.price,
-                        "size": abs(entry_info["size"]),
+                        "size": size,
                         "pnl": pnl,
                         "pnl_net": pnl_net,
                         "commission": total_commission,
                         "status": "Won" if pnl > 0 else "Lost",
                         "direction": "Short",
-                        "bars_held": (
-                            exec_dt - entry_info["entry_time"]
-                        ).total_seconds()
-                        / 60,
+                        "bars_held": max(
+                            1, (exec_dt - entry_info["entry_time"]).total_seconds() / 60
+                        ),  # Prevent zero division
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
