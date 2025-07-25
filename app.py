@@ -325,8 +325,8 @@ def display_best_strategies_report(strategy_reports, ticker, timeframe):
                 for report in strategy_reports
                 if report.get("Win Rate (%)", 0) > 50
                 and report.get("Total Trades", 0) > 10
-                and report.get("Avg Winning Trade", 0)
-                > report.get("Avg Losing Trade", 0)
+                and abs(report.get("Avg Winning Trade", 0))
+                > abs(report.get("Avg Losing Trade", 0))
             ]
         )
 
@@ -788,7 +788,7 @@ def load_tickers_from_file(file_path="ind_nifty500list.csv"):
 
         for i, symbol in enumerate(cleaned_symbols, 1):
             logger.debug(f"Validating ticker {i}/{total_symbols}: {symbol}")
-            nse_ticker = symbol + ".NS"
+            nse_ticker = symbol
             valid_symbols.append(nse_ticker)
 
         logger.info(f"Validated {len(valid_symbols)}/{len(cleaned_symbols)} tickers")
@@ -6545,7 +6545,7 @@ def run_filter_backtest(params):
         all_metrics = []
 
         for stock in selected_stocks:
-            ticker = stock["Stock"].strip() + ".NS"
+            ticker = stock["Stock"].strip()
             if not ticker:
                 st.sidebar.error("Ticker cannot be empty.")
                 return
