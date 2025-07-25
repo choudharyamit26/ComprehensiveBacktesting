@@ -5219,7 +5219,9 @@ def render_sidebar():
         n_trials = 20
 
     # Timeframe selection
-    timeframe = st.sidebar.selectbox("Timeframe", ["5m", "15m", "1h", "4h", "1d"])
+    timeframe = st.sidebar.selectbox(
+        "Timeframe", ["1m", "2m", "3m", "4m", "5m", "15m", "1h", "4h", "1d"]
+    )
 
     # Analyzer selection
     available_analyzers = {
