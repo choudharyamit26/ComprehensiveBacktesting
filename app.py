@@ -3831,7 +3831,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
     st.subheader(
         "📊 Walk-Forward Analysis Summary"
         + " "
-        + ticker
+        + ticker[0]
         + " Using strategy: "
         + params["selected_strategy"]
     )
@@ -4886,8 +4886,8 @@ def display_complete_backtest_summary(results, ticker, timeframe):
 def complete_backtest(data, progress_bar, params, ticker):
     """Run a full demonstration of backtest, optimization, and walk-forward analysis."""
     strategy_reports = []
-
-    for idx, strategy in enumerate(params["selected_strategies"]):
+    print("Starting complete backtest...", params)
+    for idx, strategy in enumerate(params["selected_strategy"]):
         data_copy = data.copy()
         params_copy = params.copy()
         strategy_length = len(params["selected_strategy"])
@@ -4913,10 +4913,10 @@ def complete_backtest(data, progress_bar, params, ticker):
         display_composite_results(results, data_copy, ticker, params_copy["timeframe"])
         display_parameter_evolution(results, ticker)
         display_strategy_comparison(results, ticker)
-        progress_bar.progress(int((idx / len(params["selected_strategies"])) * 70 + 10))
+        progress_bar.progress(int((idx / len(params["selected_strategy"])) * 70 + 10))
         display_complete_backtest_summary(results, ticker, params_copy["timeframe"])
         display_basic_results(results, data_copy, ticker)
-        progress_bar.progress(int((idx / len(params["selected_strategies"])) * 80 + 10))
+        progress_bar.progress(int((idx / len(params["selected_strategy"])) * 80 + 10))
         display_optimized_results(results, data_copy, ticker, params_copy["timeframe"])
         display_walkforward_results(
             results, ticker, params_copy["timeframe"], params_copy, progress_bar
@@ -5220,7 +5220,7 @@ def render_sidebar():
 
     # Timeframe selection
     timeframe = st.sidebar.selectbox(
-        "Timeframe", ["1m", "2m", "3m", "4m", "5m", "15m", "1h", "4h", "1d"]
+        "Timeframe", ["5m", "1m", "2m", "3m", "4m", "15m", "1h", "4h", "1d"]
     )
 
     # Analyzer selection
@@ -6718,11 +6718,17 @@ def run_filter_backtest(params):
         else:
             st.warning("No strategy performance metrics available for consolidation")
             return None
-
+        top_strategies_df = pd.DataFrame(
+            [
+                {"Ticker": ticker, **strategy}
+                for ticker, strategies in top_strategies_per_stock.items()
+                for strategy in strategies
+            ]
+        )
         progress_bar.progress(100)
         status_text.text("Filter and backtest complete!")
         st.toast("Filter and backtest complete")
-        top_strategies_per_stock.to_csv(f"selected_stocks_strategies.csv", index=False)
+        top_strategies_df.to_csv(f"selected_stocks_strategies.csv", index=False)
         return top_strategies_per_stock
 
     except Exception as e:
@@ -6953,3 +6959,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# streamlit run app.py --server.fileWatcherType none --server.maxMessageSize 1024 --logger.level debug
+# streamlit run app.py --server.fileWatcherType none --server.maxMessageSize 1024 enableWebsocketCompression true

@@ -21,6 +21,7 @@ if not logger.hasHandlers():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
+
 CONFIG = {
     "CLIENT_ID": os.getenv("DHAN_CLIENT_ID"),
     "ACCESS_TOKEN": os.getenv("DHAN_ACCESS_TOKEN"),
@@ -415,15 +416,295 @@ async def fetch_intraday_data(ticker, exchange_segment="NSE_EQ"):
         raise
 
 
-async def get_data(ticker, start_date, end_date, interval):
+import sqlite3
+import pandas as pd
+import pytz
+import asyncio
+import hashlib
+from datetime import datetime, timedelta
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+# Database configuration
+DB_PATH = "market_data.db"
+CACHE_TTL_SECONDS = 3600  # 1 hour cache TTL
+
+
+def init_database():
+    """Initialize the SQLite database with required tables."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Create cache metadata table
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cache_metadata (
+            cache_key TEXT PRIMARY KEY,
+            ticker TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT NOT NULL,
+            interval_val TEXT NOT NULL,
+            created_timestamp REAL NOT NULL,
+            row_count INTEGER NOT NULL
+        )
+    """
+    )
+
+    # Create market data table
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cache_key TEXT NOT NULL,
+            datetime TEXT NOT NULL,
+            open_price REAL,
+            high_price REAL,
+            low_price REAL,
+            close_price REAL,
+            volume INTEGER,
+            adj_close REAL,
+            FOREIGN KEY (cache_key) REFERENCES cache_metadata (cache_key)
+        )
+    """
+    )
+
+    # Create indexes for better performance
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cache_key ON market_data (cache_key)"
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_datetime ON market_data (datetime)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cache_timestamp ON cache_metadata (created_timestamp)"
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def _generate_cache_key(ticker, start_date, end_date, interval):
+    """Generate a unique cache key for the data request."""
+    key_string = f"{ticker}_{start_date}_{end_date}_{interval}"
+    return hashlib.md5(key_string.encode()).hexdigest()
+
+
+def _save_to_database(cache_key, ticker, start_date, end_date, interval, df):
+    """Save DataFrame to SQLite database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
     try:
+        # Save metadata
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO cache_metadata 
+            (cache_key, ticker, start_date, end_date, interval_val, created_timestamp, row_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                cache_key,
+                ticker,
+                start_date,
+                end_date,
+                interval,
+                datetime.now().timestamp(),
+                len(df),
+            ),
+        )
+
+        # Delete existing data for this cache_key
+        cursor.execute("DELETE FROM market_data WHERE cache_key = ?", (cache_key,))
+
+        # Prepare data for insertion
+        data_rows = []
+        for idx, row in df.iterrows():
+            data_rows.append(
+                (
+                    cache_key,
+                    idx.strftime("%Y-%m-%d %H:%M:%S%z"),  # datetime with timezone
+                    float(row.get("Open", 0)),
+                    float(row.get("High", 0)),
+                    float(row.get("Low", 0)),
+                    float(row.get("Close", 0)),
+                    int(row.get("Volume", 0)),
+                    float(
+                        row.get("Adj Close", row.get("Close", 0))
+                    ),  # Use Close if Adj Close not available
+                )
+            )
+
+        # Insert market data
+        cursor.executemany(
+            """
+            INSERT INTO market_data 
+            (cache_key, datetime, open_price, high_price, low_price, close_price, volume, adj_close)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            data_rows,
+        )
+
+        conn.commit()
+        logger.info(
+            f"Saved {len(data_rows)} rows to database for cache_key: {cache_key}"
+        )
+
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error saving to database: {str(e)}")
+        raise
+    finally:
+        conn.close()
+
+
+def _load_from_database(cache_key):
+    """Load DataFrame from SQLite database."""
+    conn = sqlite3.connect(DB_PATH)
+
+    try:
+        # Check if cache exists and is not expired
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_timestamp, row_count FROM cache_metadata 
+            WHERE cache_key = ?
+        """,
+            (cache_key,),
+        )
+
+        result = cursor.fetchone()
+        if not result:
+            return None
+
+        created_timestamp, row_count = result
+
+        # Check if cache is expired
+        if (datetime.now().timestamp() - created_timestamp) >= CACHE_TTL_SECONDS:
+            logger.info(f"Cache expired for {cache_key}")
+            # Clean up expired cache
+            cursor.execute("DELETE FROM market_data WHERE cache_key = ?", (cache_key,))
+            cursor.execute(
+                "DELETE FROM cache_metadata WHERE cache_key = ?", (cache_key,)
+            )
+            conn.commit()
+            return None
+
+        # Load market data
+        query = """
+            SELECT datetime, open_price, high_price, low_price, close_price, volume, adj_close
+            FROM market_data 
+            WHERE cache_key = ?
+            ORDER BY datetime
+        """
+
+        df = pd.read_sql_query(query, conn, params=(cache_key,))
+
+        if df.empty:
+            return None
+
+        # Convert datetime column and set as index
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df.set_index("datetime", inplace=True)
+
+        # Rename columns to match expected format
+        df.rename(
+            columns={
+                "open_price": "Open",
+                "high_price": "High",
+                "low_price": "Low",
+                "close_price": "Close",
+                "volume": "Volume",
+                "adj_close": "Adj Close",
+            },
+            inplace=True,
+        )
+
+        # Ensure timezone is set
+        if df.index.tz is None:
+            df.index = df.index.tz_localize("Asia/Kolkata")
+        elif str(df.index.tz) != "Asia/Kolkata":
+            df.index = df.index.tz_convert("Asia/Kolkata")
+
+        logger.info(f"Loaded {len(df)} rows from database for cache_key: {cache_key}")
+        return df
+
+    except Exception as e:
+        logger.error(f"Error loading from database: {str(e)}")
+        return None
+    finally:
+        conn.close()
+
+
+def cleanup_expired_cache():
+    """Remove expired cache entries from database."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    try:
+        cutoff_timestamp = datetime.now().timestamp() - CACHE_TTL_SECONDS
+
+        # Get expired cache keys
+        cursor.execute(
+            """
+            SELECT cache_key FROM cache_metadata 
+            WHERE created_timestamp < ?
+        """,
+            (cutoff_timestamp,),
+        )
+
+        expired_keys = [row[0] for row in cursor.fetchall()]
+
+        if expired_keys:
+            # Delete expired data
+            for cache_key in expired_keys:
+                cursor.execute(
+                    "DELETE FROM market_data WHERE cache_key = ?", (cache_key,)
+                )
+                cursor.execute(
+                    "DELETE FROM cache_metadata WHERE cache_key = ?", (cache_key,)
+                )
+
+            conn.commit()
+            logger.info(f"Cleaned up {len(expired_keys)} expired cache entries")
+
+    except Exception as e:
+        logger.error(f"Error during cache cleanup: {str(e)}")
+    finally:
+        conn.close()
+
+
+async def get_data(ticker, start_date, end_date, interval):
+    """
+    Fetch market data for a given ticker and date range, using SQLite for persistent caching.
+    """
+    try:
+        # Initialize database if it doesn't exist
+        if not os.path.exists(DB_PATH):
+            init_database()
+
         start_dt = pd.to_datetime(start_date).date()
         end_dt = pd.to_datetime(end_date).date()
         ist_tz = pytz.timezone("Asia/Kolkata")
         today = datetime.now(ist_tz).date()
+
+        # Check database cache first
+        cache_key = _generate_cache_key(ticker, start_date, end_date, interval)
+        cached_data = _load_from_database(cache_key)
+
+        if cached_data is not None:
+            logger.info(f"Returning cached data from database for {cache_key}")
+            print(f"Returning cached data for {ticker}")
+            print(
+                f"Date range: {cached_data.index.min().strftime('%Y-%m-%d')} to "
+                f"{cached_data.index.max().strftime('%Y-%m-%d')}"
+            )
+            print(f"Columns: {list(cached_data.columns)}")
+            return cached_data.copy()  # Return a copy to prevent modifying cached data
+
         if end_dt > today:
             logger.warning(f"End date {end_dt} is in the future. Adjusting to {today}.")
             end_dt = today
+
         chunk_size = timedelta(days=90)
         chunks = []
         current_start = start_dt
@@ -431,35 +712,52 @@ async def get_data(ticker, start_date, end_date, interval):
             current_end = min(current_start + chunk_size - timedelta(days=1), end_dt)
             chunks.append((current_start, current_end))
             current_start = current_end + timedelta(days=1)
+
         security_id = get_security_id(ticker)
-        dfs = []
-        for chunk_start, chunk_end in chunks:
-            logger.info(
-                f"Fetching chunk for {ticker} from {chunk_start} to {chunk_end}"
-            )
-            df_chunk = await fetch_historical_data(
+        if not security_id:
+            raise ValueError(f"No security ID found for ticker {ticker}")
+
+        # Create tasks for all chunks
+        tasks = [
+            fetch_historical_data(
                 security_id, chunk_start, chunk_end, interval, exchange_segment="NSE_EQ"
             )
-            if df_chunk is not None and not df_chunk.empty:
-                dfs.append(df_chunk)
+            for chunk_start, chunk_end in chunks
+        ]
+        # Fetch all chunks concurrently
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        dfs = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.warning(
+                    f"Failed to fetch chunk {i+1} for {ticker}: {str(result)}"
+                )
+                continue
+            if result is not None and not result.empty:
+                dfs.append(result)
             else:
                 logger.warning(
-                    f"No data fetched for {ticker} from {chunk_start} to {chunk_end}"
+                    f"No data fetched for {ticker} from {chunks[i][0]} to {chunks[i][1]}"
                 )
+
         if not dfs:
             raise ValueError(
                 f"No data found for ticker {ticker} between {start_date} and {end_date} (interval={interval})"
             )
+
         df = pd.concat(dfs, ignore_index=True)
         df = df.drop_duplicates(subset=["datetime"], keep="last")
         df = df.sort_values("datetime").reset_index(drop=True)
         logger.info(
             f"Merged {len(dfs)} chunks into DataFrame with {len(df)} rows for {ticker}"
         )
+
         if df.empty:
             raise ValueError(
                 f"No data found for ticker {ticker} between {start_date} and {end_date} (interval={interval})"
             )
+
         required_columns = ["Open", "High", "Low", "Close", "Volume"]
         column_mapping = {}
         for col in df.columns:
@@ -476,34 +774,50 @@ async def get_data(ticker, start_date, end_date, interval):
                 column_mapping[col] = "Volume"
             elif "adj" in col_lower and "close" in col_lower:
                 column_mapping[col] = "Adj Close"
+
         df.rename(columns=column_mapping, inplace=True)
         missing_columns = [col for col in required_columns if col not in df.columns]
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
+
         if "datetime" not in df.columns:
             raise ValueError("No 'datetime' column found in the data")
         if not pd.api.types.is_datetime64_any_dtype(df["datetime"]):
             df["datetime"] = pd.to_datetime(df["datetime"])
+
         df.set_index("datetime", inplace=True)
         if df.index.tz is None:
             df.index = df.index.tz_localize("Asia/Kolkata")
         elif str(df.index.tz) != "Asia/Kolkata":
             df.index = df.index.tz_convert("Asia/Kolkata")
+
         df.sort_index(inplace=True)
         df.dropna(subset=required_columns, inplace=True)
+
         for col in required_columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df.dropna(subset=required_columns, inplace=True)
+
         if df.empty:
             raise ValueError(
                 f"No valid data remaining after cleaning for ticker {ticker}"
             )
+
+        # Store in database
+        _save_to_database(cache_key, ticker, start_date, end_date, interval, df)
+        logger.info(f"Cached data in database for {cache_key}")
+
+        # Periodic cleanup of expired cache (run occasionally)
+        if hash(cache_key) % 100 == 0:  # Run cleanup 1% of the time
+            cleanup_expired_cache()
+
         print(f"Successfully loaded {len(df)} rows of data for {ticker}")
         print(
             f"Date range: {df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}"
         )
         print(f"Columns: {list(df.columns)}")
         return df
+
     except Exception as e:
         import traceback
 
