@@ -5145,7 +5145,7 @@ def render_sidebar():
 
     # Date inputs with validation
     end_date_default = datetime.today().date() - timedelta(days=2)
-    start_date_default = end_date_default - timedelta(days=58)
+    start_date_default = end_date_default - timedelta(days=365)
     start_date = st.sidebar.date_input(
         "Start Date",
         value=start_date_default,
@@ -6515,7 +6515,7 @@ def run_filter_backtest(params):
         if not selected_stocks:
             progress_bar.progress(0)
             st.error("No stocks selected for intraday trading.")
-            return
+            return None
 
         # Display selected stocks in a table
         if selected_stocks:
@@ -6550,7 +6550,7 @@ def run_filter_backtest(params):
             ticker = stock["Stock"].strip()
             if not ticker:
                 st.sidebar.error("Ticker cannot be empty.")
-                return
+                return None
 
             # Fetch data
             data = get_data_sync(
@@ -6565,7 +6565,7 @@ def run_filter_backtest(params):
                 st.error(f"No data available for {ticker} in the selected date range.")
                 progress_bar.progress(0)
                 status_text.text("Analysis failed - no data")
-                continue  # Skip to next stock instead of returning
+                continue
 
             required_columns = ["Open", "High", "Low", "Close", "Volume"]
             if not all(col in data.columns for col in required_columns):
@@ -6573,7 +6573,7 @@ def run_filter_backtest(params):
                 st.error(f"Missing required columns for {ticker}: {', '.join(missing)}")
                 progress_bar.progress(0)
                 status_text.text("Analysis failed - invalid data")
-                continue  # Skip to next stock
+                continue
 
             progress_bar.progress(40)
             status_text.text(f"Preparing analyzers for {ticker}...")
@@ -6653,7 +6653,7 @@ def run_filter_backtest(params):
 
             # Add metrics to consolidated list
             for key, metrics in strategy_metrics.items():
-                if key[0] == ticker:  # Only add metrics for current ticker
+                if key[0] == ticker:
                     all_metrics.append(
                         {"Ticker": key[0], "Strategy": key[1], **metrics}
                     )
@@ -6662,6 +6662,7 @@ def run_filter_backtest(params):
         progress_bar.progress(95)
         status_text.text("Consolidating strategy metrics...")
 
+        top_strategies_per_stock = {}
         if all_metrics:
             consolidated_df = create_consolidated_metrics(all_metrics)
 
@@ -6671,13 +6672,11 @@ def run_filter_backtest(params):
             format_dict = {}
             for col in consolidated_df.columns:
                 if "win_rate" in col.lower():
-                    format_dict[col] = "{:.2%}"  # Format as percentage (0.655 -> 65.5%)
+                    format_dict[col] = "{:.2%}"
                 elif "composite_win_rate" in col.lower():
-                    format_dict[col] = (
-                        "{:.2%}"  # Format composite win rate as percentage
-                    )
+                    format_dict[col] = "{:.2%}"
                 elif "ratio" in col.lower() and "sharpe" in col.lower():
-                    format_dict[col] = "{:.3f}"  # Sharpe ratios to 3 decimal places
+                    format_dict[col] = "{:.3f}"
                 elif (
                     "pct" in col.lower()
                     or "return" in col.lower()
@@ -6705,16 +6704,31 @@ def run_filter_backtest(params):
                 file_name="strategy_performance_metrics.csv",
                 mime="text/csv",
             )
+
+            # Extract top 3 strategies per stock
+            for ticker in consolidated_df["Ticker"].unique():
+                stock_df = consolidated_df[consolidated_df["Ticker"] == ticker]
+                top_strategies = stock_df.sort_values(
+                    by=["Composite_Win_Rate", "Composite_Sharpe"], ascending=False
+                ).head(3)[["Strategy", "Composite_Win_Rate", "Composite_Sharpe"]]
+                top_strategies_per_stock[ticker] = top_strategies.to_dict(
+                    orient="records"
+                )
+
         else:
             st.warning("No strategy performance metrics available for consolidation")
+            return None
 
         progress_bar.progress(100)
         status_text.text("Filter and backtest complete!")
         st.toast("Filter and backtest complete")
+        top_strategies_per_stock.to_csv(f"selected_stocks_strategies.csv", index=False)
+        return top_strategies_per_stock
 
     except Exception as e:
         st.error(f"Critical error in backtest pipeline: {str(e)}")
         logger.exception("Backtest pipeline failed")
+        return None
     finally:
         sys.stdout = old_stdout
 
