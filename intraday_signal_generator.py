@@ -7,57 +7,170 @@ import logging
 from datetime import date, datetime, timedelta, time
 import pytz
 from retrying import retry
-import sys
-from io import StringIO
 import requests
+import ast
+import pandas_ta as ta
+import aiohttp
+import json
+import math
+import sys
+import traceback
 
-from app import run_filter_backtest
-from comprehensive_backtesting.data import get_security_id, init_dhan_client
+# Import registry functions
+from comprehensive_backtesting.registry import get_strategy, STRATEGY_REGISTRY
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler("trading_system.log")],
 )
-logger = logging.getLogger(__name__)
-trade_logger = logging.getLogger("trade_logger")
+logger = logging.getLogger("quant_trader")
+trade_logger = logging.getLogger("trade_execution")
+trade_logger.setLevel(logging.INFO)
+trade_logger.addHandler(logging.FileHandler("trades.log"))
 
-# Telegram bot settings from environment variables
+# Environment configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1000000003")  # Default test ID
 
-if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    raise ValueError(
-        "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set in environment variables"
-    )
+# Validate environment variables
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_ACCESS_TOKEN]):
+    logger.critical("Missing required environment variables")
+    raise EnvironmentError("Required environment variables not set")
 
-# Market settings
-MARKET_OPEN = "09:15:00"  # NSE market open time (IST)
-MARKET_CLOSE = "15:30:00"  # NSE market close time (IST)
-TRADING_END = "15:05:00"  # Stop new trades after 3:05 PM IST
-FORCE_CLOSE = "15:15:00"  # Force close positions at 3:15 PM IST
-MIN_VOTES = 2  # Minimum number of strategies agreeing for a signal
-WINDOW_SIZE = 6  # 6 bars of 5-minute data = 30 minutes
-MORNING_WINDOW_SIZE = 3  # 3 bars = 15 minutes for morning session
+# Market configuration
+MARKET_OPEN = os.getenv("MARKET_OPEN", "09:15:00")
+MARKET_CLOSE = os.getenv("MARKET_CLOSE", "15:30:00")
+TRADING_END = os.getenv("TRADING_END", "15:05:00")
+FORCE_CLOSE = os.getenv("FORCE_CLOSE", "15:15:00")
+SQUARE_OFF_TIME = os.getenv("SQUARE_OFF_TIME", "15:16:00")  # Square off at 3:16 PM
+MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
+WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 6))
+MORNING_WINDOW_SIZE = int(os.getenv("MORNING_WINDOW_SIZE", 3))
+ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
+MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
+MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 0.02))  # 2% of account
+VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.03))  # 3% daily move
+LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 500000))  # 5L shares/day
+API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))  # 3 requests/sec
 
-# Placeholder for DhanHQ client (replace with actual initialization)
-dhan = init_dhan_client()  # Initialize your DhanHQ client here
+# Initialize Dhan client
+dhan = None  # Will be initialized later
 
 
+# Telegram utilities
 async def send_telegram_alert(message):
+    """Send alert with truncation handling and markdown support"""
     try:
+        # Truncate long messages
+        if len(message) > 4000:
+            message = message[:3900] + "...\n[TRUNCATED]"
+
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
             "chat_id": TELEGRAM_CHAT_ID,
             "text": message,
             "parse_mode": "Markdown",
         }
-        response = requests.post(url, data=payload)
-        if response.status_code == 200:
-            logger.info(f"Telegram alert sent: {message}")
-        else:
-            logger.error(f"Failed to send Telegram alert: {response.text}")
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=5) as response:
+                if response.status == 200:
+                    logger.info(f"Telegram alert sent: {message[:100]}...")
+                else:
+                    text = await response.text()
+                    logger.error(f"Telegram error {response.status}: {text}")
     except Exception as e:
-        logger.error(f"Error sending Telegram alert: {e}")
+        logger.error(f"Telegram send failed: {str(e)}")
+
+
+# API rate limiting
+api_rate_bucket = API_RATE_LIMIT
+last_rate_reset = datetime.now()
+
+
+async def consume_api_token():
+    global api_rate_bucket, last_rate_reset
+
+    now = datetime.now()
+    if (now - last_rate_reset).total_seconds() > 60:
+        api_rate_bucket = API_RATE_LIMIT
+        last_rate_reset = now
+
+    while api_rate_bucket <= 0:
+        await asyncio.sleep(0.1)
+        if (datetime.now() - last_rate_reset).total_seconds() > 60:
+            api_rate_bucket = API_RATE_LIMIT
+            last_rate_reset = datetime.now()
+
+    api_rate_bucket -= 1
+
+
+# DhanHQ API operations
+@retry(
+    stop_max_attempt_number=3,
+    wait_exponential_multiplier=2000,
+    wait_exponential_max=30000,
+)
+async def place_super_order(
+    security_id,
+    transaction_type,
+    current_price,
+    stop_loss,
+    take_profit,
+    quantity=MAX_QUANTITY,
+):
+    """Place Super Order with proper risk management"""
+    try:
+        await consume_api_token()
+
+        url = "https://api.dhan.co/v2/super/orders"
+        headers = {
+            "Content-Type": "application/json",
+            "access-token": DHAN_ACCESS_TOKEN,
+        }
+
+        payload = {
+            "dhanClientId": DHAN_CLIENT_ID,
+            "correlationId": f"{security_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "transactionType": transaction_type,
+            "exchangeSegment": "NSE_EQ",
+            "productType": "INTRADAY",
+            "orderType": "LIMIT",
+            "securityId": str(security_id),
+            "quantity": quantity,
+            "price": round(current_price, 2),
+            "targetPrice": round(take_profit, 2),
+            "stopLossPrice": round(stop_loss, 2),
+            "trailingJump": 0.1,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, headers=headers, json=payload, timeout=10
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    order_id = data.get("orderId")
+                    if order_id:
+                        # Log and return
+                        trade_logger.info(
+                            f"Order placed | {security_id} | {transaction_type} | "
+                            f"Qty: {quantity} | Price: {current_price:.2f} | "
+                            f"SL: {stop_loss:.2f} | TP: {take_profit:.2f}"
+                        )
+                        return data
+                    else:
+                        logger.error(f"Order placement failed: {data}")
+                else:
+                    text = await response.text()
+                    logger.error(f"HTTP error {response.status}: {text}")
+        return None
+    except Exception as e:
+        logger.error(f"Order placement exception: {str(e)}")
+        return None
 
 
 @retry(
@@ -65,706 +178,706 @@ async def send_telegram_alert(message):
     wait_exponential_multiplier=2000,
     wait_exponential_max=30000,
 )
-async def fetch_historical_data(
-    security_id, from_date, to_date, interval, exchange_segment="NSE_EQ"
-):
-    interval = (
-        interval.replace("m", "") if "m" in interval else interval.replace("d", "")
-    )
-    if "m" in interval:
-        interval = interval.strip().replace("m", "")
-    elif "d" in interval:
-        interval = interval.strip().replace("d", "")
-    elif "h" in interval:
-        interval = interval.strip().replace("h", "")
-    if not isinstance(security_id, int):
-        logger.error(f"Invalid security_id: {security_id}, must be an integer")
-        return None
-    if not dhan:
-        logger.error("Cannot fetch historical data: Dhan client not initialized")
-        return None
+async def modify_super_order(order_id, leg_name, **params):
+    """Modify existing Super Order"""
     try:
-        ist_tz = pytz.timezone("Asia/Kolkata")
-        if isinstance(from_date, date) and not isinstance(from_date, datetime):
-            from_date = datetime.combine(from_date, time(0, 0), tzinfo=ist_tz)
-        if isinstance(to_date, date) and not isinstance(to_date, datetime):
-            to_date = datetime.combine(to_date, time(23, 59, 59), tzinfo=ist_tz)
+        await consume_api_token()
 
-        today = datetime.now(ist_tz)
-        current_date = today - timedelta(days=1)
-        trading_sessions = {security_id: []}
-        days_checked = 0
-        max_days_to_check = 10
-        NSE_HOLIDAYS_2025 = [
+        url = f"https://api.dhan.co/v2/super/orders/{order_id}"
+        headers = {
+            "Content-Type": "application/json",
+            "access-token": DHAN_ACCESS_TOKEN,
+        }
+
+        payload = {
+            "dhanClientId": DHAN_CLIENT_ID,
+            "orderId": order_id,
+            "legName": leg_name,
+        }
+        payload.update(params)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.put(
+                url, headers=headers, json=payload, timeout=10
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    trade_logger.info(
+                        f"Order modified | {order_id} | {leg_name} | Params: {params}"
+                    )
+                    return data
+                else:
+                    text = await response.text()
+                    logger.error(f"Modify order failed: {text}")
+        return None
+    except Exception as e:
+        logger.error(f"Order modify exception: {str(e)}")
+        return None
+
+
+@retry(
+    stop_max_attempt_number=3,
+    wait_exponential_multiplier=2000,
+    wait_exponential_max=30000,
+)
+async def cancel_super_order(order_id, leg_name):
+    """Cancel Super Order leg"""
+    try:
+        await consume_api_token()
+
+        url = f"https://api.dhan.co/v2/super/orders/{order_id}/{leg_name}"
+        headers = {
+            "Content-Type": "application/json",
+            "access-token": DHAN_ACCESS_TOKEN,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(url, headers=headers, timeout=10) as response:
+                if response.status == 202:
+                    data = await response.json()
+                    trade_logger.info(f"Order canceled | {order_id} | {leg_name}")
+                    return data
+                else:
+                    text = await response.text()
+                    logger.error(f"Cancel order failed: {text}")
+        return None
+    except Exception as e:
+        logger.error(f"Order cancel exception: {str(e)}")
+        return None
+
+
+async def place_market_order(security_id, transaction_type, quantity):
+    """Place market order for square off"""
+    try:
+        await consume_api_token()
+
+        url = "https://api.dhan.co/v2/orders"
+        headers = {
+            "Content-Type": "application/json",
+            "access-token": DHAN_ACCESS_TOKEN,
+        }
+
+        payload = {
+            "dhanClientId": DHAN_CLIENT_ID,
+            "exchangeSegment": "NSE_EQ",
+            "securityId": str(security_id),
+            "transactionType": transaction_type,
+            "orderType": "MARKET",
+            "productType": "INTRADAY",
+            "quantity": quantity,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, headers=headers, json=payload, timeout=10
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    order_id = data.get("orderId")
+                    if order_id:
+                        trade_logger.info(
+                            f"Market order placed | {security_id} | {transaction_type} | Qty: {quantity}"
+                        )
+                        return data
+                else:
+                    text = await response.text()
+                    logger.error(f"Market order failed: {text}")
+        return None
+    except Exception as e:
+        logger.error(f"Market order exception: {str(e)}")
+        return None
+
+
+async def verify_order_execution(order_id):
+    """Verify if order was executed"""
+    try:
+        await consume_api_token()
+
+        url = f"https://api.dhan.co/v2/orders/{order_id}"
+        headers = {"access-token": DHAN_ACCESS_TOKEN}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("status") == "EXECUTED":
+                        return True
+        return False
+    except Exception:
+        return False
+
+
+# Data utilities
+def get_symbol_from_id(security_id):
+    """Resolve symbol from security ID"""
+    try:
+        df = pd.read_csv("ind_nifty500list.csv")
+        return df[df["security_id"] == security_id]["ticker"].values[0]
+    except:
+        return f"UNKNOWN_{security_id}"
+
+
+async def fetch_dynamic_holidays(year):
+    """Fetch NSE holidays dynamically"""
+    try:
+        url = f"https://www.nseindia.com/api/holiday-master?type=trading"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    holidays = [
+                        d["tradingDate"] for d in data["data"] if d["trading"] == "N"
+                    ]
+                    logger.info(f"Fetched {len(holidays)} trading holidays")
+                    return holidays
+        return []
+    except:
+        logger.warning("Failed to fetch holidays, using static list")
+        return [  # Fallback to 2025 holidays
             "2025-01-26",
             "2025-03-14",
+            "2025-03-29",
+            "2025-04-11",
+            "2025-04-17",
+            "2025-05-01",
+            "2025-06-17",
+            "2025-07-17",
+            "2025-08-15",
+            "2025-09-05",
+            "2025-10-02",
+            "2025-10-23",
+            "2025-11-12",
+            "2025-12-25",
         ]
-        while (
-            len(trading_sessions[security_id]) < 2 and days_checked < max_days_to_check
-        ):
+
+
+async def fetch_historical_data(security_id, days_back=20, interval="5min"):
+    """Fetch historical data with dynamic holiday handling"""
+    try:
+        ist = pytz.timezone("Asia/Kolkata")
+        today = datetime.now(ist).date()
+        holidays = await fetch_dynamic_holidays(today.year)
+
+        # Calculate valid trading days
+        valid_days = []
+        current_day = today - timedelta(days=1)
+        while len(valid_days) < days_back:
             if (
-                current_date.weekday() >= 5
-                or current_date.strftime("%Y-%m-%d") in NSE_HOLIDAYS_2025
+                current_day.weekday() < 5
+                and current_day.strftime("%Y-%m-%d") not in holidays
             ):
-                logger.info(f"Skipping non-trading day {current_date.date()}")
-                current_date -= timedelta(days=1)
-                days_checked += 1
-                continue
-            from_date_str = from_date
-            to_date_str = to_date
-            if isinstance(from_date, datetime):
-                from_date_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
-            if isinstance(to_date, datetime):
-                to_date_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(
-                f"Fetching historical data for {security_id} from {from_date_str} to {to_date_str}"
-            )
-            print(
-                f"Fetching data for {security_id} from {from_date_str} to {to_date_str} for {interval} minute interval"
-            )
+                valid_days.append(current_day)
+            current_day -= timedelta(days=1)
+
+        # Fetch data for valid days
+        all_data = []
+        for day in valid_days:
+            from_date = datetime.combine(day, time(9, 15), tzinfo=ist)
+            to_date = datetime.combine(day, time(15, 30), tzinfo=ist)
+
             data = dhan.intraday_minute_data(
                 security_id=security_id,
-                exchange_segment=exchange_segment,
+                exchange_segment="NSE_EQ",
                 instrument_type="EQUITY",
-                interval=int(interval),
-                from_date=from_date_str,
-                to_date=to_date_str,
+                interval=int(interval.replace("m", "")),
+                from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
+                to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
             )
-            if (
-                data
-                and data.get("status") == "success"
-                and "data" in data
-                and data["data"]
-            ):
-                df_chunk = pd.DataFrame(data["data"])
-                required_fields = [
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "timestamp",
-                ]
-                missing_fields = [
-                    field for field in required_fields if field not in df_chunk.columns
-                ]
-                if missing_fields:
-                    logger.warning(
-                        f"Missing fields {missing_fields} for {security_id} from {from_date_str} to {to_date_str}"
-                    )
-                    current_date -= timedelta(days=1)
-                    days_checked += 1
-                    continue
-                df_chunk["datetime"] = pd.to_datetime(
-                    df_chunk["timestamp"], unit="s", utc=True, errors="coerce"
-                )
-                df_chunk["datetime"] = df_chunk["datetime"].dt.tz_convert(ist_tz)
-                df_chunk = df_chunk.dropna(subset=["datetime"])
-                valid_date_range = (df_chunk["datetime"] >= from_date) & (
-                    df_chunk["datetime"] <= to_date
-                )
-                df_chunk = df_chunk[valid_date_range]
-                if len(df_chunk) < 50:
-                    logger.info(
-                        f"Insufficient data ({len(df_chunk)} rows) for {security_id} on {from_date.date()}"
-                    )
-                    current_date -= timedelta(days=1)
-                    days_checked += 1
-                    continue
-                df_chunk = df_chunk[
-                    ["datetime", "open", "high", "low", "close", "volume"]
-                ]
-                trading_sessions[security_id].append(df_chunk)
-                logger.info(
-                    f"Fetched {len(df_chunk)} rows for {security_id} from {from_date_str} to {to_date_str}"
-                )
-            else:
-                logger.warning(
-                    f"No data or failed fetch for {security_id} from {from_date_str} to {to_date_str}: {data.get('remarks', 'No remarks')}"
-                )
-            current_date -= timedelta(days=1)
-            days_checked += 1
-        logger.info(
-            f"Checked {days_checked} days, found {len(trading_sessions[security_id])} trading sessions for {security_id}"
-        )
-        sessions = trading_sessions[security_id]
-        if len(sessions) >= 2:
-            df = pd.concat(sessions, ignore_index=True)
-            df = df.drop_duplicates(subset=["datetime"], keep="last")
-            df = df.sort_values("datetime").reset_index(drop=True)
-            logger.info(
-                f"Combined {len(df)} rows of historical data for {security_id} across {len(sessions)} trading sessions"
-            )
-            return df
-        else:
-            logger.error(
-                f"Failed to fetch data for 2 trading sessions for {security_id} after checking {days_checked} days"
-            )
+
+            if data.get("status") == "success" and data.get("data"):
+                df = pd.DataFrame(data["data"])
+                df["datetime"] = pd.to_datetime(
+                    df["timestamp"], unit="s", utc=True
+                ).dt.tz_convert(ist)
+                df = df[["datetime", "open", "high", "low", "close", "volume"]]
+                all_data.append(df)
+
+        if not all_data:
             return None
+
+        full_df = pd.concat(all_data).sort_values("datetime")
+        logger.info(f"Fetched {len(full_df)} bars for {security_id}")
+        return full_df
     except Exception as e:
-        logger.error(f"Error fetching historical data for {security_id}: {e}")
-        raise
-
-
-@retry(
-    stop_max_attempt_number=3,
-    wait_exponential_multiplier=2000,
-    wait_exponential_max=30000,
-)
-async def fetch_intraday_data(ticker, exchange_segment="NSE_EQ"):
-    """
-    Fetch intraday data for multiple security IDs from DhanHQ API.
-    """
-    if not dhan:
-        logger.error("Cannot fetch intraday data: Dhan client not initialized")
+        logger.error(f"Historical data error: {str(e)}")
         return None
+
+
+async def fetch_realtime_quote(security_id):
+    """Fetch realtime quote for a single security"""
     try:
-        ist_tz = pytz.timezone("Asia/Kolkata")
-        today = datetime.now(ist_tz).date()
-        from_date = datetime.combine(today, time(9, 15), tzinfo=ist_tz)
-        to_date = datetime.combine(today, time(15, 30), tzinfo=ist_tz)
-        security_ids = get_security_id(ticker)
-        logger.info(f"Fetching intraday data for {len(security_ids)} securities")
-        securities = {exchange_segment: [security_ids]}
-        data = dhan.quote_data(securities)
+        await consume_api_token()
 
-        if not data or data.get("status") != "success" or not data.get("data"):
-            logger.error(
-                f"API call failed: {data.get('remarks', 'Unknown error') if data else 'No response'}"
-            )
-            return None
+        url = "https://api.dhan.co/v2/quotes"
+        headers = {"access-token": DHAN_ACCESS_TOKEN}
+        params = {"securityId": str(security_id), "exchangeSegment": "NSE_EQ"}
 
-        exchange_data = data["data"].get(exchange_segment)
-        if not exchange_data:
-            logger.error(f"No data for exchange segment {exchange_segment}")
-            return None
-
-        records = []
-        for security_id_str, instrument_data in exchange_data.items():
-            try:
-                security_id = int(security_id_str)
-                if security_id not in security_ids:
-                    logger.debug(f"Skipping security {security_id} - not in watchlist")
-                    continue
-                if not instrument_data or not isinstance(instrument_data, dict):
-                    logger.warning(f"No valid data for security {security_id}")
-                    continue
-
-                df_csv = pd.read_csv("ind_nifty500list.csv")
-                match = df_csv[df_csv["security_id"] == security_id]
-                symbol = (
-                    match["ticker"].iloc[0]
-                    if not match.empty
-                    else f"UNKNOWN_{security_id}"
-                )
-
-                last_trade_time = instrument_data.get("last_trade_time")
-                if last_trade_time:
-                    try:
-                        last_trade_time_parsed = pd.to_datetime(
-                            last_trade_time, format="%d/%m/%Y %H:%M:%S", errors="coerce"
-                        )
-                        if pd.isna(last_trade_time_parsed):
-                            for fmt in ["%Y-%m-%d %H:%M:%S", "%d-%m-%Y %H:%M:%S"]:
-                                try:
-                                    last_trade_time_parsed = pd.to_datetime(
-                                        last_trade_time, format=fmt, errors="raise"
-                                    )
-                                    break
-                                except:
-                                    continue
-                            else:
-                                raise ValueError(
-                                    f"Could not parse timestamp: {last_trade_time}"
-                                )
-                        if last_trade_time_parsed.tz is None:
-                            last_trade_time_parsed = ist_tz.localize(
-                                last_trade_time_parsed
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to parse timestamp for {security_id}: {e}"
-                        )
-                        last_trade_time_parsed = datetime.now(ist_tz)
-                else:
-                    last_trade_time_parsed = datetime.now(ist_tz)
-
-                ohlc = instrument_data.get("ohlc", {})
-                if not ohlc or not isinstance(ohlc, dict):
-                    logger.warning(f"No OHLC data for security {security_id}")
-                    continue
-
-                last_price = instrument_data.get("last_price", 0)
-                record = {
-                    "datetime": last_trade_time_parsed,
-                    "open": float(ohlc.get("open", 0)),
-                    "high": float(ohlc.get("high", 0)),
-                    "low": float(ohlc.get("low", 0)),
-                    "close": float(last_price),
-                    "volume": float(instrument_data.get("volume", 0)),
-                    "security_id": security_id,
-                    "symbol": symbol,
-                }
-
-                required_fields = ["open", "high", "low", "close", "volume", "datetime"]
-                missing_fields = [
-                    field for field in required_fields if not record[field]
-                ]
-                if missing_fields:
-                    logger.warning(
-                        f"Missing fields {missing_fields} for security {security_id}"
-                    )
-                    continue
-
-                if (
-                    record["open"] >= 0
-                    and record["high"] >= 0
-                    and record["low"] >= 0
-                    and record["close"] >= 0
-                ):
-                    records.append(record)
-                    logger.info(
-                        f"Added record for {symbol}: O={record['open']}, H={record['high']}, L={record['low']}, C={record['close']}, V={record['volume']}"
-                    )
-                else:
-                    logger.warning(f"Invalid OHLC data for {symbol}: {record}")
-            except Exception as e:
-                logger.warning(f"Error processing data for {security_id}: {e}")
-                continue
-
-        if not records:
-            logger.error("No valid records to process")
-            return None
-
-        df = pd.DataFrame(records)
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-        df = df.dropna(subset=["datetime"])
-        df["datetime"] = df["datetime"].dt.tz_convert(ist_tz)
-        valid_date_range = (df["datetime"].dt.date == today) & (
-            (df["datetime"].dt.time >= time(9, 15))
-            & (df["datetime"].dt.time <= time(15, 30))
-        )
-        df = df[valid_date_range]
-        if df.empty:
-            logger.error(f"No valid intraday data for {exchange_segment} on {today}")
-            return None
-        df = df[
-            [
-                "datetime",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "security_id",
-                "symbol",
-            ]
-        ]
-        df = df.sort_values(["security_id", "datetime"]).reset_index(drop=True)
-        logger.info(
-            f"Combined {len(df)} rows of intraday data across {len(set(df['security_id']))} securities"
-        )
-        return df
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=headers, params=params, timeout=5
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("data"):
+                        quote = data["data"][0]
+                        return {
+                            "price": float(quote["last_price"]),
+                            "timestamp": datetime.strptime(
+                                quote["last_trade_time"], "%d/%m/%Y %H:%M:%S"
+                            ).replace(tzinfo=pytz.timezone("Asia/Kolkata")),
+                        }
+        return None
     except Exception as e:
-        logger.error(f"Error fetching intraday data: {e}")
-        raise
+        logger.error(f"Realtime quote error: {str(e)}")
+        return None
 
 
-async def aggregate_ticks_to_5min(ticker, security_id, data_store):
-    """Aggregate tick data into 5-minute OHLCV bars and store in data_store."""
+async def calculate_vwap(hist_data):
+    """Calculate Volume Weighted Average Price"""
     try:
-        tick_buffer = []
-        current_bar_start = None
-        ist_tz = pytz.timezone("Asia/Kolkata")
+        if hist_data is None or len(hist_data) == 0:
+            return 0
+        hist_data["typical_price"] = (
+            hist_data["high"] + hist_data["low"] + hist_data["close"]
+        ) / 3
+        vwap = (hist_data["typical_price"] * hist_data["volume"]).sum() / hist_data[
+            "volume"
+        ].sum()
+        return vwap
+    except:
+        return 0
 
-        while True:
-            tick_data = await fetch_intraday_data(ticker)
-            if tick_data is None or tick_data.empty:
-                await asyncio.sleep(1)
-                continue
 
-            tick_time = tick_data["datetime"].iloc[0]
-            price = tick_data["close"].iloc[0]
-            volume = tick_data["volume"].iloc[0]
+# Risk management
+def calculate_regime(data, adx_period=14):
+    """Determine market regime with ADX"""
+    if len(data) < adx_period:
+        return "unknown", 0.0, 0.0
 
-            bar_start = tick_time.replace(second=0, microsecond=0)
-            bar_start -= timedelta(minutes=bar_start.minute % 5)
+    try:
+        adx = ta.adx(data["high"], data["low"], data["close"], length=adx_period)
+        atr = ta.atr(data["high"], data["low"], data["close"], length=adx_period)
+        latest_adx = adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0.0
+        latest_atr = atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else 0.0
 
-            if current_bar_start is None:
-                current_bar_start = bar_start
-                tick_buffer = [{"time": tick_time, "price": price, "volume": volume}]
-            elif bar_start != current_bar_start:
-                if tick_buffer:
-                    df = pd.DataFrame(tick_buffer)
-                    bar_data = {
-                        "datetime": current_bar_start,
-                        "open": df["price"].iloc[0],
-                        "high": df["price"].max(),
-                        "low": df["price"].min(),
-                        "close": df["price"].iloc[-1],
-                        "volume": df["volume"].sum(),
-                        "security_id": security_id,
-                        "symbol": ticker,
-                    }
-                    bar_df = pd.DataFrame([bar_data])
-                    bar_df["datetime"] = pd.to_datetime(bar_df["datetime"])
-                    # Append to data_store
-                    if security_id in data_store:
-                        data_store[security_id] = (
-                            pd.concat([data_store[security_id], bar_df])
-                            .sort_values("datetime")
-                            .reset_index(drop=True)
-                        )
-                    else:
-                        data_store[security_id] = bar_df
-                    logger.info(
-                        f"Aggregated 5-min bar for {ticker} at {current_bar_start}"
-                    )
-                    yield bar_df
-                tick_buffer = [{"time": tick_time, "price": price, "volume": volume}]
-                current_bar_start = bar_start
-            else:
-                tick_buffer.append(
-                    {"time": tick_time, "price": price, "volume": volume}
-                )
-
-            await asyncio.sleep(1)  # Fetch every second
+        if latest_adx > 25:
+            return "trending", latest_adx, latest_atr
+        elif latest_adx < 20:
+            return "range_bound", latest_adx, latest_atr
+        return "transitional", latest_adx, latest_atr
     except Exception as e:
-        logger.error(f"Error aggregating ticks for {ticker}: {e}")
-        yield pd.DataFrame()
+        logger.error(f"Regime calculation error: {str(e)}")
+        return "unknown", 0.0, 0.0
 
 
-import asyncio
-import pytz
-import pandas as pd
-import backtrader as bt
-from datetime import datetime, timedelta
-import logging
+def calculate_risk_params(regime, atr, current_price, direction):
+    """Calculate position sizing and risk levels"""
+    risk_per_trade = 0.01 * ACCOUNT_SIZE
+
+    # Regime-based parameters
+    params = {
+        "trending": {"sl_mult": 2.0, "tp_mult": 3.0, "risk_factor": 0.8},
+        "range_bound": {"sl_mult": 1.5, "tp_mult": 2.0, "risk_factor": 1.0},
+        "transitional": {"sl_mult": 1.8, "tp_mult": 2.5, "risk_factor": 0.9},
+        "unknown": {"sl_mult": 1.8, "tp_mult": 2.5, "risk_factor": 0.9},
+    }
+    cfg = params.get(regime, params["unknown"])
+
+    # Calculate risk parameters
+    stop_loss_distance = atr * cfg["sl_mult"]
+    position_size = min(
+        MAX_QUANTITY, int((risk_per_trade / stop_loss_distance) * cfg["risk_factor"])
+    )
+    position_size = max(1, position_size)
+
+    if direction == "BUY":
+        stop_loss = current_price - stop_loss_distance
+        take_profit = current_price + (atr * cfg["tp_mult"])
+    else:  # SELL
+        stop_loss = current_price + stop_loss_distance
+        take_profit = current_price - (atr * cfg["tp_mult"])
+
+    return {
+        "position_size": position_size,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+    }
 
 
-async def process_stock(ticker, security_id, strategies, data_store):
-    """Process real-time 5-minute bars for a stock, running multiple strategies with voting."""
-    logger = logging.getLogger(__name__)
-    ist_tz = pytz.timezone("Asia/Kolkata")
+# Strategy wrapper for signal generation
+class SignalGeneratorWrapper(bt.Strategy):
+    """
+    Wrapper strategy to capture signals without executing trades
+    """
 
-    # Fetch historical data for indicator stability
-    end_date = datetime.now(ist_tz).date() - timedelta(days=1)
-    start_date = end_date - timedelta(days=2)
-    historical_data = await fetch_historical_data(
-        security_id, start_date, end_date, "5m"
+    def __init__(self, strategy_class, **params):
+        self.signal = None
+        self.strategy = strategy_class(self, **params)
+
+    def next(self):
+        # Reset signal at each bar
+        self.signal = None
+
+        # Run the original strategy
+        self.strategy.next()
+
+    def buy(self, *args, **kwargs):
+        self.signal = "BUY"
+
+    def sell(self, *args, **kwargs):
+        self.signal = "SELL"
+
+
+# Trading operations
+async def execute_strategy_signal(
+    ticker, security_id, signal, regime, adx_value, atr_value, hist_data
+):
+    """Execute trading signal with proper risk management"""
+    # Validate signal
+    if signal not in ["BUY", "SELL"]:
+        logger.warning(f"Invalid signal for {ticker}: {signal}")
+        return
+
+    # Get current price
+    quote = await fetch_realtime_quote(security_id)
+    if not quote:
+        logger.warning(f"Price unavailable for {ticker}")
+        return
+
+    current_price = quote["price"]
+
+    # Calculate VWAP for better entry
+    vwap = await calculate_vwap(hist_data)
+    if vwap > 0:
+        if signal == "BUY":
+            entry_price = min(current_price, vwap * 0.998)
+        else:  # SELL
+            entry_price = max(current_price, vwap * 1.002)
+    else:
+        entry_price = current_price
+
+    # Calculate risk parameters
+    risk_params = calculate_risk_params(regime, atr_value, entry_price, signal)
+
+    # Prepare alert message
+    message = (
+        f"*{ticker} Signal*\n"
+        f"Direction: {signal}\n"
+        f"Entry Price: ₹{entry_price:.2f}\n"
+        f"VWAP: ₹{vwap:.2f}\n"
+        f"Regime: {regime} (ADX: {adx_value:.2f})\n"
+        f"Size: {risk_params['position_size']} shares\n"
+        f"Stop Loss: ₹{risk_params['stop_loss']:.2f}\n"
+        f"Take Profit: ₹{risk_params['take_profit']:.2f}\n"
+        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
-    if historical_data is not None and not historical_data.empty:
-        if security_id not in data_store:
-            data_store[security_id] = historical_data
-        else:
-            data_store[security_id] = (
-                pd.concat([data_store[security_id], historical_data])
-                .sort_values("datetime")
-                .reset_index(drop=True)
-            )
+    # Place order
+    order_response = await place_super_order(
+        security_id,
+        signal,
+        entry_price,
+        risk_params["stop_loss"],
+        risk_params["take_profit"],
+        risk_params["position_size"],
+    )
 
-    # Initialize cerebros for each strategy
-    cerebros = []
-    for strat in strategies:
-        cerebro = bt.Cerebro()
-        cerebro.addstrategy(strat["class"], **strat["params"].get(ticker, {}))
-        min_bars = strat["class"].get_min_data_points(strat["params"].get(ticker, {}))
-        cerebros.append(
-            {"name": strat["name"], "cerebro": cerebro, "min_bars": min_bars}
+    if order_response and order_response.get("orderId"):
+        await send_telegram_alert(message)
+    else:
+        await send_telegram_alert(
+            f"*{ticker} Order Failed*\nSignal: {signal} at ₹{entry_price:.2f}"
         )
 
-    async for new_bar in aggregate_ticks_to_5min(ticker, security_id, data_store):
-        if new_bar.empty:
-            logger.debug(f"Empty bar received for {ticker}. Skipping.")
-            continue
-        data_window = data_store.get(security_id, pd.DataFrame())
-        if data_window.empty:
-            logger.warning(f"No data available for {ticker}")
-            continue
 
-        current_time = datetime.now(ist_tz).time()
-        window_size = (
-            MORNING_WINDOW_SIZE
-            if current_time < datetime.strptime("10:30:00", "%H:%M:%S").time()
-            else WINDOW_SIZE
-        )
-
-        max_min_bars = max(c["min_bars"] for c in cerebros)
-        if len(data_window) < max_min_bars:
-            logger.debug(
-                f"Insufficient data for {ticker}: {len(data_window)} bars, need {max_min_bars}"
-            )
-            continue
-
-        # Limit data window to required size and current date
-        data_window = data_window[-max(max_min_bars, window_size) :]
-        data_window = data_window[
-            data_window["datetime"].dt.date <= datetime.now(ist_tz).date()
-        ]
-
-        signals = []
-        for cerebro_info in cerebros:
-            cerebro = cerebro_info["cerebro"]
-            data_feed = bt.feeds.PandasData(
-                dataname=data_window,
-                datetime="datetime",
-                open="open",
-                high="high",
-                low="low",
-                close="close",
-                volume="volume",
-            )
-            cerebro.datas = cerebro.datas[:0]  # Clear previous data
-            cerebro.adddata(data_feed)
-            cerebro.run()
-
-            strategy_instance = cerebro.strategies[0]
-            if strategy_instance.order and strategy_instance.order_type in [
-                "enter_long",
-                "enter_short",
-            ]:
-                # Base signal data
-                signal_data = {
-                    "strategy": cerebro_info["name"],
-                    "signal": (
-                        "BUY"
-                        if strategy_instance.order_type == "enter_long"
-                        else "SELL"
-                    ),
-                    "price": strategy_instance.data.close[0],
-                    "momentum": (
-                        strategy_instance.indicator_data[-1].get(
-                            "momentum_alignment", "N/A"
-                        )
-                        if strategy_instance.indicator_data
-                        else "N/A"
-                    ),
-                }
-
-                # Dynamically retrieve strategy indicators
-                indicators = {}
-                try:
-                    # Check if strategy has a get_indicators method
-                    if hasattr(strategy_instance, "get_indicators"):
-                        indicators = strategy_instance.get_indicators()
-                    else:
-                        # Fallback: Inspect strategy lines or attributes
-                        for line_name in strategy_instance.lines.getlinealiases():
-                            if line_name not in [
-                                "datetime",
-                                "open",
-                                "high",
-                                "low",
-                                "close",
-                                "volume",
-                            ]:
-                                try:
-                                    value = getattr(strategy_instance, line_name)[0]
-                                    indicators[line_name] = value
-                                except (IndexError, AttributeError):
-                                    continue
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to retrieve indicators for {cerebro_info['name']} on {ticker}: {str(e)}"
-                    )
-
-                # Add indicators to signal data
-                for ind_name, ind_value in indicators.items():
-                    try:
-                        signal_data[ind_name] = (
-                            float(ind_value)
-                            if isinstance(ind_value, (int, float))
-                            else ind_value
-                        )
-                    except (ValueError, TypeError):
-                        signal_data[ind_name] = ind_value  # Keep as is if not numeric
-
-                signals.append(signal_data)
-
-        if signals:
-            buy_count = sum(1 for s in signals if s["signal"] == "BUY")
-            sell_count = sum(1 for s in signals if s["signal"] == "SELL")
-            timestamp = datetime.now(ist_tz).strftime("%Y-%m-%d %H:%M:%S")
-
-            if buy_count >= MIN_VOTES and buy_count > sell_count:
-                agreeing_strategies = [
-                    s["strategy"] for s in signals if s["signal"] == "BUY"
-                ]
-                message = (
-                    f"*{ticker} Signal (Majority Vote)*\n"
-                    f"Signal: BUY\n"
-                    f"Price: ₹{signals[0]['price']:.2f}\n"
-                    f"Time: {timestamp}\n"
-                    f"Agreeing Strategies: {', '.join(agreeing_strategies)}\n"
-                )
-                # Add indicators for agreeing strategies
-                for s in signals:
-                    if s["signal"] == "BUY":
-                        message += f"\nStrategy: {s['strategy']}\n"
-                        for ind_name, ind_value in s.items():
-                            if ind_name not in [
-                                "strategy",
-                                "signal",
-                                "price",
-                                "momentum",
-                            ]:
-                                message += f"{ind_name.replace('_', ' ').title()} (Last): {ind_value:.2f if isinstance(ind_value, (int, float)) else ind_value}\n"
-                        if s["momentum"] != "N/A":
-                            message += f"Momentum (Last): {s['momentum']}\n"
-                await send_telegram_alert(message)
-            elif sell_count >= MIN_VOTES and sell_count > buy_count:
-                agreeing_strategies = [
-                    s["strategy"] for s in signals if s["signal"] == "SELL"
-                ]
-                message = (
-                    f"*{ticker} Signal (Majority Vote)*\n"
-                    f"Signal: SELL\n"
-                    f"Price: ₹{signals[0]['price']:.2f}\n"
-                    f"Time: {timestamp}\n"
-                    f"Agreeing Strategies: {', '.join(agreeing_strategies)}\n"
-                )
-                # Add indicators for agreeing strategies
-                for s in signals:
-                    if s["signal"] == "SELL":
-                        message += f"\nStrategy: {s['strategy']}\n"
-                        for ind_name, ind_value in s.items():
-                            if ind_name not in [
-                                "strategy",
-                                "signal",
-                                "price",
-                                "momentum",
-                            ]:
-                                message += f"{ind_name.replace('_', ' ').title()} (Last): {ind_value:.2f if isinstance(ind_value, (int, float)) else ind_value}\n"
-                        if s["momentum"] != "N/A":
-                            message += f"Momentum (Last): {s['momentum']}\n"
-                await send_telegram_alert(message)
-            else:
-                logger.debug(
-                    f"No majority signal for {ticker}: {buy_count} BUY, {sell_count} SELL"
-                )
-
-
-async def main():
-    """Main function to process stocks concurrently using pre-generated strategies."""
+async def calculate_stock_volatility(security_id):
+    """Calculate historical volatility"""
     try:
-        # Set up logging
-        logger = logging.getLogger(__name__)
+        hist_data = await fetch_historical_data(
+            security_id, days_back=30, interval="1d"
+        )
+        if hist_data is None or len(hist_data) < 5:
+            return 0
 
-        # Get current time in IST
-        ist_tz = pytz.timezone("Asia/Kolkata")
-        now = datetime(
-            2025, 7, 26, 11, 25, 0, tzinfo=ist_tz
-        )  # Set to 11:25 AM IST, July 26, 2025
+        returns = hist_data["close"].pct_change().dropna()
+        volatility = returns.std() * math.sqrt(252)  # Annualized volatility
+        return volatility
+    except:
+        return 0
 
-        # Check if it's a weekday (Monday to Friday)
-        if now.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-            logger.info("Market is closed on weekends (Saturday/Sunday). Exiting.")
+
+async def calculate_average_volume(security_id):
+    """Calculate average daily volume"""
+    try:
+        hist_data = await fetch_historical_data(
+            security_id, days_back=10, interval="1d"
+        )
+        if hist_data is None or len(hist_data) < 5:
+            return 0
+
+        avg_volume = hist_data["volume"].mean()
+        return avg_volume
+    except:
+        return 0
+
+
+async def process_stock(ticker, security_id, strategies):
+    """Process stock with multiple strategies"""
+    try:
+        logger.info(f"Processing {ticker} with {len(strategies)} strategies")
+
+        # Filter by volatility and liquidity
+        volatility = await calculate_stock_volatility(security_id)
+        avg_volume = await calculate_average_volume(security_id)
+
+        if volatility < VOLATILITY_THRESHOLD:
+            logger.info(f"Skipping {ticker} due to low volatility: {volatility:.4f}")
+            return
+        if avg_volume < LIQUIDITY_THRESHOLD:
+            logger.info(f"Skipping {ticker} due to low liquidity: {avg_volume:.0f}")
             return
 
-        # Define market open and close times for today
-        market_open = datetime.strptime(
-            f"{now.date()} {MARKET_OPEN}", "%Y-%m-%d %H:%M:%S"
-        ).replace(tzinfo=ist_tz)
-        market_close = datetime.strptime(
-            f"{now.date()} {MARKET_CLOSE}", "%Y-%m-%d %H:%M:%S"
-        ).replace(tzinfo=ist_tz)
-
-        # Check if market is open
-        if now.time() < market_open.time():
-            wait_seconds = (market_open - now).total_seconds()
-            logger.info(
-                f"Market not yet open. Waiting {wait_seconds:.0f} seconds until {MARKET_OPEN}."
-            )
-            await asyncio.sleep(wait_seconds)
-        elif now.time() > market_close.time():
-            logger.info("Market is closed. Exiting.")
+        # Load historical data
+        hist_data = await fetch_historical_data(security_id, days_back=20)
+        if hist_data is None or len(hist_data) < 100:
+            logger.warning(f"Insufficient data for {ticker}")
             return
 
-        # Load strategies from CSV
-        try:
-            top_strategies_df = pd.read_csv("selected_stocks_strategies.csv")
-        except FileNotFoundError:
-            logger.error("File selected_stocks_strategies.csv not found. Exiting.")
-            return
-        except pd.errors.EmptyDataError:
-            logger.error("File selected_stocks_strategies.csv is empty. Exiting.")
-            return
-
-        # Check if DataFrame is empty
-        if top_strategies_df.empty:
-            logger.error(
-                "No strategies found in selected_stocks_strategies.csv. Exiting."
-            )
-            return
-
-        # Group strategies by ticker to match top_strategies_per_stock format
-        top_strategies_per_stock = {}
-        for ticker in top_strategies_df["Ticker"].unique():
-            stock_df = top_strategies_df[top_strategies_df["Ticker"] == ticker]
-            strategies = stock_df[
-                ["Strategy", "Composite_Win_Rate", "Composite_Sharpe"]
-            ].to_dict(orient="records")
-            top_strategies_per_stock[ticker] = strategies
-
-        # Load Nifty 500 list for security IDs
-        try:
-            df_csv = pd.read_csv("ind_nifty500list.csv")
-        except FileNotFoundError:
-            logger.error("File ind_nifty500list.csv not found. Exiting.")
-            return
-        except pd.errors.EmptyDataError:
-            logger.error("File ind_nifty500list.csv is empty. Exiting.")
-            return
-
-        # Extract stocks and their strategies
-        stock_strategies = []
-        for ticker, strategies in top_strategies_per_stock.items():
-            match = df_csv[df_csv["ticker"] == ticker]
-            if match.empty:
-                logger.warning(f"No security ID found for ticker {ticker}. Skipping.")
-                continue
-            security_id = match["security_id"].iloc[0]
-            stock_strategies.append(
-                {
-                    "ticker": ticker,
-                    "security_id": int(security_id),
-                    "strategies": strategies,
-                }
-            )
-
-        if not stock_strategies:
-            logger.error("No valid stocks with security IDs found. Exiting.")
-            return
-
-        # Initialize data store
-        data_store = {}  # Dictionary to store OHLCV data for each security_id
-
-        # Process stocks concurrently
-        tasks = [
-            process_stock(s["ticker"], s["security_id"], s["strategies"], data_store)
-            for s in stock_strategies
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Log any task exceptions
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(
-                    f"Error processing stock {stock_strategies[i]['ticker']}: {str(result)}"
+        # Initialize strategies
+        signals = []
+        for strat in strategies:
+            strategy_name = strat["Strategy"]
+            try:
+                # Use registry to get strategy class
+                strategy_class = get_strategy(strategy_name)
+            except KeyError:
+                logger.warning(
+                    f"Strategy {strategy_name} not found in registry for {ticker}"
                 )
+                continue
 
-        logger.info("All stocks processed successfully.")
+            # Parse parameters
+            params = strat.get("Best_Parameters", {})
+            if isinstance(params, str) and params.strip():
+                try:
+                    params = ast.literal_eval(params)
+                except:
+                    params = {}
+            elif not params:
+                params = {}
+
+            # Create cerebro instance
+            cerebro = bt.Cerebro(stdstats=False, runonce=True)
+            data_feed = bt.feeds.PandasData(dataname=hist_data, datetime="datetime")
+            cerebro.adddata(data_feed)
+
+            # Add wrapper strategy
+            cerebro.addstrategy(
+                SignalGeneratorWrapper, strategy_class=strategy_class, **params
+            )
+
+            # Get min data points
+            min_bars = strategy_class.get_min_data_points(params)
+            if len(hist_data) < min_bars:
+                logger.warning(
+                    f"Skipping {strategy_name} for {ticker}: need {min_bars} bars, have {len(hist_data)}"
+                )
+                continue
+
+            # Run strategy
+            try:
+                results = cerebro.run()
+                if results and results[0].signal:
+                    signals.append(results[0].signal)
+                    logger.info(
+                        f"Strategy {strategy_name} generated {results[0].signal} signal for {ticker}"
+                    )
+            except Exception as e:
+                logger.error(f"Strategy {strategy_name} failed for {ticker}: {str(e)}")
+                logger.error(traceback.format_exc())
+
+        # Process signals
+        if not signals:
+            return
+
+        # Count votes
+        buy_votes = signals.count("BUY")
+        sell_votes = signals.count("SELL")
+
+        # Determine market regime
+        regime, adx_value, atr_value = calculate_regime(hist_data)
+
+        # Execute based on voting
+        if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
+            await execute_strategy_signal(
+                ticker, security_id, "BUY", regime, adx_value, atr_value, hist_data
+            )
+        elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
+            await execute_strategy_signal(
+                ticker, security_id, "SELL", regime, adx_value, atr_value, hist_data
+            )
 
     except Exception as e:
-        logger.exception(f"Critical error in main function: {str(e)}")
-        return
+        logger.error(f"Stock processing failed for {ticker}: {str(e)}")
+        logger.error(traceback.format_exc())
+
+
+async def market_hours_check():
+    """Validate we're within market hours"""
+    ist = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(ist)
+
+    # Check weekday
+    if now.weekday() >= 5:
+        logger.info("Weekend - no trading")
+        return False
+
+    # Check holidays
+    holidays = await fetch_dynamic_holidays(now.year)
+    if now.strftime("%Y-%m-%d") in holidays:
+        logger.info("Market holiday - no trading")
+        return False
+
+    # Check trading hours
+    market_open = datetime.strptime(MARKET_OPEN, "%H:%M:%S").time()
+    market_close = datetime.strptime(MARKET_CLOSE, "%H:%M:%S").time()
+    trading_end = datetime.strptime(TRADING_END, "%H:%M:%S").time()
+
+    if now.time() < market_open:
+        logger.info(f"Pre-market: waiting until {MARKET_OPEN}")
+        await asyncio.sleep(
+            (datetime.combine(now.date(), market_open) - now).total_seconds()
+        )
+        return True
+    elif now.time() > market_close:
+        logger.info("Market closed")
+        return False
+    elif now.time() > trading_end:
+        logger.info("Post trading end time")
+        return False
+    return True
+
+
+async def schedule_square_off():
+    """Schedule daily square off at 3:16 PM IST"""
+    ist = pytz.timezone("Asia/Kolkata")
+    while True:
+        now = datetime.now(ist)
+        target_time = datetime.combine(
+            now.date(), datetime.strptime(SQUARE_OFF_TIME, "%H:%M:%S").time()
+        )
+
+        if now > target_time:
+            # Schedule for next day
+            target_time += timedelta(days=1)
+
+        sleep_seconds = (target_time - now).total_seconds()
+        if sleep_seconds > 0:
+            logger.info(
+                f"Scheduled square off at {target_time} (in {sleep_seconds/60:.1f} minutes)"
+            )
+            await asyncio.sleep(sleep_seconds)
+
+            # Verify it's a trading day
+            if await market_hours_check():
+                logger.info("Executing scheduled square off")
+            else:
+                logger.info("Skipping square off on non-trading day")
+        else:
+            await asyncio.sleep(60)  # Prevent tight loop
+
+
+async def send_heartbeat():
+    """Send periodic heartbeat to Telegram"""
+    while True:
+        await asyncio.sleep(3600)  # Every hour
+        message = (
+            "💓 *SYSTEM HEARTBEAT*\n"
+            f"Status: Operational\n"
+            f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        await send_telegram_alert(message)
+
+
+async def init_dhan_client():
+    """Initialize Dhan client"""
+    global dhan
+    try:
+        import dhanhq
+
+        dhan = dhanhq.DhanHq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
+        logger.info("DhanHQ client initialized successfully")
+        return dhan
+    except Exception as e:
+        logger.critical(f"Failed to initialize DhanHQ client: {str(e)}")
+        return None
+
+
+async def main_trading_loop():
+    """Main trading execution loop"""
+    try:
+        # Initialize Dhan client
+        dhan_client = await init_dhan_client()
+        if not dhan_client:
+            return
+
+        # Load strategy configurations
+        try:
+            strategies_df = pd.read_csv("selected_stocks_strategies.csv")
+            nifty500 = pd.read_csv("ind_nifty500list.csv")
+        except Exception as e:
+            logger.critical(f"Data load failed: {str(e)}")
+            return
+
+        # Prepare stock universe
+        stock_universe = []
+        for ticker in strategies_df["Ticker"].unique():
+            stock_data = strategies_df[strategies_df["Ticker"] == ticker]
+            security_id = nifty500[nifty500["ticker"] == ticker]["security_id"].values
+            if len(security_id) > 0:
+                stock_universe.append(
+                    {
+                        "ticker": ticker,
+                        "security_id": security_id[0],
+                        "strategies": stock_data.to_dict("records"),
+                    }
+                )
+
+        logger.info(f"Loaded {len(stock_universe)} stocks for trading")
+
+        # Start background tasks
+        asyncio.create_task(schedule_square_off())
+        asyncio.create_task(send_heartbeat())
+
+        # Main trading loop
+        while await market_hours_check():
+            start_time = datetime.now()
+
+            # Process all stocks concurrently
+            tasks = [
+                process_stock(s["ticker"], s["security_id"], s["strategies"])
+                for s in stock_universe
+            ]
+            await asyncio.gather(*tasks)
+
+            # Throttle to 30-second intervals
+            elapsed = (datetime.now() - start_time).total_seconds()
+            if elapsed < 30:
+                await asyncio.sleep(30 - elapsed)
+
+        logger.info("Trading session completed")
+
+    except Exception as e:
+        logger.critical(f"Main loop failure: {str(e)}")
+        logger.error(traceback.format_exc())
+        await send_telegram_alert(f"*CRITICAL ERROR*\nTrading stopped: {str(e)}")
 
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        asyncio.run(main_trading_loop())
     except KeyboardInterrupt:
-        logger.info("Stopped real-time signal generation")
+        logger.info("Stopped by user")
     except Exception as e:
-        logger.error(f"Error in main loop: {e}")
+        logger.critical(f"System failure: {str(e)}")
+        logger.error(traceback.format_exc())
