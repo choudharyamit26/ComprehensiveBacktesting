@@ -1052,16 +1052,19 @@ async def market_hours_check():
     market_close = datetime.strptime(MARKET_CLOSE, "%H:%M:%S").time()
     trading_end = datetime.strptime(TRADING_END, "%H:%M:%S").time()
 
-    if now.time() < market_open:
+    # Create offset-aware datetime for market_open
+    market_open_dt = ist.localize(datetime.combine(now.date(), market_open))
+    market_close_dt = ist.localize(datetime.combine(now.date(), market_close))
+    trading_end_dt = ist.localize(datetime.combine(now.date(), trading_end))
+
+    if now < market_open_dt:
         logger.info(f"Pre-market: waiting until {MARKET_OPEN}")
-        await asyncio.sleep(
-            (datetime.combine(now.date(), market_open) - now).total_seconds()
-        )
+        await asyncio.sleep((market_open_dt - now).total_seconds())
         return True
-    elif now.time() > market_close:
+    elif now > market_close_dt:
         logger.info("Market closed")
         return False
-    elif now.time() > trading_end:
+    elif now > trading_end_dt:
         logger.info("Post trading end time")
         return False
     return True
@@ -1075,10 +1078,14 @@ async def schedule_square_off():
         target_time = datetime.combine(
             now.date(), datetime.strptime(SQUARE_OFF_TIME, "%H:%M:%S").time()
         )
+        target_time = ist.localize(target_time)  # Make target_time offset-aware
 
         if now > target_time:
             # Schedule for next day
             target_time += timedelta(days=1)
+            target_time = ist.localize(
+                target_time
+            )  # Ensure next day's target is offset-aware
 
         sleep_seconds = (target_time - now).total_seconds()
         if sleep_seconds > 0:
@@ -1093,7 +1100,7 @@ async def schedule_square_off():
             else:
                 logger.info("Skipping square off on non-trading day")
         else:
-            await asyncio.sleep(60)  # Prevent tight loop
+            await asyncio.sleep(30)
 
 
 async def send_heartbeat():

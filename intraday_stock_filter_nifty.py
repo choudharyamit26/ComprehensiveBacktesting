@@ -4,12 +4,13 @@ import time
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from functools import lru_cache
 import logging
 
+from comprehensive_backtesting.data import init_dhan_client
 from comprehensive_backtesting.registry import STRATEGY_REGISTRY
 
 
@@ -20,6 +21,8 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+dhan = init_dhan_client()
 
 
 @dataclass
@@ -535,15 +538,29 @@ class DataManager:
         """Check if symbol has valid data"""
         nse_ticker = symbol + ".NS"
         try:
-            test_data = yf.download(
-                nse_ticker,
-                period="5d",
-                interval="1d",
-                progress=False,
-                auto_adjust=False,
-                timeout=5,
+            # test_data = yf.download(
+            #     nse_ticker,
+            #     period="5d",
+            #     interval="1d",
+            #     progress=False,
+            #     auto_adjust=False,
+            #     timeout=5,
+            # )
+            to_date = datetime.now()
+            from_date = to_date - timedelta(days=1)
+            from_date_str = from_date
+            to_date_str = to_date
+            if isinstance(from_date, datetime):
+                from_date_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(to_date, datetime):
+                to_date_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
+            dhan.historical_daily_data(
+                security_id=symbol,
+                exchange_segment="NSE_EQ",
+                instrument_type="EQUITY",
+                from_date=from_date_str,
+                to_date=to_date_str,
             )
-
             if test_data.empty:
                 return False
 
@@ -582,22 +599,34 @@ class DataManager:
                 except Exception:
                     pass
 
-        nse_ticker = ticker + ".NS"
-        yf_ticker = yf.Ticker(nse_ticker)
-
+        to_date = datetime.now()
+        from_date = to_date - timedelta(days=90)
+        from_date_str = from_date
+        to_date_str = to_date
+        if isinstance(from_date, datetime):
+            from_date_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
+        if isinstance(to_date, datetime):
+            to_date_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
         for attempt in range(retries):
             try:
-                data = yf_ticker.history(
-                    period=period, interval="1d", auto_adjust=False, timeout=timeout
+                # data = yf_ticker.history(
+                #     period=period, interval="1d", auto_adjust=False, timeout=timeout
+                # )
+                dhan.historical_daily_data(
+                    security_id=ticker,
+                    exchange_segment="NSE_EQ",
+                    instrument_type="EQUITY",
+                    from_date=from_date_str,
+                    to_date=to_date_str,
                 )
 
                 if not data.empty:
                     if isinstance(data.columns, pd.MultiIndex):
-                        if nse_ticker in [
+                        if ticker in [
                             col[1] for col in data.columns if isinstance(col, tuple)
                         ]:
                             data = data.xs(
-                                nse_ticker, level="Ticker", axis=1, drop_level=True
+                                ticker, level="Ticker", axis=1, drop_level=True
                             )
                         else:
                             return None

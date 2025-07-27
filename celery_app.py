@@ -16,3 +16,9 @@ app.conf.update(
 # celery -A tasks worker --loglevel=info --pool=solo
 # python trigger_task.py
 # celery -A tasks flower --port=5555
+# Start a Celery worker with the threads pool using the --pool argument:
+# celery -A tasks worker --pool=threads --concurrency=10 --loglevel=info
+# pip install celery[eventlet]
+# celery -A tasks worker --pool=gevent --concurrency=500 --loglevel=info
+# pip install celery[gevent]
+# celery -A tasks worker --pool=eventlet --concurrency=500 --loglevel=info
