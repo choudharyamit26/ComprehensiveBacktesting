@@ -15,6 +15,7 @@ import json
 import math
 import sys
 import traceback
+from comprehensive_backtesting.data import init_dhan_client
 
 # Import registry functions
 from comprehensive_backtesting.registry import get_strategy, STRATEGY_REGISTRY
@@ -58,7 +59,7 @@ LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 500000))  # 5L shares
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))  # 3 requests/sec
 
 # Initialize Dhan client
-dhan = None  # Will be initialized later
+dhan = init_dhan_client()
 
 
 # Telegram utilities
