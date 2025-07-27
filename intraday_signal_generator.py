@@ -53,13 +53,61 @@ WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 6))
 MORNING_WINDOW_SIZE = int(os.getenv("MORNING_WINDOW_SIZE", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
 MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
-MAX_DAILY_LOSS = float(os.getenv("MAX_DAILY_LOSS", 0.02))  # 2% of account
+MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))  # 2% of account
 VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.03))  # 3% daily move
 LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 500000))  # 5L shares/day
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))  # 3 requests/sec
+BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 1000))  # Default 1000 shares
 
 # Initialize Dhan client
 dhan = init_dhan_client()
+dhan_lock = asyncio.Lock()  # Thread safety for Dhan client
+
+# Preload symbol map
+try:
+    nifty500_df = pd.read_csv("ind_nifty500list.csv")
+    SYMBOL_MAP = nifty500_df.set_index("security_id")["ticker"].to_dict()
+except Exception as e:
+    logger.error(f"Failed to load symbol map: {e}")
+    SYMBOL_MAP = {}
+
+# Holiday cache
+HOLIDAY_CACHE = {}
+
+# Market depth cache and candle builders
+MARKET_DEPTH_CACHE = {}
+CANDLE_BUILDERS = {}
+
+# Daily P&L tracker
+daily_pnl_tracker = {"realized": 0.0, "unrealized": 0.0, "last_updated": None}
+
+
+# Enhanced candle structure with depth information
+class EnhancedCandle:
+    __slots__ = (
+        "datetime",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "bid_qty",
+        "ask_qty",
+        "bid_depth",
+        "ask_depth",
+    )
+
+    def __init__(self):
+        self.datetime = None
+        self.open = 0.0
+        self.high = 0.0
+        self.low = float("inf")
+        self.close = 0.0
+        self.volume = 0
+        self.bid_qty = 0  # Best bid quantity
+        self.ask_qty = 0  # Best ask quantity
+        self.bid_depth = 0  # Total bid depth (sum of top 5 levels)
+        self.ask_depth = 0  # Total ask depth (sum of top 5 levels)
 
 
 # Telegram utilities
@@ -308,18 +356,179 @@ async def verify_order_execution(order_id):
         return False
 
 
+# Market depth functions
+async def fetch_and_store_market_depth(security_id):
+    """Fetch and store market depth data for candle building"""
+    try:
+        await consume_api_token()
+        url = "https://api.dhan.co/v2/marketDepth"
+        headers = {"access-token": DHAN_ACCESS_TOKEN}
+        params = {"securityId": str(security_id), "exchangeSegment": "NSE_EQ"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=headers, params=params, timeout=3
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("data") and "depth" in data["data"]:
+                        depth = data["data"]["depth"]
+                        timestamp = datetime.now()
+
+                        # Store in cache
+                        if security_id not in MARKET_DEPTH_CACHE:
+                            MARKET_DEPTH_CACHE[security_id] = []
+
+                        # Calculate depth metrics
+                        bid_qty = (
+                            depth["buy"][0]["quantity"]
+                            if depth["buy"] and len(depth["buy"]) > 0
+                            else 0
+                        )
+                        ask_qty = (
+                            depth["sell"][0]["quantity"]
+                            if depth["sell"] and len(depth["sell"]) > 0
+                            else 0
+                        )
+                        bid_depth = (
+                            sum(level["quantity"] for level in depth["buy"][:5])
+                            if depth["buy"]
+                            else 0
+                        )
+                        ask_depth = (
+                            sum(level["quantity"] for level in depth["sell"][:5])
+                            if depth["sell"]
+                            else 0
+                        )
+
+                        MARKET_DEPTH_CACHE[security_id].append(
+                            {
+                                "timestamp": timestamp,
+                                "bid_qty": bid_qty,
+                                "ask_qty": ask_qty,
+                                "bid_depth": bid_depth,
+                                "ask_depth": ask_depth,
+                                "ltp": float(depth["ltp"]),
+                                "volume": int(depth["volume"]),
+                            }
+                        )
+                        return True
+        return False
+    except Exception as e:
+        logger.error(f"Market depth storage error: {str(e)}")
+        return False
+
+
+def build_enhanced_candles(security_id, interval_minutes=5):
+    """Build 5-minute candles with depth information"""
+    if security_id not in MARKET_DEPTH_CACHE or not MARKET_DEPTH_CACHE[security_id]:
+        return None
+
+    # Initialize candle builder if needed
+    if security_id not in CANDLE_BUILDERS:
+        CANDLE_BUILDERS[security_id] = {
+            "current_candle": EnhancedCandle(),
+            "last_candle_time": None,
+        }
+
+    builder = CANDLE_BUILDERS[security_id]
+    depth_data = MARKET_DEPTH_CACHE[security_id]
+    candles = []
+
+    for data_point in depth_data:
+        timestamp = data_point["timestamp"]
+        candle_time = timestamp.replace(second=0, microsecond=0)
+        minute_group = (timestamp.minute // interval_minutes) * interval_minutes
+        candle_time = candle_time.replace(minute=minute_group)
+
+        # Check if we're in a new candle
+        if builder["last_candle_time"] is None:
+            builder["last_candle_time"] = candle_time
+            builder["current_candle"].open = data_point["ltp"]
+            builder["current_candle"].datetime = candle_time
+        elif candle_time != builder["last_candle_time"]:
+            # Finalize current candle
+            if builder["current_candle"].volume > 0:
+                candles.append(builder["current_candle"])
+
+            # Start new candle
+            builder["current_candle"] = EnhancedCandle()
+            builder["current_candle"].open = data_point["ltp"]
+            builder["current_candle"].datetime = candle_time
+            builder["last_candle_time"] = candle_time
+
+        # Update candle with new data
+        candle = builder["current_candle"]
+        price = data_point["ltp"]
+
+        candle.high = max(candle.high, price) if candle.high != 0 else price
+        candle.low = min(candle.low, price) if candle.low != float("inf") else price
+        candle.close = price
+        candle.volume += data_point["volume"]
+
+        # Update depth info (use last values in the interval)
+        candle.bid_qty = data_point["bid_qty"]
+        candle.ask_qty = data_point["ask_qty"]
+        candle.bid_depth = data_point["bid_depth"]
+        candle.ask_depth = data_point["ask_depth"]
+
+    # Clear processed data
+    MARKET_DEPTH_CACHE[security_id] = []
+
+    return candles
+
+
+async def get_combined_data(security_id):
+    """Combine historical and real-time enhanced candles"""
+    # Fetch historical data
+    hist_data = await fetch_historical_data(security_id, days_back=5)
+    if hist_data is None:
+        return None
+
+    # Build enhanced candles from depth data
+    enhanced_candles = build_enhanced_candles(security_id)
+
+    if not enhanced_candles:
+        return hist_data
+
+    # Convert enhanced candles to DataFrame
+    enhanced_list = []
+    for candle in enhanced_candles:
+        enhanced_list.append(
+            {
+                "datetime": candle.datetime,
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+                "bid_qty": candle.bid_qty,
+                "ask_qty": candle.ask_qty,
+                "bid_depth": candle.bid_depth,
+                "ask_depth": candle.ask_depth,
+            }
+        )
+
+    enhanced_df = pd.DataFrame(enhanced_list)
+
+    # Combine with historical data
+    combined = pd.concat([hist_data, enhanced_df]).sort_values("datetime")
+    combined = combined.drop_duplicates("datetime").reset_index(drop=True)
+
+    return combined
+
+
 # Data utilities
 def get_symbol_from_id(security_id):
     """Resolve symbol from security ID"""
-    try:
-        df = pd.read_csv("ind_nifty500list.csv")
-        return df[df["security_id"] == security_id]["ticker"].values[0]
-    except:
-        return f"UNKNOWN_{security_id}"
+    return SYMBOL_MAP.get(security_id, f"UNKNOWN_{security_id}")
 
 
 async def fetch_dynamic_holidays(year):
     """Fetch NSE holidays dynamically"""
+    if year in HOLIDAY_CACHE:
+        return HOLIDAY_CACHE[year]
+
     try:
         url = f"https://www.nseindia.com/api/holiday-master?type=trading"
         async with aiohttp.ClientSession() as session:
@@ -329,12 +538,13 @@ async def fetch_dynamic_holidays(year):
                     holidays = [
                         d["tradingDate"] for d in data["data"] if d["trading"] == "N"
                     ]
-                    logger.info(f"Fetched {len(holidays)} trading holidays")
+                    logger.info(f"Fetched {len(holidays)} trading holidays for {year}")
+                    HOLIDAY_CACHE[year] = holidays
                     return holidays
         return []
     except:
         logger.warning("Failed to fetch holidays, using static list")
-        return [  # Fallback to 2025 holidays
+        holidays = [  # Fallback to 2025 holidays
             "2025-01-26",
             "2025-03-14",
             "2025-03-29",
@@ -350,6 +560,8 @@ async def fetch_dynamic_holidays(year):
             "2025-11-12",
             "2025-12-25",
         ]
+        HOLIDAY_CACHE[year] = holidays
+        return holidays
 
 
 async def fetch_historical_data(security_id, days_back=20, interval="5min"):
@@ -372,18 +584,23 @@ async def fetch_historical_data(security_id, days_back=20, interval="5min"):
 
         # Fetch data for valid days
         all_data = []
+        interval_min = int(interval.replace("m", ""))
+
         for day in valid_days:
             from_date = datetime.combine(day, time(9, 15), tzinfo=ist)
             to_date = datetime.combine(day, time(15, 30), tzinfo=ist)
 
-            data = dhan.intraday_minute_data(
-                security_id=security_id,
-                exchange_segment="NSE_EQ",
-                instrument_type="EQUITY",
-                interval=int(interval.replace("m", "")),
-                from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
-                to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
-            )
+            # Use thread for synchronous Dhan call
+            async with dhan_lock:
+                data = await asyncio.to_thread(
+                    dhan.intraday_minute_data,
+                    security_id=security_id,
+                    exchange_segment="NSE_EQ",
+                    instrument_type="EQUITY",
+                    interval=interval_min,
+                    from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
+                    to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
+                )
 
             if data.get("status") == "success" and data.get("data"):
                 df = pd.DataFrame(data["data"])
@@ -475,6 +692,10 @@ def calculate_risk_params(regime, atr, current_price, direction):
     """Calculate position sizing and risk levels"""
     risk_per_trade = 0.01 * ACCOUNT_SIZE
 
+    # Handle zero ATR case
+    if atr <= 0:
+        atr = current_price * 0.01  # Default to 1% of price
+
     # Regime-based parameters
     params = {
         "trending": {"sl_mult": 2.0, "tp_mult": 3.0, "risk_factor": 0.8},
@@ -529,11 +750,56 @@ class SignalGeneratorWrapper(bt.Strategy):
         self.signal = "SELL"
 
 
+# P&L Tracking
+async def update_daily_pnl():
+    """Fetch and update daily P&L from broker"""
+    try:
+        await consume_api_token()
+        url = "https://api.dhan.co/v2/reports/pnl"
+        headers = {"access-token": DHAN_ACCESS_TOKEN}
+        params = {
+            "type": "INTRADAY",
+            "fromDate": date.today().strftime("%Y-%m-%d"),
+            "toDate": date.today().strftime("%Y-%m-%d"),
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url, headers=headers, params=params, timeout=5
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if data.get("data"):
+                        total_pnl = 0.0
+                        for item in data["data"]:
+                            total_pnl += float(item["netPnl"])
+
+                        daily_pnl_tracker["realized"] = total_pnl
+                        daily_pnl_tracker["last_updated"] = datetime.now()
+                        logger.info(f"Updated daily P&L: ₹{total_pnl:.2f}")
+                    return total_pnl
+        return 0.0
+    except Exception as e:
+        logger.error(f"Failed to update P&L: {str(e)}")
+        return 0.0
+
+
 # Trading operations
 async def execute_strategy_signal(
     ticker, security_id, signal, regime, adx_value, atr_value, hist_data
 ):
     """Execute trading signal with proper risk management"""
+    # Circuit breaker check
+    current_pnl = await update_daily_pnl()
+    if current_pnl <= -MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:
+        await send_telegram_alert(
+            f"🛑 TRADING HALTED: Daily loss limit reached\n"
+            f"Current P&L: ₹{current_pnl:.2f}\n"
+            f"Limit: ₹{-MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:.2f}"
+        )
+        logger.critical("Daily loss limit reached - trading halted")
+        return  # Skip trade execution
+
     # Validate signal
     if signal not in ["BUY", "SELL"]:
         logger.warning(f"Invalid signal for {ticker}: {signal}")
@@ -622,105 +888,147 @@ async def calculate_average_volume(security_id):
         return 0
 
 
+# Concurrency limiter
+CONCURRENCY_LIMIT = 50
+concurrency_semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+
+
 async def process_stock(ticker, security_id, strategies):
-    """Process stock with multiple strategies"""
-    try:
-        logger.info(f"Processing {ticker} with {len(strategies)} strategies")
+    """Process stock with multiple strategies using enhanced data"""
+    async with concurrency_semaphore:
+        try:
+            logger.info(f"Processing {ticker} with {len(strategies)} strategies")
 
-        # Filter by volatility and liquidity
-        volatility = await calculate_stock_volatility(security_id)
-        avg_volume = await calculate_average_volume(security_id)
+            # Update market depth cache
+            await fetch_and_store_market_depth(security_id)
 
-        if volatility < VOLATILITY_THRESHOLD:
-            logger.info(f"Skipping {ticker} due to low volatility: {volatility:.4f}")
-            return
-        if avg_volume < LIQUIDITY_THRESHOLD:
-            logger.info(f"Skipping {ticker} due to low liquidity: {avg_volume:.0f}")
-            return
+            # Get combined data (historical + real-time enhanced)
+            combined_data = await get_combined_data(security_id)
+            if combined_data is None or len(combined_data) < 100:
+                logger.warning(f"Insufficient data for {ticker}")
+                return
 
-        # Load historical data
-        hist_data = await fetch_historical_data(security_id, days_back=20)
-        if hist_data is None or len(hist_data) < 100:
-            logger.warning(f"Insufficient data for {ticker}")
-            return
+            # Liquidity check using latest depth data
+            if not combined_data.empty:
+                latest = combined_data.iloc[-1]
+                if "bid_qty" in latest and "ask_qty" in latest:
+                    if (
+                        latest["bid_qty"] < BID_ASK_THRESHOLD
+                        or latest["ask_qty"] < BID_ASK_THRESHOLD
+                    ):
+                        logger.info(
+                            f"Skipping {ticker} due to low liquidity: "
+                            f"Bid={latest['bid_qty']}, Ask={latest['ask_qty']} "
+                            f"(Threshold={BID_ASK_THRESHOLD})"
+                        )
+                        return
 
-        # Initialize strategies
-        signals = []
-        for strat in strategies:
-            strategy_name = strat["Strategy"]
-            try:
-                # Use registry to get strategy class
-                strategy_class = get_strategy(strategy_name)
-            except KeyError:
-                logger.warning(
-                    f"Strategy {strategy_name} not found in registry for {ticker}"
+            # Filter by volatility and liquidity
+            volatility = await calculate_stock_volatility(security_id)
+            avg_volume = await calculate_average_volume(security_id)
+
+            if volatility < VOLATILITY_THRESHOLD:
+                logger.info(
+                    f"Skipping {ticker} due to low volatility: {volatility:.4f}"
                 )
-                continue
+                return
+            if avg_volume < LIQUIDITY_THRESHOLD:
+                logger.info(f"Skipping {ticker} due to low liquidity: {avg_volume:.0f}")
+                return
 
-            # Parse parameters
-            params = strat.get("Best_Parameters", {})
-            if isinstance(params, str) and params.strip():
+            # Initialize strategies
+            signals = []
+            for strat in strategies:
+                strategy_name = strat["Strategy"]
                 try:
-                    params = ast.literal_eval(params)
-                except:
-                    params = {}
-            elif not params:
-                params = {}
-
-            # Create cerebro instance
-            cerebro = bt.Cerebro(stdstats=False, runonce=True)
-            data_feed = bt.feeds.PandasData(dataname=hist_data, datetime="datetime")
-            cerebro.adddata(data_feed)
-
-            # Add wrapper strategy
-            cerebro.addstrategy(
-                SignalGeneratorWrapper, strategy_class=strategy_class, **params
-            )
-
-            # Get min data points
-            min_bars = strategy_class.get_min_data_points(params)
-            if len(hist_data) < min_bars:
-                logger.warning(
-                    f"Skipping {strategy_name} for {ticker}: need {min_bars} bars, have {len(hist_data)}"
-                )
-                continue
-
-            # Run strategy
-            try:
-                results = cerebro.run()
-                if results and results[0].signal:
-                    signals.append(results[0].signal)
-                    logger.info(
-                        f"Strategy {strategy_name} generated {results[0].signal} signal for {ticker}"
+                    # Use registry to get strategy class
+                    strategy_class = get_strategy(strategy_name)
+                except KeyError:
+                    logger.warning(
+                        f"Strategy {strategy_name} not found in registry for {ticker}"
                     )
-            except Exception as e:
-                logger.error(f"Strategy {strategy_name} failed for {ticker}: {str(e)}")
-                logger.error(traceback.format_exc())
+                    continue
 
-        # Process signals
-        if not signals:
-            return
+                # Parse parameters
+                params = strat.get("Best_Parameters", {})
+                if isinstance(params, str) and params.strip():
+                    try:
+                        params = ast.literal_eval(params)
+                    except:
+                        params = {}
+                elif not params:
+                    params = {}
 
-        # Count votes
-        buy_votes = signals.count("BUY")
-        sell_votes = signals.count("SELL")
+                # Create cerebro instance
+                cerebro = bt.Cerebro(stdstats=False, runonce=True)
+                data_feed = bt.feeds.PandasData(
+                    dataname=combined_data, datetime="datetime"  # Use enhanced data
+                )
+                cerebro.adddata(data_feed)
 
-        # Determine market regime
-        regime, adx_value, atr_value = calculate_regime(hist_data)
+                # Add wrapper strategy
+                cerebro.addstrategy(
+                    SignalGeneratorWrapper, strategy_class=strategy_class, **params
+                )
 
-        # Execute based on voting
-        if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
-            await execute_strategy_signal(
-                ticker, security_id, "BUY", regime, adx_value, atr_value, hist_data
-            )
-        elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
-            await execute_strategy_signal(
-                ticker, security_id, "SELL", regime, adx_value, atr_value, hist_data
-            )
+                # Get min data points
+                min_bars = strategy_class.get_min_data_points(params)
+                if len(combined_data) < min_bars:
+                    logger.warning(
+                        f"Skipping {strategy_name} for {ticker}: need {min_bars} bars, have {len(combined_data)}"
+                    )
+                    continue
 
-    except Exception as e:
-        logger.error(f"Stock processing failed for {ticker}: {str(e)}")
-        logger.error(traceback.format_exc())
+                # Run strategy
+                try:
+                    results = cerebro.run()
+                    if results and results[0].signal:
+                        signals.append(results[0].signal)
+                        logger.info(
+                            f"Strategy {strategy_name} generated {results[0].signal} signal for {ticker}"
+                        )
+                except Exception as e:
+                    logger.error(
+                        f"Strategy {strategy_name} failed for {ticker}: {str(e)}"
+                    )
+                    logger.error(traceback.format_exc())
+
+            # Process signals
+            if not signals:
+                return
+
+            # Count votes
+            buy_votes = signals.count("BUY")
+            sell_votes = signals.count("SELL")
+
+            # Determine market regime
+            regime, adx_value, atr_value = calculate_regime(combined_data)
+
+            # Execute based on voting
+            if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
+                await execute_strategy_signal(
+                    ticker,
+                    security_id,
+                    "BUY",
+                    regime,
+                    adx_value,
+                    atr_value,
+                    combined_data,
+                )
+            elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
+                await execute_strategy_signal(
+                    ticker,
+                    security_id,
+                    "SELL",
+                    regime,
+                    adx_value,
+                    atr_value,
+                    combined_data,
+                )
+
+        except Exception as e:
+            logger.error(f"Stock processing failed for {ticker}: {str(e)}")
+            logger.error(traceback.format_exc())
 
 
 async def market_hours_check():
@@ -800,28 +1108,9 @@ async def send_heartbeat():
         await send_telegram_alert(message)
 
 
-async def init_dhan_client():
-    """Initialize Dhan client"""
-    global dhan
-    try:
-        import dhanhq
-
-        dhan = dhanhq.DhanHq(DHAN_CLIENT_ID, DHAN_ACCESS_TOKEN)
-        logger.info("DhanHQ client initialized successfully")
-        return dhan
-    except Exception as e:
-        logger.critical(f"Failed to initialize DhanHQ client: {str(e)}")
-        return None
-
-
 async def main_trading_loop():
     """Main trading execution loop"""
     try:
-        # Initialize Dhan client
-        dhan_client = await init_dhan_client()
-        if not dhan_client:
-            return
-
         # Load strategy configurations
         try:
             strategies_df = pd.read_csv("selected_stocks_strategies.csv")

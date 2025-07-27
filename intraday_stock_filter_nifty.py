@@ -984,8 +984,4 @@ def print_usage_instructions():
 if __name__ == "__main__":
     print_usage_instructions()
     filter = IntradayStockFilter()
-    selected_stocks = filter.select_stocks(csv_file="ind_nifty50list.csv")
-    strategies = list(STRATEGY_REGISTRY.keys())
-    from tasks import run_complete_backtests
-
-    run_complete_backtests(selected_stocks, strategies)
+    filter.select_stocks(csv_file="ind_nifty50list.csv")
