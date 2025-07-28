@@ -564,60 +564,138 @@ async def fetch_dynamic_holidays(year):
         return holidays
 
 
-async def fetch_historical_data(security_id, days_back=20, interval="5min"):
-    """Fetch historical data with dynamic holiday handling"""
+async def fetch_historical_data(security_id, days_back=20, interval=5):
+    """Fetch historical data with improved performance and error handling"""
     try:
         ist = pytz.timezone("Asia/Kolkata")
-        today = datetime.now(ist).date()
+        now = datetime.now(ist)
+        today = now.date()
+
+        # Cache market hours to avoid repeated parsing
+        market_open = time.fromisoformat(os.getenv("MARKET_OPEN", "09:15:00"))
+        market_close = time.fromisoformat(os.getenv("MARKET_CLOSE", "15:30:00"))
+
+        # Fetch holidays once
         holidays = await fetch_dynamic_holidays(today.year)
 
-        # Calculate valid trading days
+        # More efficient trading days calculation
         valid_days = []
-        current_day = today - timedelta(days=1)
-        while len(valid_days) < days_back:
+        current_day = today
+        days_checked = 0
+        max_days_to_check = days_back * 3  # Account for holidays/weekends
+
+        while len(valid_days) < days_back and days_checked < max_days_to_check:
             if (
                 current_day.weekday() < 5
                 and current_day.strftime("%Y-%m-%d") not in holidays
             ):
                 valid_days.append(current_day)
             current_day -= timedelta(days=1)
+            days_checked += 1
 
-        # Fetch data for valid days
-        all_data = []
-        interval_min = int(interval.replace("m", ""))
-
-        for day in valid_days:
-            from_date = datetime.combine(day, time(9, 15), tzinfo=ist)
-            to_date = datetime.combine(day, time(15, 30), tzinfo=ist)
-
-            # Use thread for synchronous Dhan call
-            async with dhan_lock:
-                data = await asyncio.to_thread(
-                    dhan.intraday_minute_data,
-                    security_id=security_id,
-                    exchange_segment="NSE_EQ",
-                    instrument_type="EQUITY",
-                    interval=interval_min,
-                    from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
-                    to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
-                )
-
-            if data.get("status") == "success" and data.get("data"):
-                df = pd.DataFrame(data["data"])
-                df["datetime"] = pd.to_datetime(
-                    df["timestamp"], unit="s", utc=True
-                ).dt.tz_convert(ist)
-                df = df[["datetime", "open", "high", "low", "close", "volume"]]
-                all_data.append(df)
-
-        if not all_data:
+        if not valid_days:
+            logger.error(f"No valid trading days found for {security_id}")
             return None
 
-        full_df = pd.concat(all_data).sort_values("datetime")
-        logger.info(f"Fetched {len(full_df)} bars for {security_id}")
+        logger.info(
+            f"Fetching data for {security_id} across {len(valid_days)} trading days"
+        )
+
+        # Prepare data fetching tasks for concurrent execution
+        async def fetch_day_data(day):
+            """Fetch data for a single day"""
+            try:
+                # Set from_date to market open
+                from_date = ist.localize(datetime.combine(day, market_open))
+
+                # Set to_date: for today, use current time or market close; for past days, use market close
+                if day == today and now.time() < market_close:
+                    to_date = now
+                else:
+                    to_date = ist.localize(datetime.combine(day, market_close))
+
+                # Ensure to_date is not in the future
+                to_date = min(to_date, now)
+
+                logger.debug(
+                    f"Fetching data for {security_id} from {from_date} to {to_date}"
+                )
+
+                # Use thread for synchronous Dhan call
+                async with dhan_lock:
+                    data = await asyncio.to_thread(
+                        dhan.intraday_minute_data,
+                        security_id=security_id,
+                        exchange_segment="NSE_EQ",
+                        instrument_type="EQUITY",
+                        interval=5,  # Use parameter instead of hardcoded 5
+                        from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
+                        to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
+                    )
+
+                if data.get("status") == "success" and data.get("data"):
+                    df = pd.DataFrame(data["data"])
+                    if not df.empty:
+                        # More efficient datetime conversion
+                        df["datetime"] = pd.to_datetime(
+                            df["timestamp"], unit="s", utc=True
+                        ).dt.tz_convert(ist)
+                        df = df[["datetime", "open", "high", "low", "close", "volume"]]
+                        logger.info(
+                            f"Fetched {len(df)} bars for {security_id} on {day}"
+                        )
+                        return df
+                    else:
+                        logger.warning(f"No data returned for {security_id} on {day}")
+                else:
+                    logger.warning(
+                        f"Failed to fetch data for {security_id} on {day}: {data.get('status')}"
+                    )
+                return None
+
+            except Exception as e:
+                logger.error(
+                    f"Error fetching data for {security_id} on {day}: {str(e)}"
+                )
+                return None
+
+        # Use semaphore to limit concurrent API calls and prevent rate limiting
+        semaphore = asyncio.Semaphore(2)  # Limit to 3 concurrent requests
+
+        async def fetch_with_semaphore(day):
+            async with semaphore:
+                return await fetch_day_data(day)
+
+        # Execute all data fetches concurrently
+        tasks = [fetch_with_semaphore(day) for day in valid_days]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results and filter successful ones
+        all_data = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Task failed for day {valid_days[i]}: {result}")
+            elif result is not None:
+                all_data.append(result)
+
+        if not all_data:
+            logger.error(f"No data fetched for {security_id}")
+            return None
+
+        # More efficient DataFrame concatenation and deduplication
+        full_df = (
+            pd.concat(all_data, ignore_index=True)
+            .sort_values("datetime")
+            .drop_duplicates("datetime", keep="last")
+            .reset_index(drop=True)
+        )
+
+        logger.info(f"Successfully fetched {len(full_df)} total bars for {security_id}")
         return full_df
+
     except Exception as e:
-        logger.error(f"Historical data error: {str(e)}")
+        logger.error(f"Historical data error for {security_id}: {str(e)}")
+        logger.error(traceback.format_exc())
         return None
 
 
@@ -726,7 +804,6 @@ def calculate_risk_params(regime, atr, current_price, direction):
     }
 
 
-# Strategy wrapper for signal generation
 class SignalGeneratorWrapper(bt.Strategy):
     """
     Wrapper strategy to capture signals without executing trades
@@ -734,12 +811,12 @@ class SignalGeneratorWrapper(bt.Strategy):
 
     def __init__(self, strategy_class, **params):
         self.signal = None
-        self.strategy = strategy_class(self, **params)
+        # Pass the data feed (self.datas[0]) to the strategy_class
+        self.strategy = strategy_class(self.datas[0], **params)
 
     def next(self):
         # Reset signal at each bar
         self.signal = None
-
         # Run the original strategy
         self.strategy.next()
 
@@ -904,6 +981,10 @@ async def process_stock(ticker, security_id, strategies):
 
             # Get combined data (historical + real-time enhanced)
             combined_data = await get_combined_data(security_id)
+            # print("==============")
+            # print(combined_data)
+            # print(len(combined_data))
+            # print("==============")
             if combined_data is None or len(combined_data) < 100:
                 logger.warning(f"Insufficient data for {ticker}")
                 return
