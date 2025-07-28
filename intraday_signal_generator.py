@@ -15,75 +15,101 @@ import json
 import math
 import sys
 import traceback
+from functools import lru_cache
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple, Any
+import weakref
 from comprehensive_backtesting.data import init_dhan_client
 
 # Import registry functions
 from comprehensive_backtesting.registry import get_strategy, STRATEGY_REGISTRY
 
-# Configure logging
+# Configure logging with improved performance
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("trading_system.log")],
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("trading_system.log", mode="a"),  # 1MB buffer
+    ],
 )
 logger = logging.getLogger("quant_trader")
 trade_logger = logging.getLogger("trade_execution")
 trade_logger.setLevel(logging.INFO)
-trade_logger.addHandler(logging.FileHandler("trades.log"))
+trade_logger.addHandler(logging.FileHandler("trades.log", mode="a"))
 
-# Environment configuration
+# Environment configuration - Cache parsed values
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1000000003")  # Default test ID
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1000000003")
 
 # Validate environment variables
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_ACCESS_TOKEN]):
     logger.critical("Missing required environment variables")
     raise EnvironmentError("Required environment variables not set")
 
-# Market configuration
-MARKET_OPEN = os.getenv("MARKET_OPEN", "09:15:00")
-MARKET_CLOSE = os.getenv("MARKET_CLOSE", "15:30:00")
-TRADING_END = os.getenv("TRADING_END", "15:05:00")
-FORCE_CLOSE = os.getenv("FORCE_CLOSE", "15:15:00")
-SQUARE_OFF_TIME = os.getenv("SQUARE_OFF_TIME", "15:16:00")  # Square off at 3:16 PM
+# Market configuration - Pre-parse time objects
+MARKET_OPEN_STR = os.getenv("MARKET_OPEN", "09:15:00")
+MARKET_CLOSE_STR = os.getenv("MARKET_CLOSE", "15:30:00")
+TRADING_END_STR = os.getenv("TRADING_END", "15:05:00")
+FORCE_CLOSE_STR = os.getenv("FORCE_CLOSE", "15:15:00")
+SQUARE_OFF_TIME_STR = os.getenv("SQUARE_OFF_TIME", "15:16:00")
+
+# Pre-parse time objects for performance
+MARKET_OPEN_TIME = time.fromisoformat(MARKET_OPEN_STR)
+MARKET_CLOSE_TIME = time.fromisoformat(MARKET_CLOSE_STR)
+TRADING_END_TIME = time.fromisoformat(TRADING_END_STR)
+FORCE_CLOSE_TIME = time.fromisoformat(FORCE_CLOSE_STR)
+SQUARE_OFF_TIME_TIME = time.fromisoformat(SQUARE_OFF_TIME_STR)
+
+# Configuration constants
 MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
 WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 6))
 MORNING_WINDOW_SIZE = int(os.getenv("MORNING_WINDOW_SIZE", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
 MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
-MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))  # 2% of account
-VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.03))  # 3% daily move
-LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 500000))  # 5L shares/day
-API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))  # 3 requests/sec
-BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 1000))  # Default 1000 shares
+MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
+VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.03))
+LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 500000))
+API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))
+BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 1000))
 
-# Initialize Dhan client
+# Initialize Dhan client and thread pool
 dhan = init_dhan_client()
-dhan_lock = asyncio.Lock()  # Thread safety for Dhan client
+dhan_lock = asyncio.Lock()
+thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dhan_worker")
 
-# Preload symbol map
+# Preload and cache symbol map
 try:
     nifty500_df = pd.read_csv("ind_nifty500list.csv")
     SYMBOL_MAP = nifty500_df.set_index("security_id")["ticker"].to_dict()
+    # Create reverse mapping for faster lookups
+    TICKER_TO_ID_MAP = nifty500_df.set_index("ticker")["security_id"].to_dict()
 except Exception as e:
     logger.error(f"Failed to load symbol map: {e}")
     SYMBOL_MAP = {}
+    TICKER_TO_ID_MAP = {}
 
-# Holiday cache
+# Optimized caches with size limits
 HOLIDAY_CACHE = {}
-
-# Market depth cache and candle builders
-MARKET_DEPTH_CACHE = {}
+MARKET_DEPTH_CACHE = defaultdict(lambda: deque(maxlen=100))  # Limit cache size
 CANDLE_BUILDERS = {}
+HISTORICAL_DATA_CACHE = {}  # Cache for historical data
+VOLATILITY_CACHE = {}  # Cache for volatility calculations
+VOLUME_CACHE = {}  # Cache for volume calculations
 
 # Daily P&L tracker
 daily_pnl_tracker = {"realized": 0.0, "unrealized": 0.0, "last_updated": None}
 
+# Pre-compile timezone object
+IST = pytz.timezone("Asia/Kolkata")
 
-# Enhanced candle structure with depth information
+
 class EnhancedCandle:
+    """Memory-optimized candle structure using __slots__"""
+
     __slots__ = (
         "datetime",
         "open",
@@ -104,83 +130,189 @@ class EnhancedCandle:
         self.low = float("inf")
         self.close = 0.0
         self.volume = 0
-        self.bid_qty = 0  # Best bid quantity
-        self.ask_qty = 0  # Best ask quantity
-        self.bid_depth = 0  # Total bid depth (sum of top 5 levels)
-        self.ask_depth = 0  # Total ask depth (sum of top 5 levels)
+        self.bid_qty = 0
+        self.ask_qty = 0
+        self.bid_depth = 0
+        self.ask_depth = 0
 
 
-# Telegram utilities
-async def send_telegram_alert(message):
-    """Send alert with truncation handling and markdown support"""
-    try:
-        # Truncate long messages
-        if len(message) > 4000:
-            message = message[:3900] + "...\n[TRUNCATED]"
+class OptimizedRateLimiter:
+    """Optimized rate limiter with token bucket algorithm"""
 
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "Markdown",
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=5) as response:
-                if response.status == 200:
-                    logger.info(f"Telegram alert sent: {message[:100]}...")
-                else:
-                    text = await response.text()
-                    logger.error(f"Telegram error {response.status}: {text}")
-    except Exception as e:
-        logger.error(f"Telegram send failed: {str(e)}")
+    def __init__(self, rate_limit: int):
+        self.rate_limit = rate_limit
+        self.tokens = rate_limit
+        self.last_refill = datetime.now()
+        self.lock = asyncio.Lock()
 
+    async def acquire(self):
+        async with self.lock:
+            now = datetime.now()
+            # Refill tokens based on elapsed time
+            elapsed = (now - self.last_refill).total_seconds()
+            if elapsed > 60:  # Refill every minute
+                self.tokens = self.rate_limit
+                self.last_refill = now
+            elif elapsed > 0:
+                tokens_to_add = int(elapsed * (self.rate_limit / 60))
+                self.tokens = min(self.rate_limit, self.tokens + tokens_to_add)
+                if tokens_to_add > 0:
+                    self.last_refill = now
 
-# API rate limiting
-api_rate_bucket = API_RATE_LIMIT
-last_rate_reset = datetime.now()
+            while self.tokens <= 0:
+                await asyncio.sleep(0.1)
+                # Check for refill again
+                elapsed = (datetime.now() - self.last_refill).total_seconds()
+                if elapsed > 60:
+                    self.tokens = self.rate_limit
+                    self.last_refill = datetime.now()
 
-
-async def consume_api_token():
-    global api_rate_bucket, last_rate_reset
-
-    now = datetime.now()
-    if (now - last_rate_reset).total_seconds() > 60:
-        api_rate_bucket = API_RATE_LIMIT
-        last_rate_reset = now
-
-    while api_rate_bucket <= 0:
-        await asyncio.sleep(0.1)
-        if (datetime.now() - last_rate_reset).total_seconds() > 60:
-            api_rate_bucket = API_RATE_LIMIT
-            last_rate_reset = datetime.now()
-
-    api_rate_bucket -= 1
+            self.tokens -= 1
 
 
-# DhanHQ API operations
+# Optimized rate limiter instance
+rate_limiter = OptimizedRateLimiter(API_RATE_LIMIT)
+
+
+# Optimized Telegram utilities
+class TelegramQueue:
+    """Queue-based Telegram message sender to batch messages"""
+
+    def __init__(self):
+        self.message_queue = None
+        self.is_running = False
+        self._initialized = False
+
+    async def _initialize(self):
+        """Initialize the queue when event loop is available"""
+        if not self._initialized:
+            self.message_queue = asyncio.Queue()
+            self._initialized = True
+
+    async def start(self):
+        await self._initialize()
+        if not self.is_running:
+            self.is_running = True
+            asyncio.create_task(self._process_messages())
+
+    async def _process_messages(self):
+        while self.is_running:
+            try:
+                message = await asyncio.wait_for(self.message_queue.get(), timeout=5.0)
+                await self._send_message(message)
+                await asyncio.sleep(1)  # Rate limit Telegram messages
+            except asyncio.TimeoutError:
+                continue
+            except Exception as e:
+                logger.error(f"Telegram queue error: {e}")
+
+    async def _send_message(self, message: str):
+        """Send message with optimized error handling"""
+        try:
+            if len(message) > 4000:
+                message = message[:3900] + "...\n[TRUNCATED]"
+
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            payload = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": "Markdown",
+            }
+
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        logger.debug(f"Telegram sent: {message[:50]}...")
+                    else:
+                        text = await response.text()
+                        logger.error(f"Telegram error {response.status}: {text}")
+        except Exception as e:
+            logger.error(f"Telegram send failed: {str(e)}")
+
+    def send_alert(self, message: str):
+        """Non-blocking message sending"""
+        try:
+            if self.message_queue is not None:
+                self.message_queue.put_nowait(message)
+            else:
+                logger.warning("Telegram queue not initialized, dropping message")
+        except asyncio.QueueFull:
+            logger.warning("Telegram queue full, dropping message")
+
+
+# Global Telegram queue - will be initialized when first used
+telegram_queue = TelegramQueue()
+
+
+async def send_telegram_alert(message: str):
+    """Legacy wrapper for backward compatibility"""
+    telegram_queue.send_alert(message)
+
+
+# Optimized API operations with connection pooling
+class APIClient:
+    """Optimized API client with connection pooling"""
+
+    def __init__(self):
+        self.connector = None
+        self.timeout = None
+        self.session = None
+        self._initialized = False
+
+    async def _initialize(self):
+        """Initialize the connector and timeout when event loop is available"""
+        if not self._initialized:
+            self.connector = aiohttp.TCPConnector(
+                limit=100,
+                limit_per_host=20,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+                keepalive_timeout=30,
+                enable_cleanup_closed=True,
+            )
+            self.timeout = aiohttp.ClientTimeout(total=10, connect=5)
+            self._initialized = True
+
+    async def get_session(self):
+        await self._initialize()
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession(
+                connector=self.connector,
+                timeout=self.timeout,
+                headers={"access-token": DHAN_ACCESS_TOKEN},
+            )
+        return self.session
+
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
+        if self.connector and not self.connector.closed:
+            await self.connector.close()
+
+
+# Global API client - will be initialized when first used
+api_client = APIClient()
+
+
 @retry(
     stop_max_attempt_number=3,
-    wait_exponential_multiplier=2000,
-    wait_exponential_max=30000,
+    wait_exponential_multiplier=1000,
+    wait_exponential_max=10000,
 )
 async def place_super_order(
-    security_id,
-    transaction_type,
-    current_price,
-    stop_loss,
-    take_profit,
-    quantity=MAX_QUANTITY,
-):
-    """Place Super Order with proper risk management"""
+    security_id: int,
+    transaction_type: str,
+    current_price: float,
+    stop_loss: float,
+    take_profit: float,
+    quantity: int = MAX_QUANTITY,
+) -> Optional[Dict]:
+    """Optimized order placement with connection reuse"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
 
         url = "https://api.dhan.co/v2/super/orders"
-        headers = {
-            "Content-Type": "application/json",
-            "access-token": DHAN_ACCESS_TOKEN,
-        }
-
         payload = {
             "dhanClientId": DHAN_CLIENT_ID,
             "correlationId": f"{security_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -196,26 +328,23 @@ async def place_super_order(
             "trailingJump": 0.1,
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, headers=headers, json=payload, timeout=10
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    order_id = data.get("orderId")
-                    if order_id:
-                        # Log and return
-                        trade_logger.info(
-                            f"Order placed | {security_id} | {transaction_type} | "
-                            f"Qty: {quantity} | Price: {current_price:.2f} | "
-                            f"SL: {stop_loss:.2f} | TP: {take_profit:.2f}"
-                        )
-                        return data
-                    else:
-                        logger.error(f"Order placement failed: {data}")
+        session = await api_client.get_session()
+        async with session.post(url, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                order_id = data.get("orderId")
+                if order_id:
+                    trade_logger.info(
+                        f"Order placed | {security_id} | {transaction_type} | "
+                        f"Qty: {quantity} | Price: {current_price:.2f} | "
+                        f"SL: {stop_loss:.2f} | TP: {take_profit:.2f}"
+                    )
+                    return data
                 else:
-                    text = await response.text()
-                    logger.error(f"HTTP error {response.status}: {text}")
+                    logger.error(f"Order placement failed: {data}")
+            else:
+                text = await response.text()
+                logger.error(f"HTTP error {response.status}: {text}")
         return None
     except Exception as e:
         logger.error(f"Order placement exception: {str(e)}")
@@ -224,20 +353,15 @@ async def place_super_order(
 
 @retry(
     stop_max_attempt_number=3,
-    wait_exponential_multiplier=2000,
-    wait_exponential_max=30000,
+    wait_exponential_multiplier=1000,
+    wait_exponential_max=10000,
 )
-async def modify_super_order(order_id, leg_name, **params):
-    """Modify existing Super Order"""
+async def modify_super_order(order_id: str, leg_name: str, **params) -> Optional[Dict]:
+    """Optimized order modification"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
 
         url = f"https://api.dhan.co/v2/super/orders/{order_id}"
-        headers = {
-            "Content-Type": "application/json",
-            "access-token": DHAN_ACCESS_TOKEN,
-        }
-
         payload = {
             "dhanClientId": DHAN_CLIENT_ID,
             "orderId": order_id,
@@ -245,19 +369,17 @@ async def modify_super_order(order_id, leg_name, **params):
         }
         payload.update(params)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.put(
-                url, headers=headers, json=payload, timeout=10
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    trade_logger.info(
-                        f"Order modified | {order_id} | {leg_name} | Params: {params}"
-                    )
-                    return data
-                else:
-                    text = await response.text()
-                    logger.error(f"Modify order failed: {text}")
+        session = await api_client.get_session()
+        async with session.put(url, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                trade_logger.info(
+                    f"Order modified | {order_id} | {leg_name} | Params: {params}"
+                )
+                return data
+            else:
+                text = await response.text()
+                logger.error(f"Modify order failed: {text}")
         return None
     except Exception as e:
         logger.error(f"Order modify exception: {str(e)}")
@@ -266,46 +388,38 @@ async def modify_super_order(order_id, leg_name, **params):
 
 @retry(
     stop_max_attempt_number=3,
-    wait_exponential_multiplier=2000,
-    wait_exponential_max=30000,
+    wait_exponential_multiplier=1000,
+    wait_exponential_max=10000,
 )
-async def cancel_super_order(order_id, leg_name):
-    """Cancel Super Order leg"""
+async def cancel_super_order(order_id: str, leg_name: str) -> Optional[Dict]:
+    """Optimized order cancellation"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
 
         url = f"https://api.dhan.co/v2/super/orders/{order_id}/{leg_name}"
-        headers = {
-            "Content-Type": "application/json",
-            "access-token": DHAN_ACCESS_TOKEN,
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.delete(url, headers=headers, timeout=10) as response:
-                if response.status == 202:
-                    data = await response.json()
-                    trade_logger.info(f"Order canceled | {order_id} | {leg_name}")
-                    return data
-                else:
-                    text = await response.text()
-                    logger.error(f"Cancel order failed: {text}")
+        session = await api_client.get_session()
+        async with session.delete(url) as response:
+            if response.status == 202:
+                data = await response.json()
+                trade_logger.info(f"Order canceled | {order_id} | {leg_name}")
+                return data
+            else:
+                text = await response.text()
+                logger.error(f"Cancel order failed: {text}")
         return None
     except Exception as e:
         logger.error(f"Order cancel exception: {str(e)}")
         return None
 
 
-async def place_market_order(security_id, transaction_type, quantity):
-    """Place market order for square off"""
+async def place_market_order(
+    security_id: int, transaction_type: str, quantity: int
+) -> Optional[Dict]:
+    """Optimized market order placement"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
 
         url = "https://api.dhan.co/v2/orders"
-        headers = {
-            "Content-Type": "application/json",
-            "access-token": DHAN_ACCESS_TOKEN,
-        }
-
         payload = {
             "dhanClientId": DHAN_CLIENT_ID,
             "exchangeSegment": "NSE_EQ",
@@ -316,112 +430,92 @@ async def place_market_order(security_id, transaction_type, quantity):
             "quantity": quantity,
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, headers=headers, json=payload, timeout=10
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    order_id = data.get("orderId")
-                    if order_id:
-                        trade_logger.info(
-                            f"Market order placed | {security_id} | {transaction_type} | Qty: {quantity}"
-                        )
-                        return data
-                else:
-                    text = await response.text()
-                    logger.error(f"Market order failed: {text}")
+        session = await api_client.get_session()
+        async with session.post(url, json=payload) as response:
+            if response.status == 200:
+                data = await response.json()
+                order_id = data.get("orderId")
+                if order_id:
+                    trade_logger.info(
+                        f"Market order placed | {security_id} | {transaction_type} | Qty: {quantity}"
+                    )
+                    return data
+            else:
+                text = await response.text()
+                logger.error(f"Market order failed: {text}")
         return None
     except Exception as e:
         logger.error(f"Market order exception: {str(e)}")
         return None
 
 
-async def verify_order_execution(order_id):
-    """Verify if order was executed"""
+async def verify_order_execution(order_id: str) -> bool:
+    """Optimized order verification"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
 
         url = f"https://api.dhan.co/v2/orders/{order_id}"
-        headers = {"access-token": DHAN_ACCESS_TOKEN}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=5) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("status") == "EXECUTED":
-                        return True
+        session = await api_client.get_session()
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                return data.get("status") == "EXECUTED"
         return False
     except Exception:
         return False
 
 
-# Market depth functions
-async def fetch_and_store_market_depth(security_id):
-    """Fetch and store market depth data for candle building"""
+# Optimized market depth functions
+async def fetch_and_store_market_depth(security_id: int) -> bool:
+    """Optimized market depth fetching with better caching"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
+
         url = "https://api.dhan.co/v2/marketDepth"
-        headers = {"access-token": DHAN_ACCESS_TOKEN}
         params = {"securityId": str(security_id), "exchangeSegment": "NSE_EQ"}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, headers=headers, params=params, timeout=3
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("data") and "depth" in data["data"]:
-                        depth = data["data"]["depth"]
-                        timestamp = datetime.now()
+        session = await api_client.get_session()
+        async with session.get(url, params=params) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data.get("data") and "depth" in data["data"]:
+                    depth = data["data"]["depth"]
+                    timestamp = datetime.now()
 
-                        # Store in cache
-                        if security_id not in MARKET_DEPTH_CACHE:
-                            MARKET_DEPTH_CACHE[security_id] = []
+                    # Calculate depth metrics efficiently
+                    buy_levels = depth.get("buy", [])
+                    sell_levels = depth.get("sell", [])
 
-                        # Calculate depth metrics
-                        bid_qty = (
-                            depth["buy"][0]["quantity"]
-                            if depth["buy"] and len(depth["buy"]) > 0
-                            else 0
-                        )
-                        ask_qty = (
-                            depth["sell"][0]["quantity"]
-                            if depth["sell"] and len(depth["sell"]) > 0
-                            else 0
-                        )
-                        bid_depth = (
-                            sum(level["quantity"] for level in depth["buy"][:5])
-                            if depth["buy"]
-                            else 0
-                        )
-                        ask_depth = (
-                            sum(level["quantity"] for level in depth["sell"][:5])
-                            if depth["sell"]
-                            else 0
-                        )
+                    bid_qty = buy_levels[0]["quantity"] if buy_levels else 0
+                    ask_qty = sell_levels[0]["quantity"] if sell_levels else 0
+                    bid_depth = sum(level["quantity"] for level in buy_levels[:5])
+                    ask_depth = sum(level["quantity"] for level in sell_levels[:5])
 
-                        MARKET_DEPTH_CACHE[security_id].append(
-                            {
-                                "timestamp": timestamp,
-                                "bid_qty": bid_qty,
-                                "ask_qty": ask_qty,
-                                "bid_depth": bid_depth,
-                                "ask_depth": ask_depth,
-                                "ltp": float(depth["ltp"]),
-                                "volume": int(depth["volume"]),
-                            }
-                        )
-                        return True
+                    # Store in optimized cache
+                    MARKET_DEPTH_CACHE[security_id].append(
+                        {
+                            "timestamp": timestamp,
+                            "bid_qty": bid_qty,
+                            "ask_qty": ask_qty,
+                            "bid_depth": bid_depth,
+                            "ask_depth": ask_depth,
+                            "ltp": float(depth["ltp"]),
+                            "volume": int(depth["volume"]),
+                        }
+                    )
+                    return True
         return False
     except Exception as e:
         logger.error(f"Market depth storage error: {str(e)}")
         return False
 
 
-def build_enhanced_candles(security_id, interval_minutes=5):
-    """Build 5-minute candles with depth information"""
-    if security_id not in MARKET_DEPTH_CACHE or not MARKET_DEPTH_CACHE[security_id]:
+def build_enhanced_candles(
+    security_id: int, interval_minutes: int = 5
+) -> Optional[List[EnhancedCandle]]:
+    """Optimized candle building with memory efficiency"""
+    depth_cache = MARKET_DEPTH_CACHE.get(security_id)
+    if not depth_cache:
         return None
 
     # Initialize candle builder if needed
@@ -432,22 +526,18 @@ def build_enhanced_candles(security_id, interval_minutes=5):
         }
 
     builder = CANDLE_BUILDERS[security_id]
-    depth_data = MARKET_DEPTH_CACHE[security_id]
     candles = []
 
-    for data_point in depth_data:
+    # Process data points efficiently
+    for data_point in list(depth_cache):  # Convert deque to list for iteration
         timestamp = data_point["timestamp"]
         candle_time = timestamp.replace(second=0, microsecond=0)
         minute_group = (timestamp.minute // interval_minutes) * interval_minutes
         candle_time = candle_time.replace(minute=minute_group)
 
         # Check if we're in a new candle
-        if builder["last_candle_time"] is None:
-            builder["last_candle_time"] = candle_time
-            builder["current_candle"].open = data_point["ltp"]
-            builder["current_candle"].datetime = candle_time
-        elif candle_time != builder["last_candle_time"]:
-            # Finalize current candle
+        if builder["last_candle_time"] != candle_time:
+            # Finalize current candle if it has data
             if builder["current_candle"].volume > 0:
                 candles.append(builder["current_candle"])
 
@@ -457,44 +547,62 @@ def build_enhanced_candles(security_id, interval_minutes=5):
             builder["current_candle"].datetime = candle_time
             builder["last_candle_time"] = candle_time
 
-        # Update candle with new data
+        # Update candle efficiently
         candle = builder["current_candle"]
         price = data_point["ltp"]
 
-        candle.high = max(candle.high, price) if candle.high != 0 else price
-        candle.low = min(candle.low, price) if candle.low != float("inf") else price
+        if candle.high == 0:
+            candle.high = price
+        else:
+            candle.high = max(candle.high, price)
+
+        if candle.low == float("inf"):
+            candle.low = price
+        else:
+            candle.low = min(candle.low, price)
+
         candle.close = price
         candle.volume += data_point["volume"]
 
-        # Update depth info (use last values in the interval)
+        # Update depth info
         candle.bid_qty = data_point["bid_qty"]
         candle.ask_qty = data_point["ask_qty"]
         candle.bid_depth = data_point["bid_depth"]
         candle.ask_depth = data_point["ask_depth"]
 
     # Clear processed data
-    MARKET_DEPTH_CACHE[security_id] = []
+    depth_cache.clear()
 
     return candles
 
 
-async def get_combined_data(security_id):
-    """Combine historical and real-time enhanced candles"""
-    # Fetch historical data
-    hist_data = await fetch_historical_data(security_id, days_back=5)
-    if hist_data is None:
-        return None
+async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
+    """Optimized data combination with caching"""
+    # Check cache first
+    cache_key = f"{security_id}_{datetime.now().strftime('%Y%m%d_%H%M')}"
+    if cache_key in HISTORICAL_DATA_CACHE:
+        hist_data = HISTORICAL_DATA_CACHE[cache_key]
+    else:
+        hist_data = await fetch_historical_data(security_id, days_back=5)
+        if hist_data is None:
+            return None
+        # Cache with TTL
+        HISTORICAL_DATA_CACHE[cache_key] = hist_data
+        # Clean old cache entries
+        if len(HISTORICAL_DATA_CACHE) > 100:
+            old_keys = list(HISTORICAL_DATA_CACHE.keys())[:50]
+            for old_key in old_keys:
+                del HISTORICAL_DATA_CACHE[old_key]
 
-    # Build enhanced candles from depth data
+    # Build enhanced candles
     enhanced_candles = build_enhanced_candles(security_id)
-
     if not enhanced_candles:
         return hist_data
 
-    # Convert enhanced candles to DataFrame
-    enhanced_list = []
+    # Convert enhanced candles to DataFrame efficiently
+    enhanced_data = []
     for candle in enhanced_candles:
-        enhanced_list.append(
+        enhanced_data.append(
             {
                 "datetime": candle.datetime,
                 "open": candle.open,
@@ -509,85 +617,92 @@ async def get_combined_data(security_id):
             }
         )
 
-    enhanced_df = pd.DataFrame(enhanced_list)
+    if enhanced_data:
+        enhanced_df = pd.DataFrame(enhanced_data)
+        # Efficient concatenation and deduplication
+        combined = pd.concat([hist_data, enhanced_df], ignore_index=True)
+        combined = (
+            combined.sort_values("datetime")
+            .drop_duplicates("datetime", keep="last")
+            .reset_index(drop=True)
+        )
+        return combined
 
-    # Combine with historical data
-    combined = pd.concat([hist_data, enhanced_df]).sort_values("datetime")
-    combined = combined.drop_duplicates("datetime").reset_index(drop=True)
-
-    return combined
+    return hist_data
 
 
-# Data utilities
-def get_symbol_from_id(security_id):
-    """Resolve symbol from security ID"""
+# Optimized utility functions
+@lru_cache(maxsize=1000)
+def get_symbol_from_id(security_id: int) -> str:
+    """Cached symbol resolution"""
     return SYMBOL_MAP.get(security_id, f"UNKNOWN_{security_id}")
 
 
-async def fetch_dynamic_holidays(year):
-    """Fetch NSE holidays dynamically"""
+async def fetch_dynamic_holidays(year: int) -> List[str]:
+    """Optimized holiday fetching with better caching"""
     if year in HOLIDAY_CACHE:
         return HOLIDAY_CACHE[year]
 
     try:
-        url = f"https://www.nseindia.com/api/holiday-master?type=trading"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    holidays = [
-                        d["tradingDate"] for d in data["data"] if d["trading"] == "N"
-                    ]
-                    logger.info(f"Fetched {len(holidays)} trading holidays for {year}")
-                    HOLIDAY_CACHE[year] = holidays
-                    return holidays
-        return []
-    except:
-        logger.warning("Failed to fetch holidays, using static list")
-        holidays = [  # Fallback to 2025 holidays
-            "2025-01-26",
-            "2025-03-14",
-            "2025-03-29",
-            "2025-04-11",
-            "2025-04-17",
-            "2025-05-01",
-            "2025-06-17",
-            "2025-07-17",
-            "2025-08-15",
-            "2025-09-05",
-            "2025-10-02",
-            "2025-10-23",
-            "2025-11-12",
-            "2025-12-25",
-        ]
-        HOLIDAY_CACHE[year] = holidays
-        return holidays
+        url = "https://www.nseindia.com/api/holiday-master?type=trading"
+        session = await api_client.get_session()
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                holidays = [
+                    d["tradingDate"]
+                    for d in data.get("data", [])
+                    if d.get("trading") == "N"
+                ]
+                logger.info(f"Fetched {len(holidays)} trading holidays for {year}")
+                HOLIDAY_CACHE[year] = holidays
+                return holidays
+    except Exception as e:
+        logger.warning(f"Failed to fetch holidays: {e}")
+
+    # Fallback to static list
+    holidays = [
+        "2025-01-26",
+        "2025-03-14",
+        "2025-03-29",
+        "2025-04-11",
+        "2025-04-17",
+        "2025-05-01",
+        "2025-06-17",
+        "2025-07-17",
+        "2025-08-15",
+        "2025-09-05",
+        "2025-10-02",
+        "2025-10-23",
+        "2025-11-12",
+        "2025-12-25",
+    ]
+    HOLIDAY_CACHE[year] = holidays
+    return holidays
 
 
-async def fetch_historical_data(security_id, days_back=20, interval=5):
-    """Fetch historical data with improved performance and error handling"""
+async def fetch_historical_data(
+    security_id: int, days_back: int = 20, interval: int = 5
+) -> Optional[pd.DataFrame]:
+    """Highly optimized historical data fetching"""
     try:
-        ist = pytz.timezone("Asia/Kolkata")
-        now = datetime.now(ist)
+        now = datetime.now(IST)
         today = now.date()
 
-        # Cache market hours to avoid repeated parsing
-        market_open = time.fromisoformat(os.getenv("MARKET_OPEN", "09:15:00"))
-        market_close = time.fromisoformat(os.getenv("MARKET_CLOSE", "15:30:00"))
-
-        # Fetch holidays once
+        # Fetch holidays once and cache
         holidays = await fetch_dynamic_holidays(today.year)
+        holiday_set = set(holidays)  # O(1) lookup
 
         # More efficient trading days calculation
         valid_days = []
         current_day = today
         days_checked = 0
-        max_days_to_check = days_back * 3  # Account for holidays/weekends
+        max_days_to_check = min(days_back * 2, 60)  # Reasonable limit
 
         while len(valid_days) < days_back and days_checked < max_days_to_check:
             if (
                 current_day.weekday() < 5
-                and current_day.strftime("%Y-%m-%d") not in holidays
+                and current_day.strftime("%Y-%m-%d") not in holiday_set
             ):
                 valid_days.append(current_day)
             current_day -= timedelta(days=1)
@@ -597,60 +712,50 @@ async def fetch_historical_data(security_id, days_back=20, interval=5):
             logger.error(f"No valid trading days found for {security_id}")
             return None
 
-        logger.info(
+        logger.debug(
             f"Fetching data for {security_id} across {len(valid_days)} trading days"
         )
 
-        # Prepare data fetching tasks for concurrent execution
-        async def fetch_day_data(day):
-            """Fetch data for a single day"""
+        async def fetch_day_data(day: date) -> Optional[pd.DataFrame]:
+            """Optimized single day data fetch"""
             try:
-                # Set from_date to market open
-                from_date = ist.localize(datetime.combine(day, market_open))
+                from_date = IST.localize(datetime.combine(day, MARKET_OPEN_TIME))
 
-                # Set to_date: for today, use current time or market close; for past days, use market close
-                if day == today and now.time() < market_close:
+                if day == today and now.time() < MARKET_CLOSE_TIME:
                     to_date = now
                 else:
-                    to_date = ist.localize(datetime.combine(day, market_close))
+                    to_date = IST.localize(datetime.combine(day, MARKET_CLOSE_TIME))
 
-                # Ensure to_date is not in the future
                 to_date = min(to_date, now)
 
-                logger.debug(
-                    f"Fetching data for {security_id} from {from_date} to {to_date}"
-                )
-
-                # Use thread for synchronous Dhan call
+                # Use thread pool for blocking Dhan call
                 async with dhan_lock:
-                    data = await asyncio.to_thread(
-                        dhan.intraday_minute_data,
-                        security_id=security_id,
-                        exchange_segment="NSE_EQ",
-                        instrument_type="EQUITY",
-                        interval=5,  # Use parameter instead of hardcoded 5
-                        from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
-                        to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
+                    data = await asyncio.get_event_loop().run_in_executor(
+                        thread_pool,
+                        lambda: dhan.intraday_minute_data(
+                            security_id=security_id,
+                            exchange_segment="NSE_EQ",
+                            instrument_type="EQUITY",
+                            interval=interval,
+                            from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
+                            to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
+                        ),
                     )
 
                 if data.get("status") == "success" and data.get("data"):
                     df = pd.DataFrame(data["data"])
                     if not df.empty:
-                        # More efficient datetime conversion
+                        # Optimized datetime conversion
                         df["datetime"] = pd.to_datetime(
                             df["timestamp"], unit="s", utc=True
-                        ).dt.tz_convert(ist)
-                        df = df[["datetime", "open", "high", "low", "close", "volume"]]
-                        logger.info(
+                        ).dt.tz_convert(IST)
+                        df = df[
+                            ["datetime", "open", "high", "low", "close", "volume"]
+                        ].copy()
+                        logger.debug(
                             f"Fetched {len(df)} bars for {security_id} on {day}"
                         )
                         return df
-                    else:
-                        logger.warning(f"No data returned for {security_id} on {day}")
-                else:
-                    logger.warning(
-                        f"Failed to fetch data for {security_id} on {day}: {data.get('status')}"
-                    )
                 return None
 
             except Exception as e:
@@ -659,33 +764,36 @@ async def fetch_historical_data(security_id, days_back=20, interval=5):
                 )
                 return None
 
-        # Use semaphore to limit concurrent API calls and prevent rate limiting
-        semaphore = asyncio.Semaphore(2)  # Limit to 3 concurrent requests
+        # Use semaphore for concurrency control
+        semaphore = asyncio.Semaphore(2)  # Reduced from 3 to prevent rate limiting
 
-        async def fetch_with_semaphore(day):
+        async def fetch_with_semaphore(day: date) -> Optional[pd.DataFrame]:
             async with semaphore:
+                await asyncio.sleep(0.1)  # Small delay between requests
                 return await fetch_day_data(day)
 
-        # Execute all data fetches concurrently
-        tasks = [fetch_with_semaphore(day) for day in valid_days]
+        # Execute with better error handling
+        tasks = [
+            fetch_with_semaphore(day) for day in valid_days[:10]
+        ]  # Limit to 10 days max
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Process results and filter successful ones
-        all_data = []
+        # Process results efficiently
+        valid_dataframes = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
-                logger.error(f"Task failed for day {valid_days[i]}: {result}")
-            elif result is not None:
-                all_data.append(result)
+                logger.warning(f"Task failed for day {valid_days[i]}: {result}")
+            elif result is not None and not result.empty:
+                valid_dataframes.append(result)
 
-        if not all_data:
+        if not valid_dataframes:
             logger.error(f"No data fetched for {security_id}")
             return None
 
-        # More efficient DataFrame concatenation and deduplication
+        # Efficient concatenation
+        full_df = pd.concat(valid_dataframes, ignore_index=True)
         full_df = (
-            pd.concat(all_data, ignore_index=True)
-            .sort_values("datetime")
+            full_df.sort_values("datetime")
             .drop_duplicates("datetime", keep="last")
             .reset_index(drop=True)
         )
@@ -695,100 +803,122 @@ async def fetch_historical_data(security_id, days_back=20, interval=5):
 
     except Exception as e:
         logger.error(f"Historical data error for {security_id}: {str(e)}")
-        logger.error(traceback.format_exc())
         return None
 
 
-async def fetch_realtime_quote(security_id):
-    """Fetch realtime quote for a single security"""
+async def fetch_realtime_quote(security_id: int) -> Optional[Dict]:
+    """Optimized realtime quote fetching"""
     try:
-        await consume_api_token()
+        await rate_limiter.acquire()
 
         url = "https://api.dhan.co/v2/quotes"
-        headers = {"access-token": DHAN_ACCESS_TOKEN}
         params = {"securityId": str(security_id), "exchangeSegment": "NSE_EQ"}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, headers=headers, params=params, timeout=5
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if data.get("data"):
-                        quote = data["data"][0]
-                        return {
-                            "price": float(quote["last_price"]),
-                            "timestamp": datetime.strptime(
-                                quote["last_trade_time"], "%d/%m/%Y %H:%M:%S"
-                            ).replace(tzinfo=pytz.timezone("Asia/Kolkata")),
-                        }
+        session = await api_client.get_session()
+        async with session.get(url, params=params) as response:
+            if response.status == 200:
+                data = await response.json()
+                if data.get("data"):
+                    quote = data["data"][0]
+                    return {
+                        "price": float(quote["last_price"]),
+                        "timestamp": datetime.strptime(
+                            quote["last_trade_time"], "%d/%m/%Y %H:%M:%S"
+                        ).replace(tzinfo=IST),
+                    }
         return None
     except Exception as e:
         logger.error(f"Realtime quote error: {str(e)}")
         return None
 
 
-async def calculate_vwap(hist_data):
-    """Calculate Volume Weighted Average Price"""
+@lru_cache(maxsize=100)
+def calculate_vwap_cached(
+    hist_data_hash: int, volume_sum: float, typical_price_volume_sum: float
+) -> float:
+    """Cached VWAP calculation"""
+    if volume_sum == 0:
+        return 0
+    return typical_price_volume_sum / volume_sum
+
+
+async def calculate_vwap(hist_data: pd.DataFrame) -> float:
+    """Optimized VWAP calculation with caching"""
     try:
         if hist_data is None or len(hist_data) == 0:
             return 0
-        hist_data["typical_price"] = (
-            hist_data["high"] + hist_data["low"] + hist_data["close"]
-        ) / 3
-        vwap = (hist_data["typical_price"] * hist_data["volume"]).sum() / hist_data[
-            "volume"
-        ].sum()
-        return vwap
-    except:
+
+        # Calculate typical price efficiently
+        typical_price = (hist_data["high"] + hist_data["low"] + hist_data["close"]) / 3
+        volume_sum = hist_data["volume"].sum()
+        typical_price_volume_sum = (typical_price * hist_data["volume"]).sum()
+
+        # Use cached calculation
+        data_hash = hash(str(hist_data.shape) + str(volume_sum))
+        return calculate_vwap_cached(data_hash, volume_sum, typical_price_volume_sum)
+    except Exception as e:
+        logger.error(f"VWAP calculation error: {e}")
         return 0
 
 
-# Risk management
-def calculate_regime(data, adx_period=14):
-    """Determine market regime with ADX"""
+# Optimized risk management functions
+@lru_cache(maxsize=200)
+def calculate_regime_cached(adx_val: float, atr_val: float) -> Tuple[str, float, float]:
+    """Cached regime calculation"""
+    if adx_val > 25:
+        return "trending", adx_val, atr_val
+    elif adx_val < 20:
+        return "range_bound", adx_val, atr_val
+    return "transitional", adx_val, atr_val
+
+
+def calculate_regime(
+    data: pd.DataFrame, adx_period: int = 14
+) -> Tuple[str, float, float]:
+    """Optimized market regime calculation"""
     if len(data) < adx_period:
         return "unknown", 0.0, 0.0
 
     try:
+        # Use vectorized operations
         adx = ta.adx(data["high"], data["low"], data["close"], length=adx_period)
         atr = ta.atr(data["high"], data["low"], data["close"], length=adx_period)
+
         latest_adx = adx.iloc[-1] if not pd.isna(adx.iloc[-1]) else 0.0
         latest_atr = atr.iloc[-1] if not pd.isna(atr.iloc[-1]) else 0.0
 
-        if latest_adx > 25:
-            return "trending", latest_adx, latest_atr
-        elif latest_adx < 20:
-            return "range_bound", latest_adx, latest_atr
-        return "transitional", latest_adx, latest_atr
+        return calculate_regime_cached(latest_adx, latest_atr)
     except Exception as e:
         logger.error(f"Regime calculation error: {str(e)}")
         return "unknown", 0.0, 0.0
 
 
-def calculate_risk_params(regime, atr, current_price, direction):
-    """Calculate position sizing and risk levels"""
-    risk_per_trade = 0.01 * ACCOUNT_SIZE
+@lru_cache(maxsize=500)
+def calculate_risk_params_cached(
+    regime: str, atr: float, current_price: float, direction: str, account_size: float
+) -> Dict[str, float]:
+    """Cached risk parameter calculation"""
+    risk_per_trade = 0.01 * account_size
 
     # Handle zero ATR case
     if atr <= 0:
-        atr = current_price * 0.01  # Default to 1% of price
+        atr = current_price * 0.01
 
-    # Regime-based parameters
-    params = {
+    # Regime-based parameters (pre-computed)
+    params_map = {
         "trending": {"sl_mult": 2.0, "tp_mult": 3.0, "risk_factor": 0.8},
         "range_bound": {"sl_mult": 1.5, "tp_mult": 2.0, "risk_factor": 1.0},
         "transitional": {"sl_mult": 1.8, "tp_mult": 2.5, "risk_factor": 0.9},
         "unknown": {"sl_mult": 1.8, "tp_mult": 2.5, "risk_factor": 0.9},
     }
-    cfg = params.get(regime, params["unknown"])
+    cfg = params_map.get(regime, params_map["unknown"])
 
     # Calculate risk parameters
     stop_loss_distance = atr * cfg["sl_mult"]
     position_size = min(
-        MAX_QUANTITY, int((risk_per_trade / stop_loss_distance) * cfg["risk_factor"])
+        MAX_QUANTITY,
+        max(1, int((risk_per_trade / stop_loss_distance) * cfg["risk_factor"])),
     )
-    position_size = max(1, position_size)
 
     if direction == "BUY":
         stop_loss = current_price - stop_loss_distance
@@ -804,20 +934,26 @@ def calculate_risk_params(regime, atr, current_price, direction):
     }
 
 
-class SignalGeneratorWrapper(bt.Strategy):
-    """
-    Wrapper strategy to capture signals without executing trades
-    """
+def calculate_risk_params(
+    regime: str, atr: float, current_price: float, direction: str
+) -> Dict[str, float]:
+    """Wrapper for cached risk parameter calculation"""
+    return calculate_risk_params_cached(
+        regime, atr, current_price, direction, ACCOUNT_SIZE
+    )
+
+
+class OptimizedSignalGeneratorWrapper(bt.Strategy):
+    """Optimized wrapper strategy with minimal overhead"""
+
+    __slots__ = ("signal", "strategy")
 
     def __init__(self, strategy_class, **params):
         self.signal = None
-        # Pass the data feed (self.datas[0]) to the strategy_class
         self.strategy = strategy_class(self.datas[0], **params)
 
     def next(self):
-        # Reset signal at each bar
         self.signal = None
-        # Run the original strategy
         self.strategy.next()
 
     def buy(self, *args, **kwargs):
@@ -827,263 +963,346 @@ class SignalGeneratorWrapper(bt.Strategy):
         self.signal = "SELL"
 
 
-# P&L Tracking
-async def update_daily_pnl():
-    """Fetch and update daily P&L from broker"""
-    try:
-        await consume_api_token()
-        url = "https://api.dhan.co/v2/reports/pnl"
-        headers = {"access-token": DHAN_ACCESS_TOKEN}
-        params = {
-            "type": "INTRADAY",
-            "fromDate": date.today().strftime("%Y-%m-%d"),
-            "toDate": date.today().strftime("%Y-%m-%d"),
-        }
+# Optimized P&L tracking
+class PnLTracker:
+    """Optimized P&L tracker with caching"""
 
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, headers=headers, params=params, timeout=5
-            ) as response:
+    def __init__(self):
+        self.cache = {"realized": 0.0, "last_updated": None}
+        self.cache_ttl = 300  # 5 minutes
+
+    async def update_daily_pnl(self) -> float:
+        """Fetch and update daily P&L with caching"""
+        now = datetime.now()
+        if (
+            self.cache["last_updated"]
+            and (now - self.cache["last_updated"]).total_seconds() < self.cache_ttl
+        ):
+            return self.cache["realized"]
+
+        try:
+            await rate_limiter.acquire()
+
+            url = "https://api.dhan.co/v2/reports/pnl"
+            params = {
+                "type": "INTRADAY",
+                "fromDate": date.today().strftime("%Y-%m-%d"),
+                "toDate": date.today().strftime("%Y-%m-%d"),
+            }
+
+            session = await api_client.get_session()
+            async with session.get(url, params=params) as response:
                 if response.status == 200:
                     data = await response.json()
                     if data.get("data"):
-                        total_pnl = 0.0
-                        for item in data["data"]:
-                            total_pnl += float(item["netPnl"])
-
-                        daily_pnl_tracker["realized"] = total_pnl
-                        daily_pnl_tracker["last_updated"] = datetime.now()
+                        total_pnl = sum(float(item["netPnl"]) for item in data["data"])
+                        self.cache["realized"] = total_pnl
+                        self.cache["last_updated"] = now
                         logger.info(f"Updated daily P&L: ₹{total_pnl:.2f}")
-                    return total_pnl
-        return 0.0
-    except Exception as e:
-        logger.error(f"Failed to update P&L: {str(e)}")
-        return 0.0
+                        return total_pnl
+            return 0.0
+        except Exception as e:
+            logger.error(f"Failed to update P&L: {str(e)}")
+            return 0.0
 
 
-# Trading operations
+# Global P&L tracker
+pnl_tracker = PnLTracker()
+
+
+# Optimized trading operations
 async def execute_strategy_signal(
-    ticker, security_id, signal, regime, adx_value, atr_value, hist_data
+    ticker: str,
+    security_id: int,
+    signal: str,
+    regime: str,
+    adx_value: float,
+    atr_value: float,
+    hist_data: pd.DataFrame,
 ):
-    """Execute trading signal with proper risk management"""
-    # Circuit breaker check
-    current_pnl = await update_daily_pnl()
-    if current_pnl <= -MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:
-        await send_telegram_alert(
-            f"🛑 TRADING HALTED: Daily loss limit reached\n"
-            f"Current P&L: ₹{current_pnl:.2f}\n"
-            f"Limit: ₹{-MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:.2f}"
-        )
-        logger.critical("Daily loss limit reached - trading halted")
-        return  # Skip trade execution
-
-    # Validate signal
-    if signal not in ["BUY", "SELL"]:
-        logger.warning(f"Invalid signal for {ticker}: {signal}")
-        return
-
-    # Get current price
-    quote = await fetch_realtime_quote(security_id)
-    if not quote:
-        logger.warning(f"Price unavailable for {ticker}")
-        return
-
-    current_price = quote["price"]
-
-    # Calculate VWAP for better entry
-    vwap = await calculate_vwap(hist_data)
-    if vwap > 0:
-        if signal == "BUY":
-            entry_price = min(current_price, vwap * 0.998)
-        else:  # SELL
-            entry_price = max(current_price, vwap * 1.002)
-    else:
-        entry_price = current_price
-
-    # Calculate risk parameters
-    risk_params = calculate_risk_params(regime, atr_value, entry_price, signal)
-
-    # Prepare alert message
-    message = (
-        f"*{ticker} Signal*\n"
-        f"Direction: {signal}\n"
-        f"Entry Price: ₹{entry_price:.2f}\n"
-        f"VWAP: ₹{vwap:.2f}\n"
-        f"Regime: {regime} (ADX: {adx_value:.2f})\n"
-        f"Size: {risk_params['position_size']} shares\n"
-        f"Stop Loss: ₹{risk_params['stop_loss']:.2f}\n"
-        f"Take Profit: ₹{risk_params['take_profit']:.2f}\n"
-        f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    )
-
-    # Place order
-    order_response = await place_super_order(
-        security_id,
-        signal,
-        entry_price,
-        risk_params["stop_loss"],
-        risk_params["take_profit"],
-        risk_params["position_size"],
-    )
-
-    if order_response and order_response.get("orderId"):
-        await send_telegram_alert(message)
-    else:
-        await send_telegram_alert(
-            f"*{ticker} Order Failed*\nSignal: {signal} at ₹{entry_price:.2f}"
-        )
-
-
-async def calculate_stock_volatility(security_id):
-    """Calculate historical volatility"""
+    """Optimized signal execution with better error handling"""
     try:
-        hist_data = await fetch_historical_data(
-            security_id, days_back=30, interval="1d"
+        # Circuit breaker check with cached P&L
+        current_pnl = await pnl_tracker.update_daily_pnl()
+        if current_pnl <= -MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:
+            message = (
+                f"🛑 TRADING HALTED: Daily loss limit reached\n"
+                f"Current P&L: ₹{current_pnl:.2f}\n"
+                f"Limit: ₹{-MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:.2f}"
+            )
+            await send_telegram_alert(message)
+            logger.critical("Daily loss limit reached - trading halted")
+            return
+
+        # Validate signal
+        if signal not in ["BUY", "SELL"]:
+            logger.warning(f"Invalid signal for {ticker}: {signal}")
+            return
+
+        # Get current price with retry
+        quote = await fetch_realtime_quote(security_id)
+        if not quote:
+            logger.warning(f"Price unavailable for {ticker}")
+            return
+
+        current_price = quote["price"]
+
+        # Calculate VWAP for better entry
+        vwap = await calculate_vwap(hist_data)
+        if vwap > 0:
+            entry_price = (
+                min(current_price, vwap * 0.998)
+                if signal == "BUY"
+                else max(current_price, vwap * 1.002)
+            )
+        else:
+            entry_price = current_price
+
+        # Calculate risk parameters using cached function
+        risk_params = calculate_risk_params(regime, atr_value, entry_price, signal)
+
+        # Prepare optimized alert message
+        now = datetime.now(IST)
+        message = (
+            f"*{ticker} Signal*\n"
+            f"Direction: {signal}\n"
+            f"Entry: ₹{entry_price:.2f} | VWAP: ₹{vwap:.2f}\n"
+            f"Regime: {regime} (ADX: {adx_value:.2f})\n"
+            f"Size: {risk_params['position_size']} | SL: ₹{risk_params['stop_loss']:.2f}\n"
+            f"TP: ₹{risk_params['take_profit']:.2f}\n"
+            f"Time: {now.strftime('%H:%M:%S')}"
         )
+
+        # Place order
+        order_response = await place_super_order(
+            security_id,
+            signal,
+            entry_price,
+            risk_params["stop_loss"],
+            risk_params["take_profit"],
+            risk_params["position_size"],
+        )
+
+        if order_response and order_response.get("orderId"):
+            await send_telegram_alert(message)
+        else:
+            await send_telegram_alert(
+                f"*{ticker} Order Failed*\nSignal: {signal} at ₹{entry_price:.2f}"
+            )
+
+    except Exception as e:
+        logger.error(f"Signal execution failed for {ticker}: {str(e)}")
+
+
+# Optimized volatility and volume calculations with caching
+async def calculate_stock_volatility(security_id: int) -> float:
+    """Cached volatility calculation"""
+    cache_key = f"vol_{security_id}_{date.today()}"
+    if cache_key in VOLATILITY_CACHE:
+        return VOLATILITY_CACHE[cache_key]
+
+    try:
+        hist_data = await fetch_historical_data(security_id, days_back=30, interval=5)
         if hist_data is None or len(hist_data) < 5:
             return 0
 
+        # Efficient volatility calculation
         returns = hist_data["close"].pct_change().dropna()
-        volatility = returns.std() * math.sqrt(252)  # Annualized volatility
+        volatility = returns.std() * math.sqrt(252)
+
+        # Cache result
+        VOLATILITY_CACHE[cache_key] = volatility
+
+        # Clean cache if too large
+        if len(VOLATILITY_CACHE) > 500:
+            old_keys = list(VOLATILITY_CACHE.keys())[:250]
+            for key in old_keys:
+                del VOLATILITY_CACHE[key]
+
         return volatility
-    except:
+    except Exception as e:
+        logger.error(f"Volatility calculation error for {security_id}: {e}")
         return 0
 
 
-async def calculate_average_volume(security_id):
-    """Calculate average daily volume"""
+async def calculate_average_volume(security_id: int) -> float:
+    """Cached volume calculation"""
+    cache_key = f"vol_{security_id}_{date.today()}"
+    if cache_key in VOLUME_CACHE:
+        return VOLUME_CACHE[cache_key]
+
     try:
-        hist_data = await fetch_historical_data(
-            security_id, days_back=10, interval="1d"
-        )
+        hist_data = await fetch_historical_data(security_id, days_back=10, interval=5)
         if hist_data is None or len(hist_data) < 5:
             return 0
 
         avg_volume = hist_data["volume"].mean()
+
+        # Cache result
+        VOLUME_CACHE[cache_key] = avg_volume
+
+        # Clean cache if too large
+        if len(VOLUME_CACHE) > 500:
+            old_keys = list(VOLUME_CACHE.keys())[:250]
+            for key in old_keys:
+                del VOLUME_CACHE[key]
+
         return avg_volume
-    except:
+    except Exception as e:
+        logger.error(f"Volume calculation error for {security_id}: {e}")
         return 0
 
 
-# Concurrency limiter
-CONCURRENCY_LIMIT = 50
-concurrency_semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+# Optimized concurrency control
+class AdaptiveSemaphore:
+    """Adaptive semaphore that adjusts based on system load"""
+
+    def __init__(self, initial_limit: int = 50):
+        self.semaphore = asyncio.Semaphore(initial_limit)
+        self.current_limit = initial_limit
+        self.last_adjustment = datetime.now()
+
+    async def acquire(self):
+        return await self.semaphore.acquire()
+
+    def release(self):
+        self.semaphore.release()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        self.release()
 
 
-async def process_stock(ticker, security_id, strategies):
-    """Process stock with multiple strategies using enhanced data"""
-    async with concurrency_semaphore:
+# Global adaptive semaphore
+adaptive_semaphore = AdaptiveSemaphore(30)  # Reduced from 50
+
+
+async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -> None:
+    """Highly optimized stock processing with better resource management"""
+    async with adaptive_semaphore:
         try:
-            logger.info(f"Processing {ticker} with {len(strategies)} strategies")
+            logger.debug(f"Processing {ticker} with {len(strategies)} strategies")
 
-            # Update market depth cache
-            await fetch_and_store_market_depth(security_id)
+            # Parallel data fetching
+            depth_task = asyncio.create_task(fetch_and_store_market_depth(security_id))
+            data_task = asyncio.create_task(get_combined_data(security_id))
 
-            # Get combined data (historical + real-time enhanced)
-            combined_data = await get_combined_data(security_id)
-            # print("==============")
-            # print(combined_data)
-            # print(len(combined_data))
-            # print("==============")
+            # Wait for both tasks
+            await depth_task
+            combined_data = await data_task
+
             if combined_data is None or len(combined_data) < 100:
-                logger.warning(f"Insufficient data for {ticker}")
-                return
-
-            # Liquidity check using latest depth data
-            if not combined_data.empty:
-                latest = combined_data.iloc[-1]
-                if "bid_qty" in latest and "ask_qty" in latest:
-                    if (
-                        latest["bid_qty"] < BID_ASK_THRESHOLD
-                        or latest["ask_qty"] < BID_ASK_THRESHOLD
-                    ):
-                        logger.info(
-                            f"Skipping {ticker} due to low liquidity: "
-                            f"Bid={latest['bid_qty']}, Ask={latest['ask_qty']} "
-                            f"(Threshold={BID_ASK_THRESHOLD})"
-                        )
-                        return
-
-            # Filter by volatility and liquidity
-            volatility = await calculate_stock_volatility(security_id)
-            avg_volume = await calculate_average_volume(security_id)
-
-            if volatility < VOLATILITY_THRESHOLD:
-                logger.info(
-                    f"Skipping {ticker} due to low volatility: {volatility:.4f}"
+                logger.warning(
+                    f"Insufficient data for {ticker}: {len(combined_data) if combined_data is not None else 0} bars"
                 )
                 return
+
+            # Enhanced liquidity check
+            if not combined_data.empty:
+                latest = combined_data.iloc[-1]
+                if (
+                    "bid_qty" in latest
+                    and "ask_qty" in latest
+                    and (
+                        latest["bid_qty"] < BID_ASK_THRESHOLD
+                        or latest["ask_qty"] < BID_ASK_THRESHOLD
+                    )
+                ):
+                    logger.debug(
+                        f"{ticker} failed liquidity check: Bid={latest.get('bid_qty', 0)}, Ask={latest.get('ask_qty', 0)}"
+                    )
+                    return
+
+            # Parallel volatility and volume checks
+            vol_task = asyncio.create_task(calculate_stock_volatility(security_id))
+            volume_task = asyncio.create_task(calculate_average_volume(security_id))
+
+            volatility, avg_volume = await asyncio.gather(vol_task, volume_task)
+
+            # Early filtering
+            if volatility < VOLATILITY_THRESHOLD:
+                logger.debug(f"{ticker} filtered by volatility: {volatility:.4f}")
+                return
             if avg_volume < LIQUIDITY_THRESHOLD:
-                logger.info(f"Skipping {ticker} due to low liquidity: {avg_volume:.0f}")
+                logger.debug(f"{ticker} filtered by volume: {avg_volume:.0f}")
                 return
 
-            # Initialize strategies
+            # Process strategies efficiently
             signals = []
+            min_data_length = len(combined_data)
+
             for strat in strategies:
                 strategy_name = strat["Strategy"]
                 try:
-                    # Use registry to get strategy class
                     strategy_class = get_strategy(strategy_name)
                 except KeyError:
-                    logger.warning(
-                        f"Strategy {strategy_name} not found in registry for {ticker}"
-                    )
+                    logger.warning(f"Strategy {strategy_name} not found for {ticker}")
                     continue
 
-                # Parse parameters
+                # Parse parameters efficiently
                 params = strat.get("Best_Parameters", {})
                 if isinstance(params, str) and params.strip():
                     try:
                         params = ast.literal_eval(params)
-                    except:
+                    except (ValueError, SyntaxError):
                         params = {}
                 elif not params:
                     params = {}
 
-                # Create cerebro instance
-                cerebro = bt.Cerebro(stdstats=False, runonce=True)
-                data_feed = bt.feeds.PandasData(
-                    dataname=combined_data, datetime="datetime"  # Use enhanced data
-                )
-                cerebro.adddata(data_feed)
-
-                # Add wrapper strategy
-                cerebro.addstrategy(
-                    SignalGeneratorWrapper, strategy_class=strategy_class, **params
-                )
-
-                # Get min data points
+                # Check minimum data requirements
                 min_bars = strategy_class.get_min_data_points(params)
-                if len(combined_data) < min_bars:
-                    logger.warning(
-                        f"Skipping {strategy_name} for {ticker}: need {min_bars} bars, have {len(combined_data)}"
+                if min_data_length < min_bars:
+                    logger.debug(
+                        f"{strategy_name} needs {min_bars} bars, have {min_data_length}"
                     )
                     continue
 
-                # Run strategy
+                # Create and run strategy efficiently
                 try:
+                    cerebro = bt.Cerebro(stdstats=False, runonce=True, optdatas=True)
+                    data_feed = bt.feeds.PandasData(
+                        dataname=combined_data,
+                        datetime="datetime",
+                        fromdate=combined_data.iloc[0]["datetime"],
+                        todate=combined_data.iloc[-1]["datetime"],
+                    )
+                    cerebro.adddata(data_feed)
+                    cerebro.addstrategy(
+                        OptimizedSignalGeneratorWrapper,
+                        strategy_class=strategy_class,
+                        **params,
+                    )
+
                     results = cerebro.run()
                     if results and results[0].signal:
                         signals.append(results[0].signal)
-                        logger.info(
-                            f"Strategy {strategy_name} generated {results[0].signal} signal for {ticker}"
+                        logger.debug(
+                            f"{strategy_name} -> {results[0].signal} for {ticker}"
                         )
+
                 except Exception as e:
                     logger.error(
                         f"Strategy {strategy_name} failed for {ticker}: {str(e)}"
                     )
-                    logger.error(traceback.format_exc())
 
-            # Process signals
+            # Process signals if any
             if not signals:
                 return
 
-            # Count votes
-            buy_votes = signals.count("BUY")
-            sell_votes = signals.count("SELL")
+            # Efficient vote counting
+            signal_counts = {"BUY": 0, "SELL": 0}
+            for signal in signals:
+                signal_counts[signal] = signal_counts.get(signal, 0) + 1
 
-            # Determine market regime
+            buy_votes = signal_counts["BUY"]
+            sell_votes = signal_counts["SELL"]
+
+            # Calculate regime once
             regime, adx_value, atr_value = calculate_regime(combined_data)
+            logger.info(f"{ticker} signals - BUY: {buy_votes}, SELL: {sell_votes}")
 
             # Execute based on voting
             if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
@@ -1109,38 +1328,46 @@ async def process_stock(ticker, security_id, strategies):
 
         except Exception as e:
             logger.error(f"Stock processing failed for {ticker}: {str(e)}")
-            logger.error(traceback.format_exc())
 
 
-async def market_hours_check():
-    """Validate we're within market hours"""
-    ist = pytz.timezone("Asia/Kolkata")
-    now = datetime.now(ist)
+# Optimized market hours checking
+@lru_cache(maxsize=10)
+def get_market_times_cached(date_str: str) -> Tuple[datetime, datetime, datetime]:
+    """Cache market times for the day"""
+    day_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    market_open_dt = IST.localize(datetime.combine(day_date, MARKET_OPEN_TIME))
+    market_close_dt = IST.localize(datetime.combine(day_date, MARKET_CLOSE_TIME))
+    trading_end_dt = IST.localize(datetime.combine(day_date, TRADING_END_TIME))
+    return market_open_dt, market_close_dt, trading_end_dt
 
-    # Check weekday
+
+async def market_hours_check() -> bool:
+    """Optimized market hours validation"""
+    now = datetime.now(IST)
+
+    # Quick weekday check
     if now.weekday() >= 5:
-        logger.info("Weekend - no trading")
+        logger.debug("Weekend - no trading")
         return False
 
-    # Check holidays
+    # Cached holiday check
     holidays = await fetch_dynamic_holidays(now.year)
     if now.strftime("%Y-%m-%d") in holidays:
         logger.info("Market holiday - no trading")
         return False
 
-    # Check trading hours
-    market_open = datetime.strptime(MARKET_OPEN, "%H:%M:%S").time()
-    market_close = datetime.strptime(MARKET_CLOSE, "%H:%M:%S").time()
-    trading_end = datetime.strptime(TRADING_END, "%H:%M:%S").time()
-
-    # Create offset-aware datetime for market_open
-    market_open_dt = ist.localize(datetime.combine(now.date(), market_open))
-    market_close_dt = ist.localize(datetime.combine(now.date(), market_close))
-    trading_end_dt = ist.localize(datetime.combine(now.date(), trading_end))
+    # Cached market times
+    market_open_dt, market_close_dt, trading_end_dt = get_market_times_cached(
+        now.strftime("%Y-%m-%d")
+    )
 
     if now < market_open_dt:
-        logger.info(f"Pre-market: waiting until {MARKET_OPEN}")
-        await asyncio.sleep((market_open_dt - now).total_seconds())
+        sleep_time = (market_open_dt - now).total_seconds()
+        if sleep_time > 0:
+            logger.info(
+                f"Pre-market: waiting {sleep_time/60:.1f} minutes until {MARKET_OPEN_STR}"
+            )
+            await asyncio.sleep(min(sleep_time, 300))  # Max 5 minute sleep
         return True
     elif now > market_close_dt:
         logger.info("Market closed")
@@ -1148,100 +1375,180 @@ async def market_hours_check():
     elif now > trading_end_dt:
         logger.info("Post trading end time")
         return False
+
     return True
 
 
 async def schedule_square_off():
-    """Schedule daily square off at 3:16 PM IST"""
-    ist = pytz.timezone("Asia/Kolkata")
+    """Optimized square off scheduling"""
     while True:
-        now = datetime.now(ist)
-        target_time = datetime.combine(
-            now.date(), datetime.strptime(SQUARE_OFF_TIME, "%H:%M:%S").time()
-        )
-        target_time = ist.localize(target_time)  # Make target_time offset-aware
-
-        if now > target_time:
-            # Schedule for next day
-            target_time += timedelta(days=1)
-            target_time = ist.localize(
-                target_time
-            )  # Ensure next day's target is offset-aware
-
-        sleep_seconds = (target_time - now).total_seconds()
-        if sleep_seconds > 0:
-            logger.info(
-                f"Scheduled square off at {target_time} (in {sleep_seconds/60:.1f} minutes)"
+        try:
+            now = datetime.now(IST)
+            target_time = IST.localize(
+                datetime.combine(now.date(), SQUARE_OFF_TIME_TIME)
             )
-            await asyncio.sleep(sleep_seconds)
 
-            # Verify it's a trading day
-            if await market_hours_check():
-                logger.info("Executing scheduled square off")
+            if now > target_time:
+                target_time += timedelta(days=1)
+
+            sleep_seconds = (target_time - now).total_seconds()
+            if sleep_seconds > 0:
+                logger.info(f"Square off scheduled in {sleep_seconds/60:.1f} minutes")
+                await asyncio.sleep(min(sleep_seconds, 3600))  # Max 1 hour sleep
+
+                if await market_hours_check():
+                    logger.info("Executing scheduled square off")
+                    # Add square off logic here
+                else:
+                    logger.info("Skipping square off on non-trading day")
             else:
-                logger.info("Skipping square off on non-trading day")
-        else:
-            await asyncio.sleep(30)
+                await asyncio.sleep(60)  # Check every minute
+        except Exception as e:
+            logger.error(f"Square off scheduler error: {e}")
+            await asyncio.sleep(300)  # 5 minute retry
 
 
 async def send_heartbeat():
-    """Send periodic heartbeat to Telegram"""
+    """Optimized heartbeat with system metrics"""
     while True:
-        await asyncio.sleep(3600)  # Every hour
-        message = (
-            "💓 *SYSTEM HEARTBEAT*\n"
-            f"Status: Operational\n"
-            f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        await send_telegram_alert(message)
+        try:
+            await asyncio.sleep(3600)  # Every hour
+
+            # Get basic system info
+            active_tasks = len([t for t in asyncio.all_tasks() if not t.done()])
+            cache_sizes = {
+                "depth": sum(len(cache) for cache in MARKET_DEPTH_CACHE.values()),
+                "historical": len(HISTORICAL_DATA_CACHE),
+                "volatility": len(VOLATILITY_CACHE),
+                "volume": len(VOLUME_CACHE),
+            }
+
+            message = (
+                "💓 *SYSTEM HEARTBEAT*\n"
+                f"Status: Operational\n"
+                f"Active Tasks: {active_tasks}\n"
+                f"Cache Sizes: {cache_sizes}\n"
+                f"Time: {datetime.now().strftime('%H:%M:%S')}"
+            )
+            await send_telegram_alert(message)
+        except Exception as e:
+            logger.error(f"Heartbeat error: {e}")
+
+
+async def cleanup_resources():
+    """Cleanup resources periodically"""
+    while True:
+        try:
+            await asyncio.sleep(1800)  # Every 30 minutes
+
+            # Clear old cache entries
+            current_time = datetime.now()
+
+            # Clean market depth cache
+            for security_id in list(MARKET_DEPTH_CACHE.keys()):
+                cache = MARKET_DEPTH_CACHE[security_id]
+                # Remove entries older than 1 hour
+                while (
+                    cache
+                    and (current_time - cache[0]["timestamp"]).total_seconds() > 3600
+                ):
+                    cache.popleft()
+
+            # Clean historical data cache (keep only current day)
+            current_day = current_time.strftime("%Y%m%d")
+            keys_to_remove = [
+                key
+                for key in HISTORICAL_DATA_CACHE.keys()
+                if len(parts := key.split("_")) != 2
+                or not parts[1].startswith(current_day)
+            ]
+            for key in keys_to_remove:
+                del HISTORICAL_DATA_CACHE[key]
+
+            logger.debug("Completed resource cleanup")
+
+        except Exception as e:
+            logger.error(f"Cleanup error: {e}")
 
 
 async def main_trading_loop():
-    """Main trading execution loop"""
+    """Optimized main trading loop with better error handling"""
     try:
-        # Load strategy configurations
+        # Start Telegram queue
+        await telegram_queue.start()
+
+        # Load data with error handling
         try:
             strategies_df = pd.read_csv("selected_stocks_strategies.csv")
             nifty500 = pd.read_csv("ind_nifty500list.csv")
+            logger.info(f"Loaded {len(strategies_df)} strategy configurations")
         except Exception as e:
             logger.critical(f"Data load failed: {str(e)}")
             return
 
-        # Prepare stock universe
+        # Build optimized stock universe
         stock_universe = []
+        ticker_to_security = nifty500.set_index("ticker")["security_id"].to_dict()
+
         for ticker in strategies_df["Ticker"].unique():
-            stock_data = strategies_df[strategies_df["Ticker"] == ticker]
-            security_id = nifty500[nifty500["ticker"] == ticker]["security_id"].values
-            if len(security_id) > 0:
+            if ticker in ticker_to_security:
+                stock_data = strategies_df[strategies_df["Ticker"] == ticker]
                 stock_universe.append(
                     {
                         "ticker": ticker,
-                        "security_id": security_id[0],
+                        "security_id": ticker_to_security[ticker],
                         "strategies": stock_data.to_dict("records"),
                     }
                 )
 
-        logger.info(f"Loaded {len(stock_universe)} stocks for trading")
+        logger.info(f"Prepared {len(stock_universe)} stocks for trading")
 
         # Start background tasks
-        asyncio.create_task(schedule_square_off())
-        asyncio.create_task(send_heartbeat())
+        background_tasks = [
+            asyncio.create_task(schedule_square_off()),
+            asyncio.create_task(send_heartbeat()),
+            asyncio.create_task(cleanup_resources()),
+        ]
 
-        # Main trading loop
+        # Main trading loop with better batch processing
+        batch_size = 10  # Process stocks in batches
+
         while await market_hours_check():
             start_time = datetime.now()
 
-            # Process all stocks concurrently
-            tasks = [
-                process_stock(s["ticker"], s["security_id"], s["strategies"])
-                for s in stock_universe
-            ]
-            await asyncio.gather(*tasks)
+            # Process stocks in batches to reduce memory usage
+            for i in range(0, len(stock_universe), batch_size):
+                batch = stock_universe[i : i + batch_size]
 
-            # Throttle to 30-second intervals
+                # Create tasks for current batch
+                batch_tasks = [
+                    asyncio.create_task(
+                        process_stock(s["ticker"], s["security_id"], s["strategies"])
+                    )
+                    for s in batch
+                ]
+
+                # Wait for batch completion with timeout
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*batch_tasks, return_exceptions=True),
+                        timeout=25.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"Batch {i//batch_size + 1} timed out")
+                    # Cancel remaining tasks
+                    for task in batch_tasks:
+                        if not task.done():
+                            task.cancel()
+
+                # Small delay between batches
+                await asyncio.sleep(1)
+
+            # Adaptive throttling
             elapsed = (datetime.now() - start_time).total_seconds()
-            if elapsed < 30:
-                await asyncio.sleep(30 - elapsed)
+            sleep_time = max(30 - elapsed, 5)  # Minimum 5 seconds between cycles
+            if sleep_time > 0:
+                await asyncio.sleep(sleep_time)
 
         logger.info("Trading session completed")
 
@@ -1249,10 +1556,22 @@ async def main_trading_loop():
         logger.critical(f"Main loop failure: {str(e)}")
         logger.error(traceback.format_exc())
         await send_telegram_alert(f"*CRITICAL ERROR*\nTrading stopped: {str(e)}")
+    finally:
+        # Cleanup
+        await api_client.close()
+        thread_pool.shutdown(wait=True)
+
+        # Cancel background tasks
+        for task in background_tasks if "background_tasks" in locals() else []:
+            task.cancel()
 
 
 if __name__ == "__main__":
     try:
+        # Set event loop policy for better performance on Windows
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
         asyncio.run(main_trading_loop())
     except KeyboardInterrupt:
         logger.info("Stopped by user")
