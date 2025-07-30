@@ -3,9 +3,101 @@ import numpy as np
 import optuna
 import pandas as pd
 from datetime import timedelta
+import sys
+import os
+import multiprocessing as mp
 from multiprocessing import Pool, get_context
+import pickle
+import tempfile
+import importlib.util
+import logging
 
-from comprehensive_backtesting.registry import get_strategy
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Global variable to store strategy registry path
+_STRATEGY_REGISTRY_PATH = None
+
+
+def setup_module_path_and_registry():
+    """Set up module paths and find strategy registry."""
+    global _STRATEGY_REGISTRY_PATH
+
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    project_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
+
+    # Add directories to Python path
+    paths_to_add = [current_dir, parent_dir, project_root]
+    for path in paths_to_add:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+    # Find strategy registry module
+    potential_paths = [
+        os.path.join(current_dir, "comprehensive_backtesting", "registry.py"),
+        os.path.join(parent_dir, "comprehensive_backtesting", "registry.py"),
+        os.path.join(project_root, "comprehensive_backtesting", "registry.py"),
+    ]
+
+    for path in potential_paths:
+        if os.path.exists(path):
+            _STRATEGY_REGISTRY_PATH = path
+            logger.info(f"Found strategy registry at: {path}")
+            return True
+
+    logger.error("Could not find strategy registry module")
+    return False
+
+
+def get_strategy_from_path(strategy_name):
+    """Load strategy from registry using file path."""
+    global _STRATEGY_REGISTRY_PATH
+
+    if _STRATEGY_REGISTRY_PATH is None:
+        raise ImportError("Strategy registry path not set")
+
+    try:
+        # Load the registry module directly from file
+        spec = importlib.util.spec_from_file_location(
+            "comprehensive_backtesting.registry", _STRATEGY_REGISTRY_PATH
+        )
+        registry_module = importlib.util.module_from_spec(spec)
+        sys.modules["comprehensive_backtesting.registry"] = registry_module
+        spec.loader.exec_module(registry_module)
+
+        # Get the strategy from the loaded module
+        if hasattr(registry_module, "get_strategy"):
+            strategy = registry_module.get_strategy(strategy_name)
+            if strategy is None:
+                raise ImportError(f"Strategy {strategy_name} not found in registry")
+            return strategy
+        elif hasattr(registry_module, "STRATEGY_REGISTRY"):
+            strategy = registry_module.STRATEGY_REGISTRY.get(strategy_name)
+            if strategy is None:
+                raise ImportError(
+                    f"Strategy {strategy_name} not found in STRATEGY_REGISTRY"
+                )
+            return strategy
+        else:
+            raise ImportError("No get_strategy function or STRATEGY_REGISTRY found")
+
+    except Exception as e:
+        logger.error(f"Could not load strategy {strategy_name}: {e}")
+        raise ImportError(f"Could not load strategy {strategy_name}: {e}")
+
+
+def get_strategy_safe(strategy_name):
+    """Safe strategy getter that works in both main and child processes."""
+    try:
+        # Try standard import first
+        from comprehensive_backtesting.registry import get_strategy
+
+        return get_strategy(strategy_name)
+    except ImportError:
+        # Fallback to file-based loading
+        return get_strategy_from_path(strategy_name)
 
 
 class StrategyTradeAnalyzer(bt.Analyzer):
@@ -13,19 +105,16 @@ class StrategyTradeAnalyzer(bt.Analyzer):
         self.trades = []
 
     def stop(self):
-        """Called at the end of the backtest"""
-        # Get trades from the strategy if it has them
+        """Called at the end of the backtest."""
         if hasattr(self.strategy, "get_completed_trades"):
             strategy_trades = self.strategy.get_completed_trades()
-
-            # Convert to the format expected by your code
             for trade in strategy_trades:
                 trade_info = {
                     "trade_id": trade.get("ref", len(self.trades) + 1),
                     "entry_date": trade.get("entry_time"),
-                    "entry_time": trade.get("entry_time"),  # Added
+                    "entry_time": trade.get("entry_time"),
                     "exit_date": trade.get("exit_time"),
-                    "exit_time": trade.get("exit_time"),  # Added
+                    "exit_time": trade.get("exit_time"),
                     "entry_price": trade.get("entry_price", 0),
                     "exit_price": trade.get("exit_price", 0),
                     "pnl": trade.get("pnl", 0),
@@ -37,8 +126,7 @@ class StrategyTradeAnalyzer(bt.Analyzer):
                     "status": trade.get("status", "Unknown"),
                 }
                 self.trades.append(trade_info)
-
-        print(f"StrategyTradeAnalyzer collected {len(self.trades)} trades")
+        logger.info(f"StrategyTradeAnalyzer collected {len(self.trades)} trades")
 
     def get_analysis(self):
         return self.trades.copy()
@@ -46,66 +134,46 @@ class StrategyTradeAnalyzer(bt.Analyzer):
 
 def create_cerebro(data, strategy_class, params, initial_cash, commission):
     cerebro = bt.Cerebro()
-
-    # Add data feed
     data_feed = bt.feeds.PandasData(dataname=data)
     cerebro.adddata(data_feed)
-
-    # Add strategy
     cerebro.addstrategy(strategy_class, **params)
-
-    # Set broker parameters
     cerebro.broker.setcash(initial_cash)
     cerebro.broker.setcommission(commission=commission)
-
-    # Add analyzers
     cerebro.addanalyzer(bt.analyzers.Returns, _name="returns")
     cerebro.addanalyzer(
         bt.analyzers.SharpeRatio, _name="sharpe", riskfreerate=0.0, annualize=True
     )
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name="drawdown")
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name="trades")
-
-    # Add TimeReturn analyzer for daily returns (crucial for Sharpe calculation)
     cerebro.addanalyzer(
         bt.analyzers.TimeReturn,
         timeframe=bt.TimeFrame.Days,
         compression=1,
         _name="timereturn",
     )
-
-    # Add our custom trade analyzer
     cerebro.addanalyzer(StrategyTradeAnalyzer, _name="tradehistory")
-
     return cerebro
 
 
 def extract_trades(strat):
-    """Extract trades from strategy"""
     trades = []
-
-    # First try the analyzer
     if hasattr(strat.analyzers, "tradehistory"):
         try:
             trades = strat.analyzers.tradehistory.get_analysis()
-            print(f"Extracted {len(trades)} trades from StrategyTradeAnalyzer")
+            logger.info(f"Extracted {len(trades)} trades from StrategyTradeAnalyzer")
         except Exception as e:
-            print(f"Error extracting from analyzer: {e}")
-
-    # If no trades from analyzer, try strategy directly
+            logger.warning(f"Error extracting from analyzer: {e}")
     if not trades and hasattr(strat, "get_completed_trades"):
         try:
             strategy_trades = strat.get_completed_trades()
-            print(f"Found {len(strategy_trades)} trades in strategy")
-
-            # Convert to expected format
+            logger.info(f"Found {len(strategy_trades)} trades in strategy")
             for trade in strategy_trades:
                 trade_info = {
                     "trade_id": trade.get("ref", len(trades) + 1),
                     "entry_date": trade.get("entry_time"),
-                    "entry_time": trade.get("entry_time"),  # Added
+                    "entry_time": trade.get("entry_time"),
                     "exit_date": trade.get("exit_time"),
-                    "exit_time": trade.get("exit_time"),  # Added
+                    "exit_time": trade.get("exit_time"),
                     "entry_price": trade.get("entry_price", 0),
                     "exit_price": trade.get("exit_price", 0),
                     "pnl": trade.get("pnl", 0),
@@ -117,25 +185,30 @@ def extract_trades(strat):
                     "status": trade.get("status", "Unknown"),
                 }
                 trades.append(trade_info)
-
         except Exception as e:
-            print(f"Error extracting from strategy: {e}")
-
+            logger.warning(f"Error extracting from strategy: {e}")
     if not trades:
-        print("No trades found in analyzer or strategy")
-
+        logger.info("No trades found in analyzer or strategy")
     return trades
 
 
-def process_window(args):
+def process_window_worker(args):
+    """Worker function that sets up the environment and processes a window."""
+    setup_success = setup_module_path_and_registry()
+    if not setup_success:
+        raise ImportError("Failed to setup module path and strategy registry")
+    return process_window_impl(args)
+
+
+def process_window_impl(args):
     (
         window_num,
         train_start,
         train_end,
         test_start,
         test_end,
-        data,
-        strategy_name,  # Strategy name to resolve the class
+        data_pickle_path,
+        strategy_name,
         optimization_params,
         optimization_metric,
         initial_cash,
@@ -144,56 +217,56 @@ def process_window(args):
         _,
     ) = args
 
-    # Resolve strategy class from name (multiprocessing safe)
-    strategy_class = get_strategy(strategy_name)
+    try:
+        with open(data_pickle_path, "rb") as f:
+            data = pickle.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load data from {data_pickle_path}: {e}")
+        raise RuntimeError(f"Failed to load data from {data_pickle_path}: {e}")
 
-    print(f"Processing window {window_num}")
+    try:
+        strategy_class = get_strategy_safe(strategy_name)
+    except Exception as e:
+        logger.error(f"Failed to get strategy {strategy_name}: {e}")
+        raise ImportError(f"Failed to get strategy {strategy_name}: {e}")
+
+    logger.info(f"Processing window {window_num}")
 
     train_data = data[(data.index >= train_start) & (data.index <= train_end)]
 
     def objective(trial):
         params = {}
-        print(f"Optimization params: {optimization_params}")
         for param_name, param_config in optimization_params.items():
             param_type = param_config.get("type")
-
             if param_type == "int":
                 params[param_name] = trial.suggest_int(
                     param_name,
-                    param_config.get("low", 1),  # Default to 1 if "low" is missing
-                    param_config.get(
-                        "high", 100
-                    ),  # Default to 100 if "high" is missing
+                    param_config.get("low", 1),
+                    param_config.get("high", 100),
                 )
             elif param_type == "float":
                 params[param_name] = trial.suggest_float(
                     param_name,
-                    param_config.get("low", 0.0),  # Default to 0.0 if "low" is missing
-                    param_config.get(
-                        "high", 1.0
-                    ),  # Default to 1.0 if "high" is missing
+                    param_config.get("low", 0.0),
+                    param_config.get("high", 1.0),
                 )
             elif param_type == "categorical":
                 params[param_name] = trial.suggest_categorical(
-                    param_name,
-                    param_config.get(
-                        "choices", []
-                    ),  # Default to empty list if "choices" is missing
+                    param_name, param_config.get("choices", [])
                 )
             elif param_type == "loguniform":
                 params[param_name] = trial.suggest_float(
                     param_name,
-                    param_config.get("low", 1e-5),  # Default to small value
-                    param_config.get("high", 1.0),  # Default to 1.0
+                    param_config.get("low", 1e-5),
+                    param_config.get("high", 1.0),
                     log=True,
                 )
             else:
-                print(
-                    f"Warning: Unknown parameter type '{param_type}' for {param_name}, skipping."
+                logger.warning(
+                    f"Unknown parameter type '{param_type}' for {param_name}, skipping."
                 )
                 continue
 
-        # Ensure slow_sma_period > fast_sma_period for strategies that require it
         if "fast_sma_period" in params and "slow_sma_period" in params:
             if params["slow_sma_period"] <= params["fast_sma_period"]:
                 params["slow_sma_period"] = params["fast_sma_period"] + 1
@@ -210,9 +283,8 @@ def process_window(args):
     study.optimize(objective, n_trials=n_trials)
 
     best_params = study.best_params
-    print(f"Window {window_num} best params: {best_params}")
+    logger.info(f"Window {window_num} best params: {best_params}")
 
-    # In-sample evaluation
     cerebro_in = create_cerebro(
         train_data, strategy_class, best_params, initial_cash, commission
     )
@@ -221,7 +293,6 @@ def process_window(args):
     in_sample_metrics = extract_metrics(strat_in)
     in_sample_trades = extract_trades(strat_in)
 
-    # Out-of-sample evaluation
     test_data = data[(data.index >= test_start) & (data.index <= test_end)]
     cerebro_out = create_cerebro(
         test_data, strategy_class, best_params, initial_cash, commission
@@ -247,108 +318,80 @@ def process_window(args):
 
 def extract_metrics(strat):
     metrics = {}
-
-    # Get returns analysis
     returns_analysis = strat.analyzers.returns.get_analysis()
     metrics["total_return"] = returns_analysis.get("rtot", 0)
-
-    # Get TimeReturn data for proper Sharpe calculation
     timereturn_analysis = strat.analyzers.timereturn.get_analysis()
 
-    # Calculate Sharpe ratio using TimeReturn data
     if timereturn_analysis and len(timereturn_analysis) > 1:
-        # Convert to pandas Series for easier calculation
-        returns_series = pd.Series(timereturn_analysis)
-
-        # Remove any NaN or infinite values
-        returns_series = returns_series.replace([np.inf, -np.inf], np.nan).dropna()
-
+        returns_series = (
+            pd.Series(timereturn_analysis).replace([np.inf, -np.inf], np.nan).dropna()
+        )
         if len(returns_series) > 1 and returns_series.std() > 0:
-            # Calculate annualized Sharpe ratio (assuming daily returns)
-            # Risk-free rate assumed to be 0 for simplicity
             daily_mean = returns_series.mean()
             daily_std = returns_series.std()
-
-            # Annualize (252 trading days per year)
             annualized_return = (1 + daily_mean) ** 252 - 1
             annualized_volatility = daily_std * np.sqrt(252)
-
             if annualized_volatility > 0:
                 sharpe_ratio = annualized_return / annualized_volatility
-
-                # Validate the Sharpe ratio
-                if not (pd.isna(sharpe_ratio) or np.isinf(sharpe_ratio)):
-                    metrics["sharpe_ratio"] = sharpe_ratio
-                else:
-                    metrics["sharpe_ratio"] = 0.0
+                metrics["sharpe_ratio"] = (
+                    sharpe_ratio
+                    if not (pd.isna(sharpe_ratio) or np.isinf(sharpe_ratio))
+                    else 0.0
+                )
             else:
                 metrics["sharpe_ratio"] = 0.0
         else:
             metrics["sharpe_ratio"] = 0.0
     else:
-        # Fallback: try the built-in Sharpe analyzer
         sharpe_analysis = strat.analyzers.sharpe.get_analysis()
         if (
             sharpe_analysis
             and "sharperatio" in sharpe_analysis
             and sharpe_analysis["sharperatio"] is not None
-            and not (
-                pd.isna(sharpe_analysis["sharperatio"])
-                or np.isinf(sharpe_analysis["sharperatio"])
-            )
         ):
-            metrics["sharpe_ratio"] = sharpe_analysis["sharperatio"]
+            metrics["sharpe_ratio"] = (
+                sharpe_analysis["sharperatio"]
+                if not (
+                    pd.isna(sharpe_analysis["sharperatio"])
+                    or np.isinf(sharpe_analysis["sharperatio"])
+                )
+                else 0.0
+            )
         else:
             metrics["sharpe_ratio"] = 0.0
 
-    # Get drawdown
     drawdown_analysis = strat.analyzers.drawdown.get_analysis()
     metrics["max_drawdown"] = drawdown_analysis.get("max", {}).get("drawdown", 0)
 
-    # Create equity curve from TimeReturn data
     if timereturn_analysis:
         equity_curve = pd.Series(timereturn_analysis)
-        # Convert to cumulative returns starting from initial cash
         equity_curve = (1 + equity_curve).cumprod() * strat.cerebro.broker.startingcash
         metrics["equity_curve"] = equity_curve
     else:
-        # Fallback: create simple equity curve
         metrics["equity_curve"] = pd.Series([strat.cerebro.broker.startingcash])
 
     return metrics
 
 
 def calculate_trade_statistics(trades):
-    """Calculate comprehensive trade statistics"""
     if not trades:
         return {}
-
     df = pd.DataFrame(trades)
-
-    # Basic statistics
     total_trades = len(df)
     winning_trades = df[df["pnl_net"] > 0]
     losing_trades = df[df["pnl_net"] < 0]
     win_rate = len(winning_trades) / total_trades if total_trades > 0 else 0
-
-    # Profit metrics
     gross_profit = winning_trades["pnl_net"].sum() if not winning_trades.empty else 0
     gross_loss = losing_trades["pnl_net"].sum() if not losing_trades.empty else 0
     net_profit = df["pnl_net"].sum()
     profit_factor = abs(gross_profit / gross_loss) if gross_loss < 0 else float("inf")
-
-    # Average values
     avg_win = winning_trades["pnl_net"].mean() if not winning_trades.empty else 0
     avg_loss = losing_trades["pnl_net"].mean() if not losing_trades.empty else 0
     avg_trade = df["pnl_net"].mean()
     avg_duration = df["duration"].mean() if "duration" in df.columns else 0
-
-    # Max values
     max_win = winning_trades["pnl_net"].max() if not winning_trades.empty else 0
     max_loss = losing_trades["pnl_net"].min() if not losing_trades.empty else 0
     max_duration = df["duration"].max() if "duration" in df.columns else 0
-
-    # Directional statistics
     long_trades = df[df["direction"] == "Long"]
     short_trades = df[df["direction"] == "Short"]
     long_win_rate = (
@@ -389,7 +432,7 @@ class WalkForwardAnalysis:
     def __init__(
         self,
         data,
-        strategy_class,
+        strategy_name,
         optimization_params,
         optimization_metric="sharpe_ratio",
         training_ratio=0.5,
@@ -402,7 +445,7 @@ class WalkForwardAnalysis:
         verbose=False,
     ):
         self.data = data
-        self.strategy_class = strategy_class
+        self.strategy_name = strategy_name
         self.optimization_params = optimization_params
         self.optimization_metric = optimization_metric
         self.training_ratio = training_ratio
@@ -414,8 +457,8 @@ class WalkForwardAnalysis:
         self.n_trials = n_trials
         self.verbose = verbose
         self.results = []
+        self._temp_data_file = None
 
-        # Calculate dynamic training, gap, and testing periods
         total_days = (data.index.max() - data.index.min()).days
         self.window_length = int(
             total_days * (training_ratio + gap_ratio + testing_ratio)
@@ -424,24 +467,47 @@ class WalkForwardAnalysis:
         self.gap_period = int(self.window_length * gap_ratio)
         self.testing_period = int(self.window_length * testing_ratio)
         self.step_period = int(self.testing_period * step_ratio)
-        self.module_name = __name__
 
-        # Debug print for period calculations
-        print(f"Total days: {total_days}")
-        print(f"Window length: {self.window_length} days")
-        print(f"Training period: {self.training_period} days")
-        print(f"Gap period: {self.gap_period} days")
-        print(f"Testing period: {self.testing_period} days")
-        print(f"Step period: {self.step_period} days")
-        print(f"Module name: {self.module_name}")
+        logger.info(f"Total days: {total_days}")
+        logger.info(f"Window length: {self.window_length} days")
+        logger.info(f"Training period: {self.training_period} days")
+        logger.info(f"Gap period: {self.gap_period} days")
+        logger.info(f"Testing period: {self.testing_period} days")
+        logger.info(f"Step period: {self.step_period} days")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self._cleanup_temp_files()
+
+    def _cleanup_temp_files(self):
+        if self._temp_data_file and os.path.exists(self._temp_data_file):
+            try:
+                os.unlink(self._temp_data_file)
+                logger.info(f"Cleaned up temporary file: {self._temp_data_file}")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to clean up temporary file {self._temp_data_file}: {e}"
+                )
 
     def run_analysis(self):
+        setup_success = setup_module_path_and_registry()
+        if not setup_success:
+            raise ImportError(
+                "Failed to setup module path and strategy registry in main process"
+            )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as f:
+            pickle.dump(self.data, f)
+            self._temp_data_file = f.name
+            logger.info(f"Created temporary data file: {self._temp_data_file}")
+
         windows = []
         current_date = self.data.index.min()
         walk_forward_num = 1
-        print(f"Starting window generation at {current_date}")
+        logger.info(f"Starting window generation at {current_date}")
 
-        # Window generation logic with gap period
         while (
             current_date + timedelta(days=self.window_length) <= self.data.index.max()
         ):
@@ -455,40 +521,44 @@ class WalkForwardAnalysis:
             windows.append(
                 (walk_forward_num, train_start, train_end, test_start, test_end)
             )
-            print(
-                f"Window {walk_forward_num}: Train {train_start} to {train_end}, "
-                f"Gap {gap_start} to {gap_end}, Test {test_start} to {test_end}"
+            logger.info(
+                f"Window {walk_forward_num}: Train {train_start} to {train_end}, Gap {gap_start} to {gap_end}, Test {test_start} to {test_end}"
             )
 
             current_date = current_date + timedelta(days=self.step_period)
             walk_forward_num += 1
 
-        print(f"Generated {len(windows)} windows")
-        ctx = get_context("spawn")
-        import multiprocessing as mp
+        logger.info(f"Generated {len(windows)} windows")
 
-        with ctx.Pool(processes=min(4, mp.cpu_count())) as pool:
-            args = [
-                (
-                    w[0],
-                    w[1],
-                    w[2],
-                    w[3],
-                    w[4],
-                    self.data,
-                    self.strategy_class,
-                    self.optimization_params,
-                    self.optimization_metric,
-                    self.initial_cash,
-                    self.commission,
-                    self.n_trials,
-                    self.module_name,  # Pass module name
-                )
-                for w in windows
-            ]
-            self.results = pool.map(process_window, args)
+        if os.name == "nt":
+            ctx = get_context("spawn")
+        else:
+            ctx = get_context("fork")
 
-        # Aggregate all equity curves
+        try:
+            with ctx.Pool(processes=min(4, mp.cpu_count())) as pool:
+                args = [
+                    (
+                        w[0],
+                        w[1],
+                        w[2],
+                        w[3],
+                        w[4],
+                        self._temp_data_file,
+                        self.strategy_name,
+                        self.optimization_params,
+                        self.optimization_metric,
+                        self.initial_cash,
+                        self.commission,
+                        self.n_trials,
+                        None,
+                    )
+                    for w in windows
+                ]
+                self.results = pool.map(process_window_worker, args)
+        finally:
+            self._cleanup_temp_files()
+
         self.all_in_sample_equity = pd.DataFrame()
         self.all_out_sample_equity = pd.DataFrame()
 
@@ -513,31 +583,24 @@ class WalkForwardAnalysis:
         out_sample_sharpes = []
 
         for r in self.results:
-            # Collect returns
             in_return = r["in_sample_metrics"].get("total_return", 0)
             out_return = r["out_sample_metrics"].get("total_return", 0)
-
             if in_return is not None:
                 in_sample_returns.append(in_return)
             if out_return is not None:
                 out_sample_returns.append(out_return)
 
-            # Collect Sharpe ratios (now should be valid numbers)
             in_sharpe = r["in_sample_metrics"].get("sharpe_ratio", 0)
             out_sharpe = r["out_sample_metrics"].get("sharpe_ratio", 0)
-
-            # Since we now ensure sharpe_ratio is always a valid number (0.0 if invalid)
             if in_sharpe is not None and not (
                 pd.isna(in_sharpe) or np.isinf(in_sharpe)
             ):
                 in_sample_sharpes.append(float(in_sharpe))
-
             if out_sharpe is not None and not (
                 pd.isna(out_sharpe) or np.isinf(out_sharpe)
             ):
                 out_sample_sharpes.append(float(out_sharpe))
 
-        # Calculate averages
         in_sample_avg_return = (
             sum(in_sample_returns) / len(in_sample_returns) if in_sample_returns else 0
         )
@@ -554,8 +617,6 @@ class WalkForwardAnalysis:
             if out_sample_sharpes
             else 0
         )
-
-        # Calculate win rates
         positive_out_sample = sum(1 for r in out_sample_returns if r > 0)
         win_rate_out_sample = (
             (positive_out_sample / len(out_sample_returns) * 100)
@@ -563,7 +624,6 @@ class WalkForwardAnalysis:
             else 0
         )
 
-        # Calculate correlation between in-sample and out-sample returns
         correlation = 0
         if (
             len(in_sample_returns) == len(out_sample_returns)
@@ -576,33 +636,26 @@ class WalkForwardAnalysis:
             except:
                 correlation = 0
 
-        # Calculate average degradation
-        degradations = []
-        for i in range(min(len(in_sample_returns), len(out_sample_returns))):
-            degradation = in_sample_returns[i] - out_sample_returns[i]
-            degradations.append(degradation)
-
+        degradations = [
+            in_sample_returns[i] - out_sample_returns[i]
+            for i in range(min(len(in_sample_returns), len(out_sample_returns)))
+        ]
         avg_degradation = sum(degradations) / len(degradations) if degradations else 0
 
-        overall = {
+        return {
             "total_windows": len(self.results),
-            "in_sample_return_avg_return": in_sample_avg_return
-            * 100,  # Convert to percentage
-            "out_sample_avg_return": out_sample_avg_return
-            * 100,  # Convert to percentage
+            "in_sample_return_avg_return": in_sample_avg_return * 100,
+            "out_sample_avg_return": out_sample_avg_return * 100,
             "in_sample_avg_sharpe": in_sample_avg_sharpe,
             "out_sample_avg_sharpe": out_sample_avg_sharpe,
             "win_rate_out_sample": win_rate_out_sample,
             "correlation": correlation,
-            "avg_degradation": avg_degradation * 100,  # Convert to percentage
+            "avg_degradation": avg_degradation * 100,
             "in_sample_sharpe_count": len(in_sample_sharpes),
             "out_sample_sharpe_count": len(out_sample_sharpes),
         }
 
-        return overall
-
     def get_window_summary(self):
-        """Return a DataFrame summarizing each walk-forward window"""
         rows = []
         for result in self.results:
             row = {
@@ -611,8 +664,7 @@ class WalkForwardAnalysis:
                 "train_end": result["train_end"],
                 "test_start": result["test_start"],
                 "test_end": result["test_end"],
-                "best_params": str(result["best_params"]),  # Convert dict to string
-                # In-sample metrics
+                "best_params": str(result["best_params"]),
                 "in_sample_total_return": result["in_sample_metrics"].get(
                     "total_return", 0
                 ),
@@ -622,7 +674,6 @@ class WalkForwardAnalysis:
                 "in_sample_max_drawdown": result["in_sample_metrics"].get(
                     "max_drawdown", 0
                 ),
-                # Out-of-sample metrics
                 "out_sample_total_return": result["out_sample_metrics"].get(
                     "total_return", 0
                 ),
@@ -637,8 +688,6 @@ class WalkForwardAnalysis:
         return pd.DataFrame(rows)
 
     def generate_trade_statistics(self):
-        """Generate comprehensive trade statistics for all windows"""
-        # Aggregate all trades
         all_in_sample_trades = []
         all_out_sample_trades = []
 
@@ -646,11 +695,9 @@ class WalkForwardAnalysis:
             all_in_sample_trades.extend(result["in_sample_trades"])
             all_out_sample_trades.extend(result["out_sample_trades"])
 
-        # Calculate statistics
         in_sample_stats = calculate_trade_statistics(all_in_sample_trades)
         out_sample_stats = calculate_trade_statistics(all_out_sample_trades)
 
-        # Create summary DataFrame
         stats_summary = pd.DataFrame(
             {
                 "Metric": [
@@ -720,3 +767,7 @@ class WalkForwardAnalysis:
         )
 
         return stats_summary, all_in_sample_trades, all_out_sample_trades
+
+
+def create_walk_forward_analysis(*args, **kwargs):
+    return WalkForwardAnalysis(*args, **kwargs)

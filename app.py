@@ -5747,8 +5747,8 @@ def run_walkforward_analysis(
 ):
     """Run walk-forward analysis and display results."""
     status_text.text("Starting walk-forward analysis...")
-    data = data.copy()  # Ensure we don't modify the original data
-    ticker = ticker  # Ensure we don't modify the original ticker
+    data = data.copy()
+    ticker = ticker
     strategy_reports = []
     strategy_length = len(params["selected_strategy"])
     for idx, strategy in enumerate(params["selected_strategy"]):
@@ -5759,7 +5759,7 @@ def run_walkforward_analysis(
 
         wf = WalkForwardAnalysis(
             data=data,
-            strategy_class=strategy_class.__name__,
+            strategy_name=strategy_class.__name__,
             optimization_params=strategy_class.optimization_params,
             optimization_metric="sharpe_ratio",
             training_ratio=0.6,
@@ -5832,7 +5832,6 @@ def run_walkforward_analysis(
         st.write("### ⚙️ Parameter Evolution Across Windows")
         param_evolution_df = wf.get_window_summary()
 
-        # FIX: Handle best_params display
         if not param_evolution_df.empty:
             # Create a display version of parameters
             param_evolution_df["parameters_display"] = param_evolution_df[

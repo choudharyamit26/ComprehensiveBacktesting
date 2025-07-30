@@ -142,6 +142,7 @@ try:
     from stratgies.momentum.verv_intraday import VERV
     from stratgies.momentum.multi_ema_stochasticrsi import EMAMultiStrategy
     from stratgies.momentum.ema_macd_rsi_volume import EMAMACDRSIVolume
+    from stratgies.momentum.ema_rsi_pivot import EMA_RSI_Pivot
 
     register_strategy("RSIMACD", RSIMACD)
     register_strategy("RSIBB", RSIBB)
@@ -202,5 +203,6 @@ try:
     register_strategy("VERV", VERV)
     register_strategy("EMAMultiStrategy", EMAMultiStrategy)
     register_strategy("EMAMACDRSIVolume", EMAMACDRSIVolume)
+    register_strategy("EMA_RSI_Pivot", EMA_RSI_Pivot)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")

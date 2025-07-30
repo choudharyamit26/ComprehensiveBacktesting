@@ -1,29 +1,25 @@
 import asyncio
 import pandas as pd
 import backtrader as bt
-import numpy as np
 import os
 import logging
 from datetime import date, datetime, timedelta, time
 import pytz
 from retrying import retry
-import requests
 import ast
 import pandas_ta as ta
 import aiohttp
-import json
 import math
 import sys
 import traceback
 from functools import lru_cache
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Tuple, Any
-import weakref
+from typing import Dict, List, Optional, Tuple
 from comprehensive_backtesting.data import init_dhan_client
 
 # Import registry functions
-from comprehensive_backtesting.registry import get_strategy, STRATEGY_REGISTRY
+from comprehensive_backtesting.registry import get_strategy
 
 # Configure logging with improved performance
 logging.basicConfig(
@@ -682,7 +678,7 @@ async def fetch_dynamic_holidays(year: int) -> List[str]:
 
 
 async def fetch_historical_data(
-    security_id: int, days_back: int = 20, interval: int = 5
+    security_id: int, days_back: int = 5, interval: int = 5
 ) -> Optional[pd.DataFrame]:
     """Highly optimized historical data fetching"""
     try:
@@ -1181,87 +1177,116 @@ adaptive_semaphore = AdaptiveSemaphore(30)  # Reduced from 50
 
 
 async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -> None:
-    """Highly optimized stock processing with better resource management"""
+    """Enhanced debugging version of process_stock"""
     async with adaptive_semaphore:
         try:
-            logger.debug(f"Processing {ticker} with {len(strategies)} strategies")
+            logger.info(f"=== PROCESSING {ticker} (ID: {security_id}) ===")
 
-            # Parallel data fetching
+            # Step 1: Data fetching
+            logger.info(f"{ticker} - Step 1: Fetching market depth and data")
             depth_task = asyncio.create_task(fetch_and_store_market_depth(security_id))
             data_task = asyncio.create_task(get_combined_data(security_id))
 
-            # Wait for both tasks
             await depth_task
             combined_data = await data_task
 
-            if combined_data is None or len(combined_data) < 100:
+            if combined_data is None:
+                logger.warning(f"{ticker} - FAILED: No combined data available")
+                return
+
+            data_length = len(combined_data)
+            logger.info(f"{ticker} - Data length: {data_length} bars")
+            min_bars = max(
+                get_strategy(strat).get_min_data_points(params) for strat in strategies
+            )
+            if data_length < min_bars:  # Reduced from 100
                 logger.warning(
-                    f"Insufficient data for {ticker}: {len(combined_data) if combined_data is not None else 0} bars"
+                    f"{ticker} - FAILED: Insufficient data ({data_length} < {min_bars})"
                 )
                 return
 
-            # Enhanced liquidity check
+            # Step 2: Liquidity check
+            logger.info(f"{ticker} - Step 2: Liquidity check")
             if not combined_data.empty:
                 latest = combined_data.iloc[-1]
-                if (
-                    "bid_qty" in latest
-                    and "ask_qty" in latest
-                    and (
-                        latest["bid_qty"] < BID_ASK_THRESHOLD
-                        or latest["ask_qty"] < BID_ASK_THRESHOLD
-                    )
-                ):
-                    logger.debug(
-                        f"{ticker} failed liquidity check: Bid={latest.get('bid_qty', 0)}, Ask={latest.get('ask_qty', 0)}"
+                bid_qty = latest.get("bid_qty", 0)
+                ask_qty = latest.get("ask_qty", 0)
+
+                logger.info(
+                    f"{ticker} - Bid: {bid_qty}, Ask: {ask_qty}, Threshold: {BID_ASK_THRESHOLD}"
+                )
+
+                if bid_qty < BID_ASK_THRESHOLD or ask_qty < BID_ASK_THRESHOLD:
+                    logger.warning(
+                        f"{ticker} - FAILED: Liquidity check (Bid={bid_qty}, Ask={ask_qty})"
                     )
                     return
 
-            # Parallel volatility and volume checks
+            # Step 3: Volatility and volume checks
+            logger.info(f"{ticker} - Step 3: Volatility and volume checks")
             vol_task = asyncio.create_task(calculate_stock_volatility(security_id))
             volume_task = asyncio.create_task(calculate_average_volume(security_id))
 
             volatility, avg_volume = await asyncio.gather(vol_task, volume_task)
 
-            # Early filtering
+            logger.info(
+                f"{ticker} - Volatility: {volatility:.4f} (threshold: {VOLATILITY_THRESHOLD})"
+            )
+            logger.info(
+                f"{ticker} - Avg Volume: {avg_volume:.0f} (threshold: {LIQUIDITY_THRESHOLD})"
+            )
+
             if volatility < VOLATILITY_THRESHOLD:
-                logger.debug(f"{ticker} filtered by volatility: {volatility:.4f}")
+                logger.warning(
+                    f"{ticker} - FAILED: Volatility too low ({volatility:.4f} < {VOLATILITY_THRESHOLD})"
+                )
                 return
+
             if avg_volume < LIQUIDITY_THRESHOLD:
-                logger.debug(f"{ticker} filtered by volume: {avg_volume:.0f}")
+                logger.warning(
+                    f"{ticker} - FAILED: Volume too low ({avg_volume:.0f} < {LIQUIDITY_THRESHOLD})"
+                )
                 return
 
-            # Process strategies efficiently
+            # Step 4: Strategy processing
+            logger.info(f"{ticker} - Step 4: Processing {len(strategies)} strategies")
             signals = []
-            min_data_length = len(combined_data)
 
-            for strat in strategies:
+            for i, strat in enumerate(strategies):
                 strategy_name = strat["Strategy"]
+                logger.info(f"{ticker} - Strategy {i+1}: {strategy_name}")
+
                 try:
                     strategy_class = get_strategy(strategy_name)
                 except KeyError:
-                    logger.warning(f"Strategy {strategy_name} not found for {ticker}")
+                    logger.warning(f"{ticker} - Strategy {strategy_name} not found")
                     continue
 
-                # Parse parameters efficiently
+                # Parse parameters
                 params = strat.get("Best_Parameters", {})
                 if isinstance(params, str) and params.strip():
                     try:
                         params = ast.literal_eval(params)
-                    except (ValueError, SyntaxError):
+                        logger.info(f"{ticker} - {strategy_name} params: {params}")
+                    except (ValueError, SyntaxError) as e:
+                        logger.warning(f"{ticker} - Failed to parse params: {e}")
                         params = {}
-                elif not params:
-                    params = {}
 
-                # Check minimum data requirements
+                # Check data requirements
                 min_bars = strategy_class.get_min_data_points(params)
-                if min_data_length < min_bars:
-                    logger.debug(
-                        f"{strategy_name} needs {min_bars} bars, have {min_data_length}"
+                logger.info(
+                    f"{ticker} - {strategy_name} needs {min_bars} bars, have {data_length}"
+                )
+
+                if data_length < min_bars:
+                    logger.warning(
+                        f"{ticker} - {strategy_name} SKIPPED: Not enough data"
                     )
                     continue
 
-                # Create and run strategy efficiently
+                # Run strategy
                 try:
+                    logger.info(f"{ticker} - Running {strategy_name}")
                     cerebro = bt.Cerebro(stdstats=False, runonce=True, optdatas=True)
                     data_feed = bt.feeds.PandasData(
                         dataname=combined_data,
@@ -1278,34 +1303,43 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
 
                     results = cerebro.run()
                     if results and results[0].signal:
-                        signals.append(results[0].signal)
-                        logger.debug(
-                            f"{strategy_name} -> {results[0].signal} for {ticker}"
+                        signal = results[0].signal
+                        signals.append(signal)
+                        logger.info(
+                            f"{ticker} - {strategy_name} GENERATED SIGNAL: {signal}"
                         )
+                    else:
+                        logger.info(f"{ticker} - {strategy_name} generated no signal")
 
                 except Exception as e:
-                    logger.error(
-                        f"Strategy {strategy_name} failed for {ticker}: {str(e)}"
-                    )
+                    logger.error(f"{ticker} - {strategy_name} FAILED: {str(e)}")
 
-            # Process signals if any
+            # Step 5: Signal voting
+            logger.info(
+                f"{ticker} - Step 5: Signal voting from {len(signals)} signals: {signals}"
+            )
+
             if not signals:
+                logger.warning(f"{ticker} - FINAL: No signals generated")
                 return
 
-            # Efficient vote counting
-            signal_counts = {"BUY": 0, "SELL": 0}
-            for signal in signals:
-                signal_counts[signal] = signal_counts.get(signal, 0) + 1
-
+            signal_counts = {"BUY": signals.count("BUY"), "SELL": signals.count("SELL")}
             buy_votes = signal_counts["BUY"]
             sell_votes = signal_counts["SELL"]
 
-            # Calculate regime once
-            regime, adx_value, atr_value = calculate_regime(combined_data)
-            logger.info(f"{ticker} signals - BUY: {buy_votes}, SELL: {sell_votes}")
+            logger.info(
+                f"{ticker} - Vote count - BUY: {buy_votes}, SELL: {sell_votes} (MIN_VOTES: {MIN_VOTES})"
+            )
 
-            # Execute based on voting
+            # Calculate regime
+            regime, adx_value, atr_value = calculate_regime(combined_data)
+            logger.info(
+                f"{ticker} - Regime: {regime} (ADX: {adx_value:.2f}, ATR: {atr_value:.2f})"
+            )
+
+            # Final decision
             if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
+                logger.info(f"{ticker} - EXECUTING BUY SIGNAL")
                 await execute_strategy_signal(
                     ticker,
                     security_id,
@@ -1316,6 +1350,7 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     combined_data,
                 )
             elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
+                logger.info(f"{ticker} - EXECUTING SELL SIGNAL")
                 await execute_strategy_signal(
                     ticker,
                     security_id,
@@ -1325,9 +1360,12 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     atr_value,
                     combined_data,
                 )
+            else:
+                logger.info(f"{ticker} - NO FINAL SIGNAL: Insufficient votes or tie")
 
         except Exception as e:
-            logger.error(f"Stock processing failed for {ticker}: {str(e)}")
+            logger.error(f"{ticker} - PROCESS FAILED: {str(e)}")
+            logger.error(traceback.format_exc())
 
 
 # Optimized market hours checking
