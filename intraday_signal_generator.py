@@ -1196,31 +1196,37 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
 
             data_length = len(combined_data)
             logger.info(f"{ticker} - Data length: {data_length} bars")
+            # print([get_strategy(strat["Strategy"]).get_min_data_points(strat["Best_Parameters"]) for strat in strategies])
             min_bars = max(
-                get_strategy(strat).get_min_data_points(params) for strat in strategies
+                get_strategy(strat["Strategy"]).get_min_data_points(
+                    strat["Best_Parameters"]
+                )
+                for strat in strategies
             )
-            if data_length < min_bars:  # Reduced from 100
+            # print("===============",min_bars)
+            if data_length < 20:  # Reduced from 100
                 logger.warning(
                     f"{ticker} - FAILED: Insufficient data ({data_length} < {min_bars})"
                 )
                 return
 
             # Step 2: Liquidity check
-            logger.info(f"{ticker} - Step 2: Liquidity check")
-            if not combined_data.empty:
-                latest = combined_data.iloc[-1]
-                bid_qty = latest.get("bid_qty", 0)
-                ask_qty = latest.get("ask_qty", 0)
+            # logger.info(f"{ticker} - Step 2: Liquidity check")
+            # if not combined_data.empty:
+            #     latest = combined_data.iloc[-1]
+            #     print(">>>>>>",latest)
+            #     bid_qty = latest.get("bid_qty", 0)
+            #     ask_qty = latest.get("ask_qty", 0)
 
-                logger.info(
-                    f"{ticker} - Bid: {bid_qty}, Ask: {ask_qty}, Threshold: {BID_ASK_THRESHOLD}"
-                )
+            #     logger.info(
+            #         f"{ticker} - Bid: {bid_qty}, Ask: {ask_qty}, Threshold: {BID_ASK_THRESHOLD}"
+            #     )
 
-                if bid_qty < BID_ASK_THRESHOLD or ask_qty < BID_ASK_THRESHOLD:
-                    logger.warning(
-                        f"{ticker} - FAILED: Liquidity check (Bid={bid_qty}, Ask={ask_qty})"
-                    )
-                    return
+            #     if bid_qty < BID_ASK_THRESHOLD or ask_qty < BID_ASK_THRESHOLD:
+            #         logger.warning(
+            #             f"{ticker} - FAILED: Liquidity check (Bid={bid_qty}, Ask={ask_qty})"
+            #         )
+            #         return
 
             # Step 3: Volatility and volume checks
             logger.info(f"{ticker} - Step 3: Volatility and volume checks")

@@ -1,13 +1,11 @@
 import pandas as pd
 import time
-import numpy as np
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import warnings
 from datetime import datetime, timedelta
 import logging
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 from comprehensive_backtesting.data import get_security_id, init_dhan_client
@@ -68,7 +66,7 @@ class DataManager:
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
 
-    def read_stocks_from_csv(self, csv_file: str = "ind_nifty500list.csv") -> List[str]:
+    def read_stocks_from_csv(self, csv_file: str = "ind_nifty50list.csv") -> List[str]:
         """Read and validate stock symbols from CSV"""
         try:
             if not os.path.exists(csv_file):
@@ -85,7 +83,7 @@ class DataManager:
             logger.info(f"Read {len(cleaned_symbols)} stock symbols from '{csv_file}'")
 
             # Check for cached validated symbols
-            cache_file = f"{self.cache_dir}/validated_nifty500_tickers.csv"
+            cache_file = f"{self.cache_dir}/validated_nifty50_tickers.csv"
             if os.path.exists(cache_file):
                 cached_df = pd.read_csv(cache_file)
                 logger.info(f"Using cached validated tickers from '{cache_file}'")
@@ -102,6 +100,9 @@ class DataManager:
             return valid_symbols
 
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             logger.error(f"Error reading CSV file '{csv_file}': {e}")
             return []
 
@@ -136,7 +137,7 @@ class DataManager:
     def _is_valid_symbol(self, symbol: str) -> bool:
         """Check if symbol has valid data"""
         try:
-            to_date = datetime.today().date()
+            to_date = datetime.now()
             from_date = to_date - timedelta(days=10)  # Extended validation period
             from_date_str = from_date.strftime("%Y-%m-%d")
             to_date_str = to_date.strftime("%Y-%m-%d")
@@ -153,11 +154,14 @@ class DataManager:
                 data_list = test_data["data"]
                 if len(data_list) > 0:
                     # Check if required fields exist
-                    sample_record = data_list[0]
+                    sample_record = data_list.keys()
                     required_fields = ["high", "low", "close", "volume", "open"]
                     return all(field in sample_record for field in required_fields)
             return False
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             logger.debug(f"Validation failed for {symbol}: {e}")
             return False
 
@@ -187,7 +191,7 @@ class DataManager:
         # Fetch fresh data
         for attempt in range(retries):
             try:
-                to_date = datetime.today().date()
+                to_date = datetime.now()
                 from_date = to_date - timedelta(days=90)  # 3 months
                 from_date_str = from_date.strftime("%Y-%m-%d")
                 to_date_str = to_date.strftime("%Y-%m-%d")
@@ -805,18 +809,19 @@ class IntradayStockFilter:
         self.max_workers = max_workers
         self.signal_priority = {"BUY": 1, "SELL": 2, "HOLD": 3}
 
-    def select_stocks(self, csv_file: str = "ind_nifty500list.csv") -> List[Dict]:
+    def select_stocks(self, csv_file: str = "ind_nifty50list.csv") -> List[Dict]:
         """Main method to select stocks for intraday trading"""
         logger.info("Starting stock selection for intraday trading...")
         logger.info(f"Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
         # Use cached validated tickers if available
-        validated_csv = "cache/validated_nifty500_tickers.csv"
+        validated_csv = "cache/validated_nifty50_tickers.csv"
         if os.path.exists(validated_csv):
             csv_file = validated_csv
             logger.info(f"Using validated tickers from '{csv_file}'")
 
         tickers = self.data_manager.read_stocks_from_csv(csv_file)
+        print(tickers)
         if not tickers:
             logger.error("No stock tickers found. Exiting...")
             return []
@@ -1128,4 +1133,4 @@ if __name__ == "__main__":
 
     # Example usage
     filter = IntradayStockFilter()
-    selected_stocks = filter.select_stocks(csv_file="ind_nifty500list.csv")
+    selected_stocks = filter.select_stocks(csv_file="ind_nifty50list.csv")

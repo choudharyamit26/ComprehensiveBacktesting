@@ -11,7 +11,6 @@ from comprehensive_backtesting.data import get_data_sync
 from comprehensive_backtesting.registry import STRATEGY_REGISTRY
 from comprehensive_backtesting.reports import PerformanceAnalyzer
 from comprehensive_backtesting.walk_forward_analysis import (
-    WalkForwardAnalysis,
     create_walk_forward_analysis,
 )
 from intraday_stock_filter_nifty import IntradayStockFilter
@@ -33,7 +32,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
     end_date = datetime.today().date() - timedelta(days=1)
     start_date = end_date - timedelta(days=365)
     interval = "5m"
-    n_trials = 20
+    n_trials = 50
     tickers = [stock["Stock"] for stock in selected_stocks]
 
     all_basic_metrics = []
@@ -108,7 +107,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
     # Rank strategies globally across all stocks
     top_strategies_global = consolidated_df.nlargest(10, "Composite_Score")[
         "Strategy"
-    ].unique()[:20]
+    ].unique()[:10]
 
     logger.info(
         f"Top {len(top_strategies_global)} strategies selected: {list(top_strategies_global)}"
@@ -326,7 +325,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
 
             top_strategies = stock_df.sort_values(
                 by=sort_columns, ascending=False
-            ).head(3)[["Strategy"] + sort_columns]
+            ).head(5)[["Strategy"] + sort_columns]
 
             top_strategies_list = []
             for _, row in top_strategies.iterrows():
