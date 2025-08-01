@@ -138,7 +138,7 @@ class DataManager:
         """Check if symbol has valid data"""
         try:
             to_date = datetime.now()
-            from_date = to_date - timedelta(days=10)  # Extended validation period
+            from_date = to_date - timedelta(days=10)
             from_date_str = from_date.strftime("%Y-%m-%d")
             to_date_str = to_date.strftime("%Y-%m-%d")
 
@@ -151,17 +151,29 @@ class DataManager:
             )
 
             if test_data.get("status") == "success" and test_data.get("data"):
-                data_list = test_data["data"]
-                if len(data_list) > 0:
-                    # Check if required fields exist
-                    sample_record = data_list.keys()
-                    required_fields = ["high", "low", "close", "volume", "open"]
-                    return all(field in sample_record for field in required_fields)
+                data_dict = test_data["data"]
+                # Check if data structure is correct and has minimum required fields
+                required_fields = [
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "open",
+                    "timestamp",
+                ]
+                has_required_fields = all(
+                    field in data_dict for field in required_fields
+                )
+
+                if has_required_fields:
+                    # Check if arrays have data
+                    has_data = all(
+                        isinstance(data_dict[field], list) and len(data_dict[field]) > 0
+                        for field in required_fields
+                    )
+                    return has_data
             return False
         except Exception as e:
-            import traceback
-
-            traceback.print_exc()
             logger.debug(f"Validation failed for {symbol}: {e}")
             return False
 
@@ -174,19 +186,21 @@ class DataManager:
         timeout: int = 10,
     ) -> Optional[pd.DataFrame]:
         """Get historical data with retries and caching"""
-        cache_file = f"{self.cache_dir}/{ticker}_{period}.csv"
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        cache_file = f"{self.cache_dir}/{ticker}_{period}_{current_date}.csv"
 
-        # Check cache first
+        # Check cache first - look for today's cache file
         if os.path.exists(cache_file):
-            file_age = time.time() - os.path.getmtime(cache_file)
-            if file_age < 3600:  # Cache valid for 1 hour
-                try:
-                    df = pd.read_csv(cache_file, index_col="Date", parse_dates=True)
-                    if not df.empty and len(df) >= 20:  # Ensure minimum data
-                        logger.debug(f"Loaded cached data for {ticker}")
-                        return df
-                except Exception as e:
-                    logger.debug(f"Failed to load cached data for {ticker}: {e}")
+            try:
+                df = pd.read_csv(cache_file, index_col="Date", parse_dates=True)
+                if not df.empty and len(df) >= 20:
+                    logger.debug(f"Loaded cached data for {ticker} ({len(df)} records)")
+                    return df
+            except Exception as e:
+                logger.debug(f"Failed to load cached data for {ticker}: {e}")
+
+        # Clean up old cache files for this ticker
+        self._cleanup_old_cache(ticker, period)
 
         # Fetch fresh data
         for attempt in range(retries):
@@ -195,6 +209,10 @@ class DataManager:
                 from_date = to_date - timedelta(days=90)  # 3 months
                 from_date_str = from_date.strftime("%Y-%m-%d")
                 to_date_str = to_date.strftime("%Y-%m-%d")
+
+                logger.debug(
+                    f"Fetching data for {ticker}: {from_date_str} to {to_date_str}"
+                )
 
                 data = dhan.historical_daily_data(
                     security_id=get_security_id(ticker),
@@ -213,31 +231,10 @@ class DataManager:
                         continue
                     return None
 
-                df = pd.DataFrame(data["data"])
-                if df.empty:
-                    logger.debug(f"Empty DataFrame for {ticker}")
-                    if attempt < retries - 1:
-                        time.sleep(delay)
-                        continue
-                    return None
-
-                # Process the data
-                df["Date"] = pd.to_datetime(df["timestamp"], unit="s")
-                df.set_index("Date", inplace=True)
-                df = df.rename(
-                    columns={
-                        "open": "Open",
-                        "high": "High",
-                        "low": "Low",
-                        "close": "Close",
-                        "volume": "Volume",
-                    }
-                )
-
-                # Validate required columns
-                required_columns = ["Open", "High", "Low", "Close", "Volume"]
-                if not all(col in df.columns for col in required_columns):
-                    logger.debug(f"Missing required columns for {ticker}: {df.columns}")
+                # Process the new data structure
+                df = self._process_api_response(data["data"], ticker)
+                if df is None or df.empty:
+                    logger.debug(f"Failed to process data for {ticker}")
                     if attempt < retries - 1:
                         time.sleep(delay)
                         continue
@@ -251,14 +248,12 @@ class DataManager:
                         continue
                     return None
 
-                # Sort by date and clean data
-                df = df.sort_index()
-                df = df.dropna(subset=required_columns)
-
                 # Save to cache
                 try:
                     df.to_csv(cache_file)
-                    logger.debug(f"Saved data for {ticker} to cache")
+                    logger.debug(
+                        f"Saved data for {ticker} to cache ({len(df)} records)"
+                    )
                 except Exception as e:
                     logger.debug(f"Failed to save cache for {ticker}: {e}")
 
@@ -274,6 +269,99 @@ class DataManager:
 
         logger.warning(f"Failed to get data for {ticker} after {retries} attempts")
         return None
+
+    def _process_api_response(
+        self, data_dict: dict, ticker: str
+    ) -> Optional[pd.DataFrame]:
+        """Process the API response into a DataFrame"""
+        try:
+            # Validate data structure
+            required_fields = ["timestamp", "open", "high", "low", "close", "volume"]
+            if not all(field in data_dict for field in required_fields):
+                logger.debug(
+                    f"Missing required fields for {ticker}. Available: {list(data_dict.keys())}"
+                )
+                return None
+
+            # Check if all arrays have the same length
+            lengths = [len(data_dict[field]) for field in required_fields]
+            if not all(length == lengths[0] for length in lengths):
+                logger.debug(f"Inconsistent array lengths for {ticker}: {lengths}")
+                return None
+
+            if lengths[0] == 0:
+                logger.debug(f"Empty data arrays for {ticker}")
+                return None
+
+            # Create DataFrame from arrays
+            df_data = {
+                "Open": data_dict["open"],
+                "High": data_dict["high"],
+                "Low": data_dict["low"],
+                "Close": data_dict["close"],
+                "Volume": data_dict["volume"],
+            }
+
+            df = pd.DataFrame(df_data)
+
+            # Convert timestamps to dates
+            timestamps = data_dict["timestamp"]
+            dates = [datetime.fromtimestamp(ts) for ts in timestamps]
+            df["Date"] = dates
+            df.set_index("Date", inplace=True)
+
+            # Sort by date and remove duplicates
+            df = df.sort_index()
+            df = df[~df.index.duplicated(keep="last")]
+
+            # Validate and clean data
+            df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+            # Remove rows with invalid data (zeros or negative values)
+            df = df[
+                (df["Open"] > 0)
+                & (df["High"] > 0)
+                & (df["Low"] > 0)
+                & (df["Close"] > 0)
+                & (df["Volume"] >= 0)
+            ]
+
+            # Validate OHLC relationships
+            df = df[
+                (df["High"] >= df["Low"])
+                & (df["High"] >= df["Open"])
+                & (df["High"] >= df["Close"])
+                & (df["Low"] <= df["Open"])
+                & (df["Low"] <= df["Close"])
+            ]
+
+            logger.debug(f"Processed {len(df)} valid records for {ticker}")
+            logger.debug(
+                f"Date range: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}"
+            )
+
+            return df
+
+        except Exception as e:
+            logger.debug(f"Error processing API response for {ticker}: {e}")
+            import traceback
+
+            traceback.print_exc()
+            return None
+
+    def _cleanup_old_cache(self, ticker: str, period: str):
+        """Clean up old cache files for a ticker"""
+        try:
+            pattern = f"{ticker}_{period}_"
+            for filename in os.listdir(self.cache_dir):
+                if filename.startswith(pattern) and filename.endswith(".csv"):
+                    file_path = os.path.join(self.cache_dir, filename)
+                    # Remove files older than 1 day
+                    if time.time() - os.path.getmtime(file_path) > 86400:  # 24 hours
+                        os.remove(file_path)
+                        logger.debug(f"Removed old cache file: {filename}")
+        except Exception as e:
+            logger.debug(f"Error cleaning up cache for {ticker}: {e}")
 
 
 class TechnicalIndicators:
@@ -996,8 +1084,10 @@ class IntradayStockFilter:
                 "Signal Strength",
             ]
             df = df[column_order]
-            df.to_csv("selected_stocks_with_recommendations.csv", index=False)
-            logger.info("Results saved to 'selected_stocks_with_recommendations.csv'")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"selected_stocks_with_recommendations_{timestamp}.csv"
+            df.to_csv(filename, index=False)
+            logger.info(f"Results saved to '{filename}'")
 
 
 def print_usage_instructions():
@@ -1016,7 +1106,8 @@ def print_usage_instructions():
     print("✅ Enhanced visual feedback with emojis")
     print("✅ Success rate calculation")
     print("✅ Robust data validation and error handling")
-    print("✅ Improved caching mechanism")
+    print("✅ Improved caching mechanism with proper date handling")
+    print("✅ Fixed API data processing for array-based responses")
     print("\n🔧 USAGE:")
     print("filter = IntradayStockFilter()")
     print("filter.select_stocks(csv_file='ind_nifty500list.csv')")
@@ -1068,23 +1159,37 @@ def debug_single_stock(ticker: str, criteria: FilterCriteria = None):
         return
 
     print(f"✅ Data retrieved: {len(data)} records")
-    print(f"📅 Date range: {data.index[0]} to {data.index[-1]}")
+    print(
+        f"📅 Date range: {data.index[0].strftime('%Y-%m-%d')} to {data.index[-1].strftime('%Y-%m-%d')}"
+    )
     print(f"💰 Current price: ₹{data['Close'].iloc[-1]:.2f}")
+
+    # Show recent data sample
+    print(f"\n📊 RECENT DATA SAMPLE (Last 5 days):")
+    recent_data = data.tail(5)
+    for idx, row in recent_data.iterrows():
+        print(
+            f"{idx.strftime('%Y-%m-%d')}: O={row['Open']:.2f}, H={row['High']:.2f}, L={row['Low']:.2f}, C={row['Close']:.2f}, V={int(row['Volume']):,}"
+        )
 
     # Analyze
     result = analyzer.analyze_stock(ticker, data)
     if result:
-        print(f"✅ Stock passed all criteria!")
+        print(f"\n✅ Stock passed all criteria!")
         print(f"📊 Result: {result}")
     else:
-        print(f"❌ Stock did not meet criteria")
+        print(f"\n❌ Stock did not meet criteria")
 
         # Calculate individual metrics for debugging
         metrics = analyzer._calculate_metrics(data, ticker)
         print(f"\n📈 CALCULATED METRICS:")
         print(f"- Daily Range %: {metrics.daily_range_pct}")
         print(f"- ATR %: {metrics.atr_pct}")
-        print(f"- Avg Volume: {metrics.avg_volume}")
+        print(
+            f"- Avg Volume: {metrics.avg_volume:,}"
+            if metrics.avg_volume
+            else "- Avg Volume: None"
+        )
         print(f"- Relative Volume: {metrics.relative_volume}")
         print(f"- Momentum %: {metrics.momentum_pct}")
         print(f"- Signal: {metrics.signal}")

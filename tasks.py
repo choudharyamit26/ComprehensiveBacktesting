@@ -26,13 +26,69 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def get_strategy_default_params(strategy_name):
+    """Get default parameters for a strategy"""
+    try:
+        strategy_class = get_strategy(strategy_name)
+        if hasattr(strategy_class, "params"):
+            # Extract default parameters from strategy class
+            defaults = {}
+            for param_tuple in strategy_class.params:
+                if len(param_tuple) >= 2:
+                    param_name, default_value = param_tuple[0], param_tuple[1]
+                    # Skip non-configurable params like 'verbose'
+                    if param_name not in ["verbose", "tickers", "analyzers"]:
+                        defaults[param_name] = default_value
+            return defaults
+    except Exception as e:
+        logger.warning(f"Could not get default params for {strategy_name}: {e}")
+    return {}
+
+
+def extract_best_params_with_fallback(strategy_name, combined_metrics, ticker):
+    """Extract best params with fallback to defaults"""
+    best_params = {}
+
+    # First try to get from walk-forward results
+    for metric in combined_metrics:
+        if metric["Ticker"] == ticker and metric["Strategy"] == strategy_name:
+            if "walkforward" in metric and metric["walkforward"]:
+                best_params = metric["walkforward"].get("best_params", {})
+                if best_params:  # Non-empty params found
+                    logger.info(
+                        f"Using walk-forward params for {ticker}-{strategy_name}: {best_params}"
+                    )
+                    return best_params
+            elif "optimization" in metric and metric["optimization"]:
+                best_params = metric["optimization"].get("best_params", {})
+                if best_params:  # Non-empty params found
+                    logger.info(
+                        f"Using optimization params for {ticker}-{strategy_name}: {best_params}"
+                    )
+                    return best_params
+
+    # Fallback to strategy defaults
+    default_params = get_strategy_default_params(strategy_name)
+    if default_params:
+        logger.info(
+            f"Using default params for {ticker}-{strategy_name}: {default_params}"
+        )
+        return default_params
+
+    # Last resort - return empty dict but log the issue
+    logger.warning(
+        f"No parameters found for {ticker}-{strategy_name}, using empty dict"
+    )
+    return {}
+
+
 def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
     """Run comprehensive backtests for selected stocks"""
 
     end_date = datetime.today().date() - timedelta(days=1)
     start_date = end_date - timedelta(days=365)
     interval = "5m"
-    n_trials = 50
+    n_trials = 2
     tickers = [stock["Stock"] for stock in selected_stocks]
 
     all_basic_metrics = []
@@ -330,20 +386,9 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
             top_strategies_list = []
             for _, row in top_strategies.iterrows():
                 strategy_name = row["Strategy"]
-                best_params = {}
-
-                # Get best params from walk-forward if available, otherwise from optimization
-                for metric in combined_metrics:
-                    if (
-                        metric["Ticker"] == ticker
-                        and metric["Strategy"] == strategy_name
-                    ):
-                        if "walkforward" in metric and metric["walkforward"]:
-                            best_params = metric["walkforward"].get("best_params", {})
-                            break
-                        elif "optimization" in metric and metric["optimization"]:
-                            best_params = metric["optimization"].get("best_params", {})
-                            break
+                best_params = extract_best_params_with_fallback(
+                    strategy_name, combined_metrics, ticker
+                )
 
                 strategy_data = {
                     "Strategy": strategy_name,
