@@ -9,21 +9,29 @@ from retrying import retry
 import ast
 import pandas_ta as ta
 import aiohttp
-import math
 import sys
 import traceback
 from functools import lru_cache
 from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
-from cachetools import TTLCache  # NEW: For TTL-based caching
+from cachetools import TTLCache
 from comprehensive_backtesting.data import init_dhan_client
+from live_data import (
+    get_combined_data_with_persistent_live,
+    read_live_data_from_csv,
+    initialize_live_data_from_config,
+    get_security_symbol_map,
+    CONFIG,
+)
 
 # Import registry functions
 from comprehensive_backtesting.registry import get_strategy
 
+# Initialize Dhan client
+dhan = init_dhan_client()
 
-# NEW: CacheManager class for centralized cache management
+
 class CacheManager:
     def __init__(self, max_size=1000, ttl=3600):
         self.depth_cache = TTLCache(maxsize=max_size, ttl=ttl)
@@ -44,9 +52,7 @@ class CacheManager:
 # NEW: PositionManager class for active position management
 class PositionManager:
     def __init__(self):
-        self.open_positions = (
-            {}
-        )  # {order_id: {security_id, ticker, entry_price, quantity, sl, tp, direction}}
+        self.open_positions = {}
         self.max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", 10))
         self.position_lock = asyncio.Lock()
 
@@ -114,13 +120,11 @@ class PositionManager:
                 async with self.position_lock:
                     now = datetime.now(IST)
                     for order_id, pos in list(self.open_positions.items()):
-                        # Fetch current price
                         quote = await fetch_realtime_quote(pos["security_id"])
                         if not quote:
                             continue
                         current_price = quote["price"]
 
-                        # Check stop-loss and take-profit
                         if pos["direction"] == "BUY":
                             if current_price <= pos["stop_loss"]:
                                 await place_market_order(
@@ -156,10 +160,7 @@ class PositionManager:
                                     f"*{pos['ticker']} TAKE-PROFIT HIT* 🎯\nPrice: ₹{current_price:.2f}"
                                 )
 
-                        # Update trailing stop if applicable
-                        if (
-                            now - pos["last_updated"]
-                        ).total_seconds() > 300:  # Update every 5 minutes
+                        if (now - pos["last_updated"]).total_seconds() > 300:
                             hist_data = await get_combined_data(pos["security_id"])
                             if hist_data is not None:
                                 _, _, atr = calculate_regime(hist_data)
@@ -178,10 +179,10 @@ class PositionManager:
                                         order_id, stop_loss=new_sl
                                     )
 
-                await asyncio.sleep(60)  # Check every minute
+                await asyncio.sleep(60)
             except Exception as e:
                 logger.error(f"Position monitor error: {e}")
-                await asyncio.sleep(300)  # Retry after 5 minutes
+                await asyncio.sleep(300)
 
 
 # NEW: BacktraderRunner for async execution
@@ -232,106 +233,69 @@ class DateTimeFormatter(logging.Formatter):
         return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " IST"
 
 
-# Create the custom formatter
+# Setup logging
 formatter = DateTimeFormatter(
     fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-
-# Clear any existing handlers to avoid duplication
 logging.getLogger().handlers.clear()
-
-# Setup console handler
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.INFO)
 console_handler.setFormatter(formatter)
-
-# Setup file handler
 file_handler = logging.FileHandler("trading_system.log", mode="a")
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(formatter)
-
-# Configure root logger
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 root_logger.addHandler(console_handler)
 root_logger.addHandler(file_handler)
-
-# Configure main logger (inherits from root)
 logger = logging.getLogger("quant_trader")
 logger.setLevel(logging.INFO)
-
-# Configure trade logger with its own file
 trade_logger = logging.getLogger("trade_execution")
 trade_logger.setLevel(logging.INFO)
 trade_file_handler = logging.FileHandler("trades.log", mode="a")
 trade_file_handler.setFormatter(formatter)
 trade_logger.addHandler(trade_file_handler)
 trade_logger.propagate = False
-
-# Test the logging
 logger.info("Logging system initialized with IST timestamps")
 trade_logger.info("Trade logging system initialized")
 
-# Environment configuration - Cache parsed values
+# Environment configuration
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1000000003")
 
-# Validate environment variables
 if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_ACCESS_TOKEN]):
     logger.critical("Missing required environment variables")
     raise EnvironmentError("Required environment variables not set")
 
-# Market configuration - Pre-parse time objects
-MARKET_OPEN_STR = os.getenv("MARKET_OPEN", "09:15:00")
-MARKET_CLOSE_STR = os.getenv("MARKET_CLOSE", "15:30:00")
-TRADING_END_STR = os.getenv("TRADING_END", "15:20:00")
-FORCE_CLOSE_STR = os.getenv("FORCE_CLOSE", "15:15:00")
-SQUARE_OFF_TIME_STR = os.getenv("SQUARE_OFF_TIME", "15:16:00")
+# Market configuration
+MARKET_OPEN_TIME = CONFIG["MARKET_OPEN"]
+MARKET_CLOSE_TIME = CONFIG["MARKET_CLOSE"]
+TRADING_END_TIME = time.fromisoformat(os.getenv("TRADING_END", "15:20:00"))
+FORCE_CLOSE_TIME = time.fromisoformat(os.getenv("FORCE_CLOSE", "15:15:00"))
+SQUARE_OFF_TIME_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
 
-# Pre-parse time objects for performance
-MARKET_OPEN_TIME = time.fromisoformat(MARKET_OPEN_STR)
-MARKET_CLOSE_TIME = time.fromisoformat(MARKET_CLOSE_STR)
-TRADING_END_TIME = time.fromisoformat(TRADING_END_STR)
-FORCE_CLOSE_TIME = time.fromisoformat(FORCE_CLOSE_STR)
-SQUARE_OFF_TIME_TIME = time.fromisoformat(SQUARE_OFF_TIME_STR)
-
-# Updated configuration constants - Optimized for Large Cap stocks
+# Trading configuration
 MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
 WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 6))
 MORNING_WINDOW_SIZE = int(os.getenv("MORNING_WINDOW_SIZE", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
 MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
-
-# Updated thresholds for Large Cap stocks
-VOLATILITY_THRESHOLD = float(
-    os.getenv("VOLATILITY_THRESHOLD", 0.012)
-)  # Reduced from 0.03 to 1.2%
-LIQUIDITY_THRESHOLD = int(
-    os.getenv("LIQUIDITY_THRESHOLD", 75000)
-)  # Reduced from 100000
+VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.012))
+LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 75000))
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))
-BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 500))  # Reduced from 1000
+BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 500))
+RELATIVE_VOLUME_THRESHOLD = float(os.getenv("RELATIVE_VOLUME_THRESHOLD", 1.2))
+MIN_PRICE_THRESHOLD = float(os.getenv("MIN_PRICE_THRESHOLD", 50.0))
+MAX_PRICE_THRESHOLD = float(os.getenv("MAX_PRICE_THRESHOLD", 5000.0))
 
-# New parameters for enhanced filtering
-RELATIVE_VOLUME_THRESHOLD = float(
-    os.getenv("RELATIVE_VOLUME_THRESHOLD", 1.2)
-)  # 1.2x average volume
-MIN_PRICE_THRESHOLD = float(
-    os.getenv("MIN_PRICE_THRESHOLD", 50.0)
-)  # Minimum price for large caps
-MAX_PRICE_THRESHOLD = float(
-    os.getenv("MAX_PRICE_THRESHOLD", 5000.0)
-)  # Maximum price filter
-
-# Initialize Dhan client and thread pool
-dhan = init_dhan_client()
+# Initialize thread pool
 dhan_lock = asyncio.Lock()
 thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dhan_worker")
 
-# Preload and cache symbol map
+# Preload symbol map
 try:
     nifty500_df = pd.read_csv("ind_nifty500list.csv")
     SYMBOL_MAP = nifty500_df.set_index("security_id")["ticker"].to_dict()
@@ -341,23 +305,17 @@ except Exception as e:
     SYMBOL_MAP = {}
     TICKER_TO_ID_MAP = {}
 
-# Initialize caches with CacheManager
-cache_manager = CacheManager(max_size=1000, ttl=3600)  # 1 hour TTL
+# Initialize caches and managers
+cache_manager = CacheManager(max_size=1000, ttl=3600)
 HOLIDAY_CACHE = {}
 CANDLE_BUILDERS = {}
 daily_pnl_tracker = {"realized": 0.0, "unrealized": 0.0, "last_updated": None}
-
-# Pre-compile timezone object
 IST = pytz.timezone("Asia/Kolkata")
-
-# NEW: Initialize BacktraderRunner and PositionManager
 backtrader_runner = BacktraderRunner()
 position_manager = PositionManager()
 
 
 class EnhancedCandle:
-    """Memory-optimized candle structure using __slots__"""
-
     __slots__ = (
         "datetime",
         "open",
@@ -385,8 +343,6 @@ class EnhancedCandle:
 
 
 class OptimizedRateLimiter:
-    """Optimized rate limiter with token bucket algorithm"""
-
     def __init__(self, rate_limit: int):
         self.rate_limit = rate_limit
         self.tokens = rate_limit
@@ -420,7 +376,6 @@ rate_limiter = OptimizedRateLimiter(API_RATE_LIMIT)
 
 
 def is_high_volume_period() -> bool:
-    """Check if current time is high-volume trading period"""
     now = datetime.now(IST).time()
     high_volume_periods = [
         (time(9, 15), time(10, 30)),
@@ -430,13 +385,11 @@ def is_high_volume_period() -> bool:
 
 
 def get_volatility_threshold_for_time() -> float:
-    """Dynamic volatility threshold based on time of day"""
     base_threshold = VOLATILITY_THRESHOLD
     return base_threshold * 0.8 if is_high_volume_period() else base_threshold * 1.1
 
 
 def adjust_thresholds_for_regime(regime: str, base_threshold: float) -> float:
-    """Adjust filtering thresholds based on market regime"""
     adjustments = {
         "trending": 0.85,
         "range_bound": 1.15,
@@ -447,13 +400,10 @@ def adjust_thresholds_for_regime(regime: str, base_threshold: float) -> float:
 
 
 def calculate_relative_volume(current_volume: float, avg_volume: float) -> float:
-    """Calculate relative volume ratio"""
     return current_volume / avg_volume if avg_volume > 0 else 0.0
 
 
 class TelegramQueue:
-    """Queue-based Telegram message sender to batch messages"""
-
     def __init__(self):
         self.message_queue = None
         self.is_running = False
@@ -520,8 +470,6 @@ async def send_telegram_alert(message: str):
 
 
 class APIClient:
-    """Optimized API client with connection pooling"""
-
     def __init__(self):
         self.connector = None
         self.timeout = None
@@ -809,52 +757,66 @@ async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
         cache_manager.cache_hits["historical"] += 1
         return cache_manager.historical_cache[cache_key]
 
-    hist_data = await fetch_historical_data(security_id, days_back=5)
-    if hist_data is None:
+    try:
+        # Use get_combined_data_with_persistent_live from live_data.py
+        combined_data = await get_combined_data_with_persistent_live(
+            security_id=security_id,
+            exchange_segment="NSE_EQ",
+            auto_start_live_collection=True,
+        )
+        print(
+            "================== FROM LINE 738 ==================", combined_data.tail(5)
+        )
+        if combined_data is None:
+            cache_manager.cache_misses["historical"] += 1
+            return None
+
+        # Add enhanced candles if available
+        enhanced_candles = build_enhanced_candles(security_id)
+        if enhanced_candles:
+            enhanced_data = [
+                {
+                    "datetime": candle.datetime,
+                    "open": candle.open,
+                    "high": candle.high,
+                    "low": candle.low,
+                    "close": candle.close,
+                    "volume": candle.volume,
+                    "bid_qty": candle.bid_qty,
+                    "ask_qty": candle.ask_qty,
+                    "bid_depth": candle.bid_depth,
+                    "ask_depth": candle.ask_depth,
+                }
+                for candle in enhanced_candles
+            ]
+            enhanced_df = pd.DataFrame(enhanced_data)
+            if not enhanced_df.empty:
+                combined_data = pd.concat(
+                    [combined_data, enhanced_df], ignore_index=True
+                )
+                combined_data = (
+                    combined_data.sort_values("datetime")
+                    .drop_duplicates("datetime", keep="last")
+                    .reset_index(drop=True)
+                )
+
+        cache_manager.historical_cache[cache_key] = combined_data
+        cache_manager.cache_hits["historical"] += 1
+        if len(cache_manager.historical_cache) > cache_manager.historical_cache.maxsize:
+            logger.debug("Evicting old historical cache entries")
+            cache_manager.log_cache_stats("historical")
+
+        return combined_data
+    except Exception as e:
+        logger.error(f"Error in get_combined_data for {security_id}: {e}")
         cache_manager.cache_misses["historical"] += 1
         return None
-
-    cache_manager.historical_cache[cache_key] = hist_data
-    cache_manager.cache_hits["historical"] += 1
-    if len(cache_manager.historical_cache) > cache_manager.historical_cache.maxsize:
-        logger.debug("Evicting old historical cache entries")
-        cache_manager.log_cache_stats("historical")
-
-    enhanced_candles = build_enhanced_candles(security_id)
-    if not enhanced_candles:
-        return hist_data
-
-    enhanced_data = [
-        {
-            "datetime": candle.datetime,
-            "open": candle.open,
-            "high": candle.high,
-            "low": candle.low,
-            "close": candle.close,
-            "volume": candle.volume,
-            "bid_qty": candle.bid_qty,
-            "ask_qty": candle.ask_qty,
-            "bid_depth": candle.bid_depth,
-            "ask_depth": candle.ask_depth,
-        }
-        for candle in enhanced_candles
-    ]
-
-    if enhanced_data:
-        enhanced_df = pd.DataFrame(enhanced_data)
-        combined = pd.concat([hist_data, enhanced_df], ignore_index=True)
-        combined = (
-            combined.sort_values("datetime")
-            .drop_duplicates("datetime", keep="last")
-            .reset_index(drop=True)
-        )
-        return combined
-    return hist_data
 
 
 @lru_cache(maxsize=1000)
 def get_symbol_from_id(security_id: int) -> str:
-    return SYMBOL_MAP.get(security_id, f"UNKNOWN_{security_id}")
+    symbol_map = get_security_symbol_map(security_id)
+    return symbol_map.get(security_id, f"UNKNOWN_{security_id}")
 
 
 async def fetch_dynamic_holidays(year: int) -> List[str]:
@@ -896,110 +858,6 @@ async def fetch_dynamic_holidays(year: int) -> List[str]:
     ]
     HOLIDAY_CACHE[year] = holidays
     return holidays
-
-
-async def fetch_historical_data(
-    security_id: int, days_back: int = 5, interval: int = 5
-) -> Optional[pd.DataFrame]:
-    try:
-        now = datetime.now(IST)
-        today = now.date()
-        holidays = await fetch_dynamic_holidays(today.year)
-        holiday_set = set(holidays)
-        valid_days = []
-        current_day = today
-        days_checked = 0
-        max_days_to_check = min(days_back * 2, 60)
-
-        while len(valid_days) < days_back and days_checked < max_days_to_check:
-            if (
-                current_day.weekday() < 5
-                and current_day.strftime("%Y-%m-%d") not in holiday_set
-            ):
-                valid_days.append(current_day)
-            current_day -= timedelta(days=1)
-            days_checked += 1
-
-        if not valid_days:
-            logger.error(f"No valid trading days found for {security_id}")
-            return None
-
-        logger.debug(
-            f"Fetching data for {security_id} across {len(valid_days)} trading days"
-        )
-
-        async def fetch_day_data(day: date) -> Optional[pd.DataFrame]:
-            try:
-                from_date = IST.localize(datetime.combine(day, MARKET_OPEN_TIME))
-                to_date = (
-                    IST.localize(datetime.combine(day, MARKET_CLOSE_TIME))
-                    if day != today
-                    else now
-                )
-                to_date = min(to_date, now)
-                async with dhan_lock:
-                    data = await asyncio.get_event_loop().run_in_executor(
-                        thread_pool,
-                        lambda: dhan.intraday_minute_data(
-                            security_id=security_id,
-                            exchange_segment="NSE_EQ",
-                            instrument_type="EQUITY",
-                            interval=interval,
-                            from_date=from_date.strftime("%Y-%m-%d %H:%M:%S"),
-                            to_date=to_date.strftime("%Y-%m-%d %H:%M:%S"),
-                        ),
-                    )
-                if data.get("status") == "success" and data.get("data"):
-                    df = pd.DataFrame(data["data"])
-                    if not df.empty:
-                        df["datetime"] = pd.to_datetime(
-                            df["timestamp"], unit="s", utc=True
-                        ).dt.tz_convert(IST)
-                        df = df[
-                            ["datetime", "open", "high", "low", "close", "volume"]
-                        ].copy()
-                        logger.debug(
-                            f"Fetched {len(df)} bars for {security_id} on {day}"
-                        )
-                        return df
-                return None
-            except Exception as e:
-                logger.error(
-                    f"Error fetching data for {security_id} on {day}: {str(e)}"
-                )
-                return None
-
-        semaphore = asyncio.Semaphore(2)
-
-        async def fetch_with_semaphore(day: date) -> Optional[pd.DataFrame]:
-            async with semaphore:
-                await asyncio.sleep(0.1)
-                return await fetch_day_data(day)
-
-        tasks = [fetch_with_semaphore(day) for day in valid_days[:10]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        valid_dataframes = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.warning(f"Task failed for day {valid_days[i]}: {result}")
-            elif result is not None and not result.empty:
-                valid_dataframes.append(result)
-
-        if not valid_dataframes:
-            logger.error(f"No data fetched for {security_id}")
-            return None
-
-        full_df = pd.concat(valid_dataframes, ignore_index=True)
-        full_df = (
-            full_df.sort_values("datetime")
-            .drop_duplicates("datetime", keep="last")
-            .reset_index(drop=True)
-        )
-        logger.info(f"Successfully fetched {len(full_df)} total bars for {security_id}")
-        return full_df
-    except Exception as e:
-        logger.error(f"Historical data error for {security_id}: {str(e)}")
-        return None
 
 
 async def fetch_realtime_quote(security_id: int) -> Optional[Dict]:
@@ -1200,9 +1058,8 @@ async def enhanced_stock_filtering(
         if latest_price < MIN_PRICE_THRESHOLD or latest_price > MAX_PRICE_THRESHOLD:
             return False, f"Price out of range: ₹{latest_price:.2f}"
 
-        # MODIFIED: Use ATR-based volatility threshold for intraday
         volatility = await calculate_stock_volatility(security_id)
-        volatility_threshold = atr * 0.5  # Dynamic threshold based on ATR
+        volatility_threshold = atr * 0.5
         volatility_threshold = adjust_thresholds_for_regime(
             regime, volatility_threshold
         )
@@ -1213,7 +1070,6 @@ async def enhanced_stock_filtering(
                 f"Low volatility: {volatility:.3f} < {volatility_threshold:.3f}",
             )
 
-        # MODIFIED: Use shorter-term volume average
         avg_volume = await calculate_average_volume(security_id)
         recent_volume = combined_data["volume"].tail(5).mean()
         relative_vol = calculate_relative_volume(recent_volume, avg_volume)
@@ -1348,17 +1204,13 @@ async def calculate_stock_volatility(security_id: int) -> float:
         return cache_manager.volatility_cache[cache_key]
 
     try:
-        hist_data = await fetch_historical_data(
-            security_id, days_back=1, interval=5
-        )  # MODIFIED: 1 day for intraday
-        if hist_data is None or len(hist_data) < 20:
+        live_data = read_live_data_from_csv(security_id=security_id)
+        if live_data is None or len(live_data) < 20:
             cache_manager.cache_misses["volatility"] += 1
             return 0
 
-        returns = (
-            hist_data["close"].tail(20).pct_change().dropna()
-        )  # MODIFIED: Last 20 bars (~100 minutes)
-        volatility = returns.std()  # MODIFIED: No annualization for intraday
+        returns = live_data["close"].tail(20).pct_change().dropna()
+        volatility = returns.std()
         cache_manager.volatility_cache[cache_key] = volatility
         cache_manager.cache_hits["volatility"] += 1
         cache_manager.log_cache_stats("volatility")
@@ -1371,15 +1223,12 @@ async def calculate_stock_volatility(security_id: int) -> float:
 
 async def calculate_average_volume(security_id: int) -> float:
     cache_key = f"vol_{security_id}_{date.today()}"
-
     try:
-        hist_data = await fetch_historical_data(
-            security_id, days_back=1, interval=5
-        )  # MODIFIED: 1 day for intraday
-        if hist_data is None or len(hist_data) < 20:
+        live_data = read_live_data_from_csv(security_id=security_id)
+        if live_data is None or len(live_data) < 20:
             cache_manager.cache_misses["volume"] += 1
             return 0
-        avg_volume = hist_data["volume"].tail(20).mean()  # MODIFIED: Last 20 bars
+        avg_volume = live_data["volume"].tail(20).mean()
         cache_manager.volume_cache[cache_key] = avg_volume
         cache_manager.cache_hits["volume"] += 1
         cache_manager.log_cache_stats("volume")
@@ -1418,10 +1267,9 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
         try:
             logger.info(f"=== PROCESSING {ticker} (ID: {security_id}) ===")
             logger.info(f"{ticker} - Step 1: Fetching market depth and data")
-            depth_task = asyncio.create_task(fetch_and_store_market_depth(security_id))
             data_task = asyncio.create_task(get_combined_data(security_id))
-            await depth_task
             combined_data = await data_task
+            print("==============", combined_data.tail(5))
             if combined_data is None:
                 logger.warning(f"{ticker} - FAILED: No combined data available")
                 return
@@ -1470,7 +1318,7 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
 
             logger.info(f"{ticker} - Step 3: Enhanced large cap filtering")
             # filter_passed, filter_reason = await enhanced_stock_filtering(
-            #     ticker, security_id, combined_data, regime, atr_value  # MODIFIED: Pass ATR
+            #     ticker, security_id, combined_data, regime, atr_value
             # )
 
             # if not filter_passed:
@@ -1521,7 +1369,6 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     )
                     continue
 
-                # MODIFIED: Use BacktraderRunner for async execution
                 signal = await backtrader_runner.run_strategy(
                     strategy_class, combined_data, params
                 )
@@ -1603,7 +1450,7 @@ async def market_hours_check() -> bool:
         sleep_time = (market_open_dt - now).total_seconds()
         if sleep_time > 0:
             logger.info(
-                f"Pre-market: waiting {sleep_time/60:.1f} minutes until {MARKET_OPEN_STR}"
+                f"Pre-market: waiting {sleep_time/60:.1f} minutes until {MARKET_OPEN_TIME.strftime('%H:%M:%S')}"
             )
             await asyncio.sleep(min(sleep_time, 300))
         return True
@@ -1631,7 +1478,6 @@ async def schedule_square_off():
                 await asyncio.sleep(min(sleep_seconds, 3600))
                 if await market_hours_check():
                     logger.info("Executing scheduled square off")
-                    # NEW: Close all open positions
                     async with position_manager.position_lock:
                         for order_id in list(position_manager.open_positions.keys()):
                             pos = position_manager.open_positions[order_id]
@@ -1663,9 +1509,7 @@ async def send_heartbeat():
                 "volatility": len(cache_manager.volatility_cache),
                 "volume": len(cache_manager.volume_cache),
             }
-            open_positions = len(
-                position_manager.open_positions
-            )  # NEW: Include position count
+            open_positions = len(position_manager.open_positions)
             message = (
                 "💓 *SYSTEM HEARTBEAT*\n"
                 f"Status: Operational\n"
@@ -1695,6 +1539,9 @@ async def cleanup_resources():
 async def main_trading_loop():
     try:
         await telegram_queue.start()
+        # Initialize live data collection
+        await initialize_live_data_from_config()
+
         try:
             strategies_df = pd.read_csv("selected_stocks_strategies.csv")
             nifty500 = pd.read_csv("ind_nifty500list.csv")
@@ -1717,7 +1564,6 @@ async def main_trading_loop():
                 )
         logger.info(f"Prepared {len(stock_universe)} stocks for trading")
 
-        # NEW: Start position manager monitoring
         background_tasks = [
             asyncio.create_task(schedule_square_off()),
             asyncio.create_task(send_heartbeat()),
@@ -1759,7 +1605,7 @@ async def main_trading_loop():
     finally:
         await api_client.close()
         thread_pool.shutdown(wait=True)
-        backtrader_runner.shutdown()  # NEW: Shutdown Backtrader executor
+        backtrader_runner.shutdown()
         for task in background_tasks:
             task.cancel()
 

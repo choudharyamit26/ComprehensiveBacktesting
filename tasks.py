@@ -88,7 +88,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
     end_date = datetime.today().date() - timedelta(days=1)
     start_date = end_date - timedelta(days=365)
     interval = "5m"
-    n_trials = 2
+    n_trials = 20
     tickers = [stock["Stock"] for stock in selected_stocks]
 
     all_basic_metrics = []

@@ -144,6 +144,7 @@ try:
     from stratgies.momentum.ema_macd_rsi_volume import EMAMACDRSIVolume
     from stratgies.momentum.ema_rsi_pivot import EMA_RSI_Pivot
     from stratgies.momentum.RSI_Supertrend_Intraday import RSISupertrendIntraday
+    from stratgies.meanreversion.vwap_bounce_rejection import VWAPBounceRejection
 
     register_strategy("RSIMACD", RSIMACD)
     register_strategy("RSIBB", RSIBB)
@@ -206,5 +207,6 @@ try:
     register_strategy("EMAMACDRSIVolume", EMAMACDRSIVolume)
     register_strategy("EMA_RSI_Pivot", EMA_RSI_Pivot)
     register_strategy("RSISupertrendIntraday", RSISupertrendIntraday)
+    register_strategy("VWAPBounceRejection", VWAPBounceRejection)
 except ImportError as e:
     logger.error(f"Failed to register EMARSI: {str(e)}")

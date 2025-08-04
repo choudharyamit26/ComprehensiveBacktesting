@@ -4,7 +4,10 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import matplotlib.pyplot as plt
 
-def fetch_and_process_data(tickers, labels, start_date, end_date, output_file, plot_title):
+
+def fetch_and_process_data(
+    tickers, labels, start_date, end_date, output_file, plot_title
+):
     """
     Fetch historical data for given tickers, calculate daily percentage changes,
     save to CSV, and plot a comparison chart.
@@ -39,7 +42,7 @@ def fetch_and_process_data(tickers, labels, start_date, end_date, output_file, p
     for ticker in tickers:
         try:
             # Handle MultiIndex columns (e.g., ('Close', ticker))
-            close_prices[ticker] = data_dict[ticker][('Close', ticker)]
+            close_prices[ticker] = data_dict[ticker][("Close", ticker)]
         except KeyError as e:
             print(f"Error accessing 'Close' for {ticker}: {e}")
             print(f"Available columns for {ticker}: {data_dict[ticker].columns}")
@@ -52,7 +55,7 @@ def fetch_and_process_data(tickers, labels, start_date, end_date, output_file, p
         pct_changes[col_name] = close_prices[ticker].pct_change() * 100
 
     # Create DataFrame with explicit column names
-    df_data = {'Date': close_prices[tickers[0]].index}
+    df_data = {"Date": close_prices[tickers[0]].index}
     for label in labels:
         col_name = f"{label}_Pct_Change"
         df_data[col_name] = pct_changes[col_name].values
@@ -73,18 +76,21 @@ def fetch_and_process_data(tickers, labels, start_date, end_date, output_file, p
 
     # Plot the daily percentage changes
     plt.figure(figsize=(12, 6))
-    colors = ['blue', 'orange', 'green'][:len(tickers)]  # Adjust colors based on ticker count
+    colors = ["blue", "orange", "green"][
+        : len(tickers)
+    ]  # Adjust colors based on ticker count
     for label, color in zip(labels, colors):
         col_name = f"{label}_Pct_Change"
-        plt.plot(df['Date'], df[col_name], label=label, color=color)
+        plt.plot(df["Date"], df[col_name], label=label, color=color)
     plt.title(plot_title)
-    plt.xlabel('Date')
-    plt.ylabel('Daily % Change')
+    plt.xlabel("Date")
+    plt.ylabel("Daily % Change")
     plt.legend()
     plt.grid(True)
     plt.xticks(rotation=45)
     plt.tight_layout()
     plt.show()
+
 
 def main():
     """Main function to configure and run comparisons for NIFTY 50 and BANKNIFTY groups."""
@@ -95,29 +101,30 @@ def main():
     # Define ticker groups
     comparisons = [
         {
-            'tickers': ["^NSEI", "SETFNIF50.NS", "NIFTYBEES.NS"],
-            'labels': ["NIFTY 50", "SBI Nifty 50 ETF", "Nippon Nifty 50 ETF"],
-            'output_file': "nifty50_sbi_nippon_etf_daily_data.csv",
-            'plot_title': "Daily Percentage Change: NIFTY 50 vs SBI Nifty 50 ETF vs Nippon Nifty 50 ETF (May 1, 2025 - Aug 1, 2025)"
+            "tickers": ["^NSEI", "SETFNIF50.NS", "NIFTYBEES.NS"],
+            "labels": ["NIFTY 50", "SBI Nifty 50 ETF", "Nippon Nifty 50 ETF"],
+            "output_file": "nifty50_sbi_nippon_etf_daily_data.csv",
+            "plot_title": "Daily Percentage Change: NIFTY 50 vs SBI Nifty 50 ETF vs Nippon Nifty 50 ETF (May 1, 2025 - Aug 1, 2025)",
         },
         {
-            'tickers': ["^NSEBANK", "BANKBEES.NS"],
-            'labels': ["BANKNIFTY", "Nippon Nifty Bank ETF"],
-            'output_file': "banknifty_bankbees_daily_data.csv",
-            'plot_title': "Daily Percentage Change: BANKNIFTY vs Nippon Nifty Bank ETF (May 1, 2025 - Aug 1, 2025)"
-        }
+            "tickers": ["^NSEBANK", "BANKBEES.NS"],
+            "labels": ["BANKNIFTY", "Nippon Nifty Bank ETF"],
+            "output_file": "banknifty_bankbees_daily_data.csv",
+            "plot_title": "Daily Percentage Change: BANKNIFTY vs Nippon Nifty Bank ETF (May 1, 2025 - Aug 1, 2025)",
+        },
     ]
 
     # Process each comparison
     for comp in comparisons:
         fetch_and_process_data(
-            tickers=comp['tickers'],
-            labels=comp['labels'],
+            tickers=comp["tickers"],
+            labels=comp["labels"],
             start_date=start_date,
             end_date=end_date,
-            output_file=comp['output_file'],
-            plot_title=comp['plot_title']
+            output_file=comp["output_file"],
+            plot_title=comp["plot_title"],
         )
+
 
 if __name__ == "__main__":
     main()
