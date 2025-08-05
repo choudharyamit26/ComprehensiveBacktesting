@@ -760,12 +760,9 @@ async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
     try:
         # Use get_combined_data_with_persistent_live from live_data.py
         combined_data = await get_combined_data_with_persistent_live(
-            security_id=security_id,
+            security_id=int(security_id),
             exchange_segment="NSE_EQ",
             auto_start_live_collection=True,
-        )
-        print(
-            "================== FROM LINE 738 ==================", combined_data.tail(5)
         )
         if combined_data is None:
             cache_manager.cache_misses["historical"] += 1
@@ -1269,7 +1266,6 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
             logger.info(f"{ticker} - Step 1: Fetching market depth and data")
             data_task = asyncio.create_task(get_combined_data(security_id))
             combined_data = await data_task
-            print("==============", combined_data.tail(5))
             if combined_data is None:
                 logger.warning(f"{ticker} - FAILED: No combined data available")
                 return

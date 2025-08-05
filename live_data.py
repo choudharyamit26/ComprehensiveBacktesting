@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 dhan = init_dhan_client()
 
 
-def fetch_tickers_from_csv(csv_path="Dhan-Tickers/ind_nifty50list.csv"):
+def fetch_tickers_from_csv(csv_path="ind_nifty50list.csv"):
     """Fetch ticker security IDs from a CSV file."""
     if not os.path.exists(csv_path):
         logger.error(f"CSV file {csv_path} not found")
@@ -70,6 +70,7 @@ CONFIG = {
     "TIMEFRAME": 5,
     "MARKET_OPEN": time(9, 15),
     "MARKET_CLOSE": time(15, 30),
+    "HISTORICAL_DATA_END": time(15, 55),
     "EXIT_BUFFER_MINUTES": 15,
     "CSV_FILE": "trading_signals.csv",
     "LIVE_DATA_CSV": "live_data.csv",
@@ -110,10 +111,10 @@ async def fetch_historical_data(tickers, exchange_segment):
                 days_checked += 1
                 continue
             from_date = datetime.combine(
-                current_date.date(), datetime.min.time()
+                current_date.date(), CONFIG["MARKET_OPEN"]
             ).replace(tzinfo=ist_tz)
             to_date = datetime.combine(
-                current_date.date(), CONFIG["MARKET_CLOSE"]
+                current_date.date(), CONFIG["HISTORICAL_DATA_END"]
             ).replace(tzinfo=ist_tz)
             from_date_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
             to_date_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
@@ -255,14 +256,15 @@ class CandleAggregator:
 
             # Get candle start time (round down to interval boundary)
             candle_start = self._get_candle_start_time(tick.timestamp)
-            print("FROM LINE 246", security_id, self.current_candles)
             # Initialize or update current candle
             if security_id not in self.current_candles:
-                print("FROM LINE 250", security_id, self.current_candles)
+                logger.info(f"FROM LINE 250: {security_id} {self.current_candles}")
                 self.current_candles[security_id] = self._create_new_candle(
                     tick, candle_start
                 )
-                print("FROM LINE 252", security_id, self.current_candles[security_id])
+                logger.info(
+                    f"FROM LINE 252 {security_id} {self.current_candles[security_id]}"
+                )
             else:
                 current_candle = self.current_candles[security_id]
 
@@ -335,10 +337,9 @@ class CandleAggregator:
                 f"FROM LINE 306:{security_id}, {self.completed_candles}, {self.completed_candles[security_id]}"
             )
             if (
-                str(security_id) not in self.completed_candles
+                security_id not in self.completed_candles
                 or not self.completed_candles[security_id]
             ):
-                print("FROM LINE 308")
                 return pd.DataFrame()
 
             candles = self.completed_candles[security_id].copy()
@@ -347,7 +348,6 @@ class CandleAggregator:
         if not df.empty:
             df = df[["datetime", "open", "high", "low", "close", "volume"]].copy()
             df["datetime"] = pd.to_datetime(df["datetime"])
-        print(">>>>>>>>>>>", df)
         return df
 
     def get_current_candle_df(self, security_id: int) -> pd.DataFrame:
@@ -484,9 +484,9 @@ class LiveDataCollector:
                     self.exchange_segment: [int(sec_id) for sec_id in self.security_ids]
                 }
                 response = dhan.quote_data(securities)
-                logger.info(
-                    f"Fetched live data for securities: {self.security_ids}. Data: {response}"
-                )
+                # logger.info(
+                #     f"Fetched live data for securities: {self.security_ids}. Data: {response}"
+                # )
                 if response and response.get("status") == "success":
                     self._process_quotes(response, current_time)
                     consecutive_errors = 0
@@ -510,7 +510,7 @@ class LiveDataCollector:
             return False
 
         market_open = time(9, 15)
-        market_close = time(15, 30)
+        market_close = time(15, 25)
         current_time_only = current_time.time()
 
         return market_open <= current_time_only <= market_close
@@ -523,7 +523,7 @@ class LiveDataCollector:
 
             for security_id_str, quote_data in exchange_data.items():
                 security_id = int(security_id_str)
-                if str(security_id) not in self.security_ids:
+                if security_id not in self.security_ids:
                     continue
 
                 last_price = float(quote_data.get("last_price", 0))
@@ -574,7 +574,6 @@ class LiveDataCollector:
     ) -> pd.DataFrame:
         """Get live 5-minute candles for a security."""
         completed_df = self.aggregator.get_completed_candles_df(security_id)
-        print("---------------------<<<<<<<<", completed_df)
         if not include_current:
             return completed_df
 
@@ -630,7 +629,6 @@ async def get_combined_data_with_persistent_live(
             live_candles = live_manager.get_live_candles(
                 security_id, include_current=True
             )
-            print("<<<<<<<<<<<", live_candles)
             if not live_candles.empty:
                 logger.info(
                     f"Live candles: {len(live_candles)} records from {live_candles['datetime'].min()} to {live_candles['datetime'].max()}"
