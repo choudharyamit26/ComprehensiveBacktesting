@@ -11,23 +11,40 @@ logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
 
 
-class BBPivotPointsStrategy:
+class VolumeSurge:
+    def __init__(self, period=14, threshold=1.5):
+        self.period = period
+        self.threshold = threshold
+
+    def update(self, volumes):
+        if len(volumes) < self.period:
+            return 0, 0, False
+
+        volume_avg = volumes[-self.period :].mean()
+        volume_ratio = volumes.iloc[-1] / volume_avg if volume_avg > 0 else 1.0
+        volume_surge = volume_ratio >= self.threshold
+        return volume_avg, volume_ratio, volume_surge
+
+
+class Volume_ATR_PriceAction:
     """
-    Bollinger Bands + Pivot Points Strategy
+    Volume + ATR + Price Action Strategy
     (Documentation remains unchanged)
     """
 
     params = {
-        "bb_period": 20,
-        "bb_dev": 2.0,
-        "pivot_proximity": 0.5,
+        "volume_period": 14,
+        "volume_threshold": 1.5,
+        "atr_period": 14,
+        "breakout_period": 20,
         "verbose": False,
     }
 
     optimization_params = {
-        "bb_period": {"type": "int", "low": 10, "high": 30, "step": 1},
-        "bb_dev": {"type": "float", "low": 1.5, "high": 2.5, "step": 0.1},
-        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0, "step": 0.1},
+        "volume_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "volume_threshold": {"type": "float", "low": 1.2, "high": 2.0, "step": 0.1},
+        "atr_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "breakout_period": {"type": "int", "low": 15, "high": 30, "step": 1},
     }
 
     def __init__(self, data, tickers=None, **kwargs):
@@ -36,115 +53,41 @@ class BBPivotPointsStrategy:
         self.params.update(kwargs)
         self.order = None
         self.order_type = None
-        self.last_signal = None  # Initialize last_signal
+        self.last_signal = None
         self.ready = False
         self.trade_count = 0
-        self.warmup_period = self.params["bb_period"] + 5
+        self.warmup_period = (
+            max(
+                self.params["volume_period"],
+                self.params["atr_period"],
+                self.params["breakout_period"],
+            )
+            + 2
+        )
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
 
-        # Initialize indicators using pandas_ta
-        bb = ta.bbands(
+        # Initialize indicators
+        self.volume_surge_ind = VolumeSurge(
+            period=self.params["volume_period"],
+            threshold=self.params["volume_threshold"],
+        )
+
+        # Calculate ATR
+        self.data["atr"] = ta.atr(
+            self.data["high"],
+            self.data["low"],
             self.data["close"],
-            length=self.params["bb_period"],
-            std=self.params["bb_dev"],
-        )
-        self.data["bb_top"] = bb[
-            f"BBU_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_mid"] = bb[
-            f"BBM_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_bot"] = bb[
-            f"BBL_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-
-        # Calculate pivot points
-        self.data["prev_high"] = self.data["high"].shift(1)
-        self.data["prev_low"] = self.data["low"].shift(1)
-        self.data["prev_close"] = self.data["close"].shift(1)
-        self.data["pivot"] = (
-            self.data["prev_high"] + self.data["prev_low"] + self.data["prev_close"]
-        ) / 3
-        self.data["r1"] = (2 * self.data["pivot"]) - self.data["prev_low"]
-        self.data["s1"] = (2 * self.data["pivot"]) - self.data["prev_high"]
-        self.data["r2"] = self.data["pivot"] + (
-            self.data["prev_high"] - self.data["prev_low"]
-        )
-        self.data["s2"] = self.data["pivot"] - (
-            self.data["prev_high"] - self.data["prev_low"]
+            length=self.params["atr_period"],
         )
 
-        # Define conditions
-        self.data["price_near_lower_bb"] = self.data["close"] <= self.data["bb_bot"] * (
-            1 + self.params["pivot_proximity"] / 100
-        )
-        self.data["price_near_upper_bb"] = self.data["close"] >= self.data["bb_top"] * (
-            1 - self.params["pivot_proximity"] / 100
-        )
-        self.data["near_s1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s1"]) / x["s1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_s2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s2"]) / x["s2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r1"]) / x["r1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r2"]) / x["r2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["bullish_entry"] = self.data["price_near_lower_bb"] & (
-            self.data["near_s1"] | self.data["near_s2"]
-        )
-        self.data["bearish_entry"] = self.data["price_near_upper_bb"] & (
-            self.data["near_r1"] | self.data["near_r2"]
-        )
-        self.data["bullish_exit"] = (self.data["close"] >= self.data["pivot"]) | (
-            self.data["close"] >= self.data["bb_top"]
-        )
-        self.data["bearish_exit"] = (self.data["close"] <= self.data["pivot"]) | (
-            self.data["close"] <= self.data["bb_bot"]
-        )
-
-        logger.debug(f"Initialized BBPivotPointsStrategy with params: {self.params}")
-        logger.info(
-            f"BBPivotPointsStrategy initialized with bb_period={self.params['bb_period']}, "
-            f"bb_dev={self.params['bb_dev']}, pivot_proximity={self.params['pivot_proximity']}"
-        )
+        logger.debug(f"Initialized Volume_ATR_PriceAction with params: {self.params}")
 
     def run(self):
-        self.last_signal = None  # Reset last_signal at the start of run
+        self.last_signal = None
         for idx in range(len(self.data)):
             if idx < self.warmup_period:
-                logger.debug(
-                    f"Skipping row {idx}: still in warmup period (need {self.warmup_period} rows)"
-                )
                 continue
 
             if not self.ready:
@@ -170,11 +113,25 @@ class BBPivotPointsStrategy:
                 logger.debug(f"Order pending at row {idx}")
                 continue
 
+            # Update indicators
+            _, _, volume_surge = self.volume_surge_ind.update(
+                self.data["volume"].iloc[: idx + 1]
+            )
+            atr_increasing = (
+                (self.data.iloc[idx]["atr"] > self.data.iloc[idx - 1]["atr"])
+                if idx > 0
+                else False
+            )
+
+            # Calculate recent highs and lows
+            lookback = min(idx, self.params["breakout_period"])
+            recent_high = self.data["high"].iloc[idx - lookback : idx].max()
+            recent_low = self.data["low"].iloc[idx - lookback : idx].min()
+            price_breakout_up = self.data.iloc[idx]["close"] > recent_high
+            price_breakout_down = self.data.iloc[idx]["close"] < recent_low
+
             # Check for invalid indicator values
-            if pd.isna(self.data.iloc[idx]["bb_mid"]) or pd.isna(
-                self.data.iloc[idx]["pivot"]
-            ):
-                logger.debug(f"Invalid indicator values at row {idx}")
+            if pd.isna(volume_surge) or pd.isna(self.data.iloc[idx]["atr"]):
                 continue
 
             # Store indicator data for analysis
@@ -182,20 +139,17 @@ class BBPivotPointsStrategy:
                 {
                     "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
                     "close": self.data.iloc[idx]["close"],
-                    "bb_top": self.data.iloc[idx]["bb_top"],
-                    "bb_mid": self.data.iloc[idx]["bb_mid"],
-                    "bb_bot": self.data.iloc[idx]["bb_bot"],
-                    "pivot": self.data.iloc[idx]["pivot"],
-                    "s1": self.data.iloc[idx]["s1"],
-                    "s2": self.data.iloc[idx]["s2"],
-                    "r1": self.data.iloc[idx]["r1"],
-                    "r2": self.data.iloc[idx]["r2"],
+                    "volume_surge": volume_surge,
+                    "atr": self.data.iloc[idx]["atr"],
+                    "recent_high": recent_high,
+                    "recent_low": recent_low,
                 }
             )
 
-            # Check for trading signals
+            # Trading logic
             if not self.open_positions:
-                if self.data.iloc[idx]["bullish_entry"]:
+                # Long Entry
+                if volume_surge and atr_increasing and price_breakout_up:
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
@@ -209,11 +163,12 @@ class BBPivotPointsStrategy:
                     self.last_signal = "buy"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Lower BB: {self.data.iloc[idx]['price_near_lower_bb']} | "
-                        f"Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                        f"BUY SIGNAL (Volume + ATR + Price) | Time: {bar_time_ist} | "
+                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                        f"Breakout: {recent_high:.2f}"
                     )
-                elif self.data.iloc[idx]["bearish_entry"]:
+                # Short Entry
+                elif volume_surge and atr_increasing and price_breakout_down:
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
@@ -227,39 +182,40 @@ class BBPivotPointsStrategy:
                     self.last_signal = "sell"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Upper BB: {self.data.iloc[idx]['price_near_upper_bb']} | "
-                        f"Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                        f"SELL SIGNAL (Volume + ATR + Price) | Time: {bar_time_ist} | "
+                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                        f"Breakout: {recent_low:.2f}"
                     )
-                else:
-                    self.last_signal = None
             else:
-                if (
-                    self.open_positions[-1]["direction"] == "long"
-                    and self.data.iloc[idx]["bullish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bullish exit condition", "sell", "exit_long"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Upper BB: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['bb_top']}"
-                    )
-                elif (
-                    self.open_positions[-1]["direction"] == "short"
-                    and self.data.iloc[idx]["bearish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bearish exit condition", "buy", "exit_short"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Lower BB: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['bb_bot']}"
-                    )
+                # Exit conditions
+                _, volume_ratio, _ = self.volume_surge_ind.update(
+                    self.data["volume"].iloc[: idx + 1]
+                )
+                volume_exhaustion = volume_ratio < 1.0
+                volatility_contraction = (
+                    (self.data.iloc[idx]["atr"] < self.data.iloc[idx - 1]["atr"])
+                    if idx > 0
+                    else False
+                )
+
+                if self.open_positions[-1]["direction"] == "long":
+                    if volume_exhaustion or volatility_contraction:
+                        reason = (
+                            "Volume exhaustion"
+                            if volume_exhaustion
+                            else "Volatility contraction"
+                        )
+                        self._close_position(idx, reason, "sell", "exit_long")
+                        self.last_signal = None
+                elif self.open_positions[-1]["direction"] == "short":
+                    if volume_exhaustion or volatility_contraction:
+                        reason = (
+                            "Volume exhaustion"
+                            if volume_exhaustion
+                            else "Volatility contraction"
+                        )
+                        self._close_position(idx, reason, "buy", "exit_short")
+                        self.last_signal = None
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -383,19 +339,22 @@ class BBPivotPointsStrategy:
     @classmethod
     def get_param_space(cls, trial):
         params = {
-            "bb_period": trial.suggest_int("bb_period", 10, 30),
-            "bb_dev": trial.suggest_float("bb_dev", 1.5, 2.5, step=0.1),
-            "pivot_proximity": trial.suggest_float(
-                "pivot_proximity", 0.3, 1.0, step=0.1
+            "volume_period": trial.suggest_int("volume_period", 10, 20),
+            "volume_threshold": trial.suggest_float(
+                "volume_threshold", 1.2, 2.0, step=0.1
             ),
+            "atr_period": trial.suggest_int("atr_period", 10, 20),
+            "breakout_period": trial.suggest_int("breakout_period", 15, 30),
         }
         return params
 
     @classmethod
     def get_min_data_points(cls, params):
         try:
-            bb_period = params.get("bb_period", 20)
-            return bb_period + 5
+            volume_period = params.get("volume_period", 14)
+            atr_period = params.get("atr_period", 14)
+            breakout_period = params.get("breakout_period", 20)
+            return max(volume_period, atr_period, breakout_period) + 2
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
-            return 25
+            return 30

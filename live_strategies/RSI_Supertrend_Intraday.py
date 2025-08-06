@@ -11,23 +11,27 @@ logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
 
 
-class BBPivotPointsStrategy:
+class RSISupertrendIntraday:
     """
-    Bollinger Bands + Pivot Points Strategy
+    RSI + Supertrend Intraday Strategy
     (Documentation remains unchanged)
     """
 
     params = {
-        "bb_period": 20,
-        "bb_dev": 2.0,
-        "pivot_proximity": 0.5,
+        "rsi_period": 14,
+        "supertrend_period": 10,
+        "supertrend_mult": 3.0,
+        "target_percent": 2.0,
+        "rsi_overbought": 80,
+        "rsi_oversold": 20,
         "verbose": False,
     }
 
     optimization_params = {
-        "bb_period": {"type": "int", "low": 10, "high": 30, "step": 1},
-        "bb_dev": {"type": "float", "low": 1.5, "high": 2.5, "step": 0.1},
-        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0, "step": 0.1},
+        "rsi_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "supertrend_period": {"type": "int", "low": 7, "high": 14, "step": 1},
+        "supertrend_mult": {"type": "float", "low": 2.0, "high": 4.0, "step": 0.5},
+        "target_percent": {"type": "float", "low": 1.5, "high": 3.0, "step": 0.5},
     }
 
     def __init__(self, data, tickers=None, **kwargs):
@@ -36,115 +40,41 @@ class BBPivotPointsStrategy:
         self.params.update(kwargs)
         self.order = None
         self.order_type = None
-        self.last_signal = None  # Initialize last_signal
+        self.last_signal = None
         self.ready = False
         self.trade_count = 0
-        self.warmup_period = self.params["bb_period"] + 5
+        self.warmup_period = (
+            max(self.params["rsi_period"], self.params["supertrend_period"]) + 5
+        )
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
+        self.entry_price = None
 
-        # Initialize indicators using pandas_ta
-        bb = ta.bbands(
+        # Calculate indicators
+        self.data["rsi"] = ta.rsi(self.data["close"], length=self.params["rsi_period"])
+        self.data["supertrend"] = ta.supertrend(
+            self.data["high"],
+            self.data["low"],
             self.data["close"],
-            length=self.params["bb_period"],
-            std=self.params["bb_dev"],
-        )
-        self.data["bb_top"] = bb[
-            f"BBU_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_mid"] = bb[
-            f"BBM_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_bot"] = bb[
-            f"BBL_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
+            length=self.params["supertrend_period"],
+            multiplier=self.params["supertrend_mult"],
+        )[f"SUPERT_{self.params['supertrend_period']}_{self.params['supertrend_mult']}"]
 
-        # Calculate pivot points
-        self.data["prev_high"] = self.data["high"].shift(1)
-        self.data["prev_low"] = self.data["low"].shift(1)
-        self.data["prev_close"] = self.data["close"].shift(1)
-        self.data["pivot"] = (
-            self.data["prev_high"] + self.data["prev_low"] + self.data["prev_close"]
-        ) / 3
-        self.data["r1"] = (2 * self.data["pivot"]) - self.data["prev_low"]
-        self.data["s1"] = (2 * self.data["pivot"]) - self.data["prev_high"]
-        self.data["r2"] = self.data["pivot"] + (
-            self.data["prev_high"] - self.data["prev_low"]
+        # Calculate signals
+        self.data["bullish_entry"] = (self.data["rsi"] > 50) & (
+            self.data["close"] > self.data["supertrend"]
         )
-        self.data["s2"] = self.data["pivot"] - (
-            self.data["prev_high"] - self.data["prev_low"]
+        self.data["bearish_entry"] = (self.data["rsi"] < 50) & (
+            self.data["close"] < self.data["supertrend"]
         )
 
-        # Define conditions
-        self.data["price_near_lower_bb"] = self.data["close"] <= self.data["bb_bot"] * (
-            1 + self.params["pivot_proximity"] / 100
-        )
-        self.data["price_near_upper_bb"] = self.data["close"] >= self.data["bb_top"] * (
-            1 - self.params["pivot_proximity"] / 100
-        )
-        self.data["near_s1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s1"]) / x["s1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_s2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s2"]) / x["s2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r1"]) / x["r1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r2"]) / x["r2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["bullish_entry"] = self.data["price_near_lower_bb"] & (
-            self.data["near_s1"] | self.data["near_s2"]
-        )
-        self.data["bearish_entry"] = self.data["price_near_upper_bb"] & (
-            self.data["near_r1"] | self.data["near_r2"]
-        )
-        self.data["bullish_exit"] = (self.data["close"] >= self.data["pivot"]) | (
-            self.data["close"] >= self.data["bb_top"]
-        )
-        self.data["bearish_exit"] = (self.data["close"] <= self.data["pivot"]) | (
-            self.data["close"] <= self.data["bb_bot"]
-        )
-
-        logger.debug(f"Initialized BBPivotPointsStrategy with params: {self.params}")
-        logger.info(
-            f"BBPivotPointsStrategy initialized with bb_period={self.params['bb_period']}, "
-            f"bb_dev={self.params['bb_dev']}, pivot_proximity={self.params['pivot_proximity']}"
-        )
+        logger.debug(f"Initialized RSISupertrendIntraday with params: {self.params}")
 
     def run(self):
-        self.last_signal = None  # Reset last_signal at the start of run
+        self.last_signal = None
         for idx in range(len(self.data)):
             if idx < self.warmup_period:
-                logger.debug(
-                    f"Skipping row {idx}: still in warmup period (need {self.warmup_period} rows)"
-                )
                 continue
 
             if not self.ready:
@@ -171,10 +101,9 @@ class BBPivotPointsStrategy:
                 continue
 
             # Check for invalid indicator values
-            if pd.isna(self.data.iloc[idx]["bb_mid"]) or pd.isna(
-                self.data.iloc[idx]["pivot"]
+            if pd.isna(self.data.iloc[idx]["rsi"]) or pd.isna(
+                self.data.iloc[idx]["supertrend"]
             ):
-                logger.debug(f"Invalid indicator values at row {idx}")
                 continue
 
             # Store indicator data for analysis
@@ -182,19 +111,16 @@ class BBPivotPointsStrategy:
                 {
                     "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
                     "close": self.data.iloc[idx]["close"],
-                    "bb_top": self.data.iloc[idx]["bb_top"],
-                    "bb_mid": self.data.iloc[idx]["bb_mid"],
-                    "bb_bot": self.data.iloc[idx]["bb_bot"],
-                    "pivot": self.data.iloc[idx]["pivot"],
-                    "s1": self.data.iloc[idx]["s1"],
-                    "s2": self.data.iloc[idx]["s2"],
-                    "r1": self.data.iloc[idx]["r1"],
-                    "r2": self.data.iloc[idx]["r2"],
+                    "rsi": self.data.iloc[idx]["rsi"],
+                    "supertrend": self.data.iloc[idx]["supertrend"],
+                    "bullish_entry": self.data.iloc[idx]["bullish_entry"],
+                    "bearish_entry": self.data.iloc[idx]["bearish_entry"],
                 }
             )
 
-            # Check for trading signals
+            # Trading logic
             if not self.open_positions:
+                # Long Entry
                 if self.data.iloc[idx]["bullish_entry"]:
                     self.order = {
                         "ref": str(uuid4()),
@@ -206,13 +132,13 @@ class BBPivotPointsStrategy:
                         "commission": abs(self.data.iloc[idx]["close"] * 100 * 0.001),
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
+                    self.entry_price = self.data.iloc[idx]["close"]
                     self.last_signal = "buy"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Lower BB: {self.data.iloc[idx]['price_near_lower_bb']} | "
-                        f"Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f}"
                     )
+                # Short Entry
                 elif self.data.iloc[idx]["bearish_entry"]:
                     self.order = {
                         "ref": str(uuid4()),
@@ -224,42 +150,43 @@ class BBPivotPointsStrategy:
                         "commission": abs(self.data.iloc[idx]["close"] * 100 * 0.001),
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
+                    self.entry_price = self.data.iloc[idx]["close"]
                     self.last_signal = "sell"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Upper BB: {self.data.iloc[idx]['price_near_upper_bb']} | "
-                        f"Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f}"
                     )
-                else:
-                    self.last_signal = None
             else:
-                if (
-                    self.open_positions[-1]["direction"] == "long"
-                    and self.data.iloc[idx]["bullish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bullish exit condition", "sell", "exit_long"
+                if self.open_positions[-1]["direction"] == "long":
+                    target_price = self.entry_price * (
+                        1 + self.params["target_percent"] / 100
                     )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Upper BB: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['bb_top']}"
+                    if (
+                        self.data.iloc[idx]["close"] >= target_price
+                        or self.data.iloc[idx]["rsi"] > self.params["rsi_overbought"]
+                    ):
+                        reason = (
+                            "Target hit"
+                            if self.data.iloc[idx]["close"] >= target_price
+                            else "RSI overbought"
+                        )
+                        self._close_position(idx, reason, "sell", "exit_long")
+                        self.last_signal = None
+                elif self.open_positions[-1]["direction"] == "short":
+                    target_price = self.entry_price * (
+                        1 - self.params["target_percent"] / 100
                     )
-                elif (
-                    self.open_positions[-1]["direction"] == "short"
-                    and self.data.iloc[idx]["bearish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bearish exit condition", "buy", "exit_short"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Lower BB: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['bb_bot']}"
-                    )
+                    if (
+                        self.data.iloc[idx]["close"] <= target_price
+                        or self.data.iloc[idx]["rsi"] < self.params["rsi_oversold"]
+                    ):
+                        reason = (
+                            "Target hit"
+                            if self.data.iloc[idx]["close"] <= target_price
+                            else "RSI oversold"
+                        )
+                        self._close_position(idx, reason, "buy", "exit_short")
+                        self.last_signal = None
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -376,6 +303,7 @@ class BBPivotPointsStrategy:
 
         self.order = None
         self.order_type = None
+        self.entry_price = None  # Reset entry price
 
     def get_completed_trades(self):
         return self.completed_trades.copy()
@@ -383,19 +311,21 @@ class BBPivotPointsStrategy:
     @classmethod
     def get_param_space(cls, trial):
         params = {
-            "bb_period": trial.suggest_int("bb_period", 10, 30),
-            "bb_dev": trial.suggest_float("bb_dev", 1.5, 2.5, step=0.1),
-            "pivot_proximity": trial.suggest_float(
-                "pivot_proximity", 0.3, 1.0, step=0.1
+            "rsi_period": trial.suggest_int("rsi_period", 10, 20),
+            "supertrend_period": trial.suggest_int("supertrend_period", 7, 14),
+            "supertrend_mult": trial.suggest_float(
+                "supertrend_mult", 2.0, 4.0, step=0.5
             ),
+            "target_percent": trial.suggest_float("target_percent", 1.5, 3.0, step=0.5),
         }
         return params
 
     @classmethod
     def get_min_data_points(cls, params):
         try:
-            bb_period = params.get("bb_period", 20)
-            return bb_period + 5
+            rsi_period = params.get("rsi_period", 14)
+            supertrend_period = params.get("supertrend_period", 10)
+            return max(rsi_period, supertrend_period) + 5
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
             return 25

@@ -11,23 +11,99 @@ logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
 
 
-class BBPivotPointsStrategy:
+class Supertrend:
+    def __init__(self, period=10, multiplier=3.0):
+        self.period = period
+        self.multiplier = multiplier
+        self.atr = None
+        self.supertrend = []
+        self.last_supertrend = 0
+
+    def update(self, high, low, close):
+        if len(close) < self.period:
+            return self.last_supertrend
+
+        # Calculate ATR
+        if self.atr is None:
+            self.atr = ta.atr(high, low, close, length=self.period)
+
+        if len(close) < self.period or pd.isna(self.atr.iloc[-1]):
+            return self.last_supertrend
+
+        current_atr = self.atr.iloc[-1]
+        current_high = high.iloc[-1]
+        current_low = low.iloc[-1]
+        current_close = close.iloc[-1]
+
+        # Basic bands
+        mid = (current_high + current_low) / 2
+        upper_band = mid + self.multiplier * current_atr
+        lower_band = mid - self.multiplier * current_atr
+
+        # Adjust bands based on previous Supertrend
+        if self.last_supertrend > close.iloc[-2] if len(close) > 1 else close.iloc[-1]:
+            upper_band = min(
+                upper_band, self.supertrend[-1] if self.supertrend else upper_band
+            )
+        else:
+            lower_band = max(
+                lower_band, self.supertrend[-1] if self.supertrend else lower_band
+            )
+
+        # Determine Supertrend value
+        if self.last_supertrend > close.iloc[-2] if len(close) > 1 else close.iloc[-1]:
+            supertrend_val = lower_band if current_close < lower_band else upper_band
+        else:
+            supertrend_val = upper_band if current_close > upper_band else lower_band
+
+        self.supertrend.append(supertrend_val)
+        self.last_supertrend = supertrend_val
+        return supertrend_val
+
+
+class ChaikinMoneyFlow:
+    def __init__(self, period=20):
+        self.period = period
+
+    def update(self, high, low, close, volume):
+        if len(close) < self.period:
+            return 0
+
+        # Calculate MFM and CMF
+        mfm = ((close - low) - (high - close)) / (high - low).replace(0, 1e-5)
+        mfv = mfm * volume
+        cmf = mfv.rolling(self.period).sum() / volume.rolling(
+            self.period
+        ).sum().replace(0, 1e-5)
+        return cmf.iloc[-1]
+
+
+class SupertrendCCICMF:
     """
-    Bollinger Bands + Pivot Points Strategy
+    Supertrend + CCI + CMF Strategy
     (Documentation remains unchanged)
     """
 
     params = {
-        "bb_period": 20,
-        "bb_dev": 2.0,
-        "pivot_proximity": 0.5,
+        "supertrend_period": 10,
+        "supertrend_multiplier": 3.0,
+        "cci_period": 20,
+        "cmf_period": 20,
+        "cci_threshold": 100,
         "verbose": False,
     }
 
     optimization_params = {
-        "bb_period": {"type": "int", "low": 10, "high": 30, "step": 1},
-        "bb_dev": {"type": "float", "low": 1.5, "high": 2.5, "step": 0.1},
-        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0, "step": 0.1},
+        "supertrend_period": {"type": "int", "low": 7, "high": 15, "step": 1},
+        "supertrend_multiplier": {
+            "type": "float",
+            "low": 2.0,
+            "high": 4.0,
+            "step": 0.5,
+        },
+        "cci_period": {"type": "int", "low": 10, "high": 30, "step": 1},
+        "cmf_period": {"type": "int", "low": 10, "high": 30, "step": 1},
+        "cci_threshold": {"type": "int", "low": 80, "high": 120, "step": 10},
     }
 
     def __init__(self, data, tickers=None, **kwargs):
@@ -36,115 +112,42 @@ class BBPivotPointsStrategy:
         self.params.update(kwargs)
         self.order = None
         self.order_type = None
-        self.last_signal = None  # Initialize last_signal
+        self.last_signal = None
         self.ready = False
         self.trade_count = 0
-        self.warmup_period = self.params["bb_period"] + 5
+        self.warmup_period = (
+            max(
+                self.params["supertrend_period"],
+                self.params["cci_period"],
+                self.params["cmf_period"],
+            )
+            + 2
+        )
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
 
-        # Initialize indicators using pandas_ta
-        bb = ta.bbands(
+        # Initialize indicators
+        self.supertrend_ind = Supertrend(
+            period=self.params["supertrend_period"],
+            multiplier=self.params["supertrend_multiplier"],
+        )
+        self.cmf_ind = ChaikinMoneyFlow(period=self.params["cmf_period"])
+
+        # Calculate CCI
+        self.data["cci"] = ta.cci(
+            self.data["high"],
+            self.data["low"],
             self.data["close"],
-            length=self.params["bb_period"],
-            std=self.params["bb_dev"],
-        )
-        self.data["bb_top"] = bb[
-            f"BBU_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_mid"] = bb[
-            f"BBM_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_bot"] = bb[
-            f"BBL_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-
-        # Calculate pivot points
-        self.data["prev_high"] = self.data["high"].shift(1)
-        self.data["prev_low"] = self.data["low"].shift(1)
-        self.data["prev_close"] = self.data["close"].shift(1)
-        self.data["pivot"] = (
-            self.data["prev_high"] + self.data["prev_low"] + self.data["prev_close"]
-        ) / 3
-        self.data["r1"] = (2 * self.data["pivot"]) - self.data["prev_low"]
-        self.data["s1"] = (2 * self.data["pivot"]) - self.data["prev_high"]
-        self.data["r2"] = self.data["pivot"] + (
-            self.data["prev_high"] - self.data["prev_low"]
-        )
-        self.data["s2"] = self.data["pivot"] - (
-            self.data["prev_high"] - self.data["prev_low"]
+            length=self.params["cci_period"],
         )
 
-        # Define conditions
-        self.data["price_near_lower_bb"] = self.data["close"] <= self.data["bb_bot"] * (
-            1 + self.params["pivot_proximity"] / 100
-        )
-        self.data["price_near_upper_bb"] = self.data["close"] >= self.data["bb_top"] * (
-            1 - self.params["pivot_proximity"] / 100
-        )
-        self.data["near_s1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s1"]) / x["s1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_s2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s2"]) / x["s2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r1"]) / x["r1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r2"]) / x["r2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["bullish_entry"] = self.data["price_near_lower_bb"] & (
-            self.data["near_s1"] | self.data["near_s2"]
-        )
-        self.data["bearish_entry"] = self.data["price_near_upper_bb"] & (
-            self.data["near_r1"] | self.data["near_r2"]
-        )
-        self.data["bullish_exit"] = (self.data["close"] >= self.data["pivot"]) | (
-            self.data["close"] >= self.data["bb_top"]
-        )
-        self.data["bearish_exit"] = (self.data["close"] <= self.data["pivot"]) | (
-            self.data["close"] <= self.data["bb_bot"]
-        )
-
-        logger.debug(f"Initialized BBPivotPointsStrategy with params: {self.params}")
-        logger.info(
-            f"BBPivotPointsStrategy initialized with bb_period={self.params['bb_period']}, "
-            f"bb_dev={self.params['bb_dev']}, pivot_proximity={self.params['pivot_proximity']}"
-        )
+        logger.debug(f"Initialized SupertrendCCICMF with params: {self.params}")
 
     def run(self):
-        self.last_signal = None  # Reset last_signal at the start of run
+        self.last_signal = None
         for idx in range(len(self.data)):
             if idx < self.warmup_period:
-                logger.debug(
-                    f"Skipping row {idx}: still in warmup period (need {self.warmup_period} rows)"
-                )
                 continue
 
             if not self.ready:
@@ -170,11 +173,25 @@ class BBPivotPointsStrategy:
                 logger.debug(f"Order pending at row {idx}")
                 continue
 
+            # Update indicators
+            supertrend_val = self.supertrend_ind.update(
+                self.data["high"].iloc[: idx + 1],
+                self.data["low"].iloc[: idx + 1],
+                self.data["close"].iloc[: idx + 1],
+            )
+            cmf_val = self.cmf_ind.update(
+                self.data["high"].iloc[: idx + 1],
+                self.data["low"].iloc[: idx + 1],
+                self.data["close"].iloc[: idx + 1],
+                self.data["volume"].iloc[: idx + 1],
+            )
+
             # Check for invalid indicator values
-            if pd.isna(self.data.iloc[idx]["bb_mid"]) or pd.isna(
-                self.data.iloc[idx]["pivot"]
+            if (
+                pd.isna(supertrend_val)
+                or pd.isna(self.data.iloc[idx]["cci"])
+                or pd.isna(cmf_val)
             ):
-                logger.debug(f"Invalid indicator values at row {idx}")
                 continue
 
             # Store indicator data for analysis
@@ -182,20 +199,24 @@ class BBPivotPointsStrategy:
                 {
                     "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
                     "close": self.data.iloc[idx]["close"],
-                    "bb_top": self.data.iloc[idx]["bb_top"],
-                    "bb_mid": self.data.iloc[idx]["bb_mid"],
-                    "bb_bot": self.data.iloc[idx]["bb_bot"],
-                    "pivot": self.data.iloc[idx]["pivot"],
-                    "s1": self.data.iloc[idx]["s1"],
-                    "s2": self.data.iloc[idx]["s2"],
-                    "r1": self.data.iloc[idx]["r1"],
-                    "r2": self.data.iloc[idx]["r2"],
+                    "supertrend": supertrend_val,
+                    "cci": self.data.iloc[idx]["cci"],
+                    "cmf": cmf_val,
                 }
             )
 
-            # Check for trading signals
+            # Determine trend direction
+            supertrend_bullish = self.data.iloc[idx]["close"] > supertrend_val
+            supertrend_bearish = self.data.iloc[idx]["close"] < supertrend_val
+
+            # Trading logic
             if not self.open_positions:
-                if self.data.iloc[idx]["bullish_entry"]:
+                # Long Entry
+                if (
+                    supertrend_bullish
+                    and self.data.iloc[idx]["cci"] > self.params["cci_threshold"]
+                    and cmf_val > 0
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
@@ -209,11 +230,16 @@ class BBPivotPointsStrategy:
                     self.last_signal = "buy"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Lower BB: {self.data.iloc[idx]['price_near_lower_bb']} | "
-                        f"Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                        f"BUY SIGNAL (Supertrend + CCI + CMF) | Time: {bar_time_ist} | "
+                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                        f"Supertrend: {supertrend_val:.2f}"
                     )
-                elif self.data.iloc[idx]["bearish_entry"]:
+                # Short Entry
+                elif (
+                    supertrend_bearish
+                    and self.data.iloc[idx]["cci"] < -self.params["cci_threshold"]
+                    and cmf_val < 0
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
@@ -227,39 +253,45 @@ class BBPivotPointsStrategy:
                     self.last_signal = "sell"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Upper BB: {self.data.iloc[idx]['price_near_upper_bb']} | "
-                        f"Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                        f"SELL SIGNAL (Supertrend + CCI + CMF) | Time: {bar_time_ist} | "
+                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                        f"Supertrend: {supertrend_val:.2f}"
                     )
-                else:
-                    self.last_signal = None
             else:
-                if (
-                    self.open_positions[-1]["direction"] == "long"
-                    and self.data.iloc[idx]["bullish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bullish exit condition", "sell", "exit_long"
+                if self.open_positions[-1]["direction"] == "long":
+                    # Long Exit
+                    reverse_count = sum(
+                        [
+                            not supertrend_bullish,
+                            self.data.iloc[idx]["cci"] < 0,
+                            cmf_val < 0,
+                        ]
                     )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Upper BB: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['bb_top']}"
+                    if reverse_count >= 2:
+                        self._close_position(
+                            idx,
+                            f"{reverse_count} indicators reversed",
+                            "sell",
+                            "exit_long",
+                        )
+                        self.last_signal = None
+                elif self.open_positions[-1]["direction"] == "short":
+                    # Short Exit
+                    reverse_count = sum(
+                        [
+                            not supertrend_bearish,
+                            self.data.iloc[idx]["cci"] > 0,
+                            cmf_val > 0,
+                        ]
                     )
-                elif (
-                    self.open_positions[-1]["direction"] == "short"
-                    and self.data.iloc[idx]["bearish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bearish exit condition", "buy", "exit_short"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Lower BB: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['bb_bot']}"
-                    )
+                    if reverse_count >= 2:
+                        self._close_position(
+                            idx,
+                            f"{reverse_count} indicators reversed",
+                            "buy",
+                            "exit_short",
+                        )
+                        self.last_signal = None
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -383,19 +415,23 @@ class BBPivotPointsStrategy:
     @classmethod
     def get_param_space(cls, trial):
         params = {
-            "bb_period": trial.suggest_int("bb_period", 10, 30),
-            "bb_dev": trial.suggest_float("bb_dev", 1.5, 2.5, step=0.1),
-            "pivot_proximity": trial.suggest_float(
-                "pivot_proximity", 0.3, 1.0, step=0.1
+            "supertrend_period": trial.suggest_int("supertrend_period", 7, 15),
+            "supertrend_multiplier": trial.suggest_float(
+                "supertrend_multiplier", 2.0, 4.0, step=0.5
             ),
+            "cci_period": trial.suggest_int("cci_period", 10, 30),
+            "cmf_period": trial.suggest_int("cmf_period", 10, 30),
+            "cci_threshold": trial.suggest_int("cci_threshold", 80, 120, step=10),
         }
         return params
 
     @classmethod
     def get_min_data_points(cls, params):
         try:
-            bb_period = params.get("bb_period", 20)
-            return bb_period + 5
+            supertrend_period = params.get("supertrend_period", 10)
+            cci_period = params.get("cci_period", 20)
+            cmf_period = params.get("cmf_period", 20)
+            return max(supertrend_period, cci_period, cmf_period) + 2
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
-            return 25
+            return 30

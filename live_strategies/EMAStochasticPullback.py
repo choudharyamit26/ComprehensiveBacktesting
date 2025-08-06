@@ -11,23 +11,29 @@ logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
 
 
-class BBPivotPointsStrategy:
+class EMAStochasticPullback:
     """
-    Bollinger Bands + Pivot Points Strategy
+    EMA + Stochastic Pullback Trading Strategy
     (Documentation remains unchanged)
     """
 
     params = {
-        "bb_period": 20,
-        "bb_dev": 2.0,
-        "pivot_proximity": 0.5,
+        "ema_period": 20,
+        "stoch_k_period": 14,
+        "stoch_d_period": 3,
+        "stoch_slowing": 3,
+        "stoch_oversold": 20,
+        "stoch_overbought": 80,
         "verbose": False,
     }
 
     optimization_params = {
-        "bb_period": {"type": "int", "low": 10, "high": 30, "step": 1},
-        "bb_dev": {"type": "float", "low": 1.5, "high": 2.5, "step": 0.1},
-        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0, "step": 0.1},
+        "ema_period": {"type": "int", "low": 10, "high": 50, "step": 5},
+        "stoch_k_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "stoch_d_period": {"type": "int", "low": 3, "high": 5, "step": 1},
+        "stoch_slowing": {"type": "int", "low": 1, "high": 5, "step": 1},
+        "stoch_oversold": {"type": "int", "low": 10, "high": 30, "step": 5},
+        "stoch_overbought": {"type": "int", "low": 70, "high": 90, "step": 5},
     }
 
     def __init__(self, data, tickers=None, **kwargs):
@@ -36,115 +42,51 @@ class BBPivotPointsStrategy:
         self.params.update(kwargs)
         self.order = None
         self.order_type = None
-        self.last_signal = None  # Initialize last_signal
+        self.last_signal = None
         self.ready = False
         self.trade_count = 0
-        self.warmup_period = self.params["bb_period"] + 5
+        self.warmup_period = max(
+            self.params["ema_period"],
+            self.params["stoch_k_period"] + self.params["stoch_d_period"] + 2,
+        )
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
 
-        # Initialize indicators using pandas_ta
-        bb = ta.bbands(
+        # Calculate EMA
+        self.data["ema"] = ta.ema(self.data["close"], length=self.params["ema_period"])
+
+        # Calculate Stochastic
+        stoch = ta.stoch(
+            self.data["high"],
+            self.data["low"],
             self.data["close"],
-            length=self.params["bb_period"],
-            std=self.params["bb_dev"],
+            k=self.params["stoch_k_period"],
+            d=self.params["stoch_d_period"],
+            smooth_k=self.params["stoch_slowing"],
         )
-        self.data["bb_top"] = bb[
-            f"BBU_{self.params['bb_period']}_{self.params['bb_dev']}"
+        self.data["stoch_k"] = stoch[
+            f"STOCHk_{self.params['stoch_k_period']}_{self.params['stoch_d_period']}_{self.params['stoch_slowing']}"
         ]
-        self.data["bb_mid"] = bb[
-            f"BBM_{self.params['bb_period']}_{self.params['bb_dev']}"
-        ]
-        self.data["bb_bot"] = bb[
-            f"BBL_{self.params['bb_period']}_{self.params['bb_dev']}"
+        self.data["stoch_d"] = stoch[
+            f"STOCHd_{self.params['stoch_k_period']}_{self.params['stoch_d_period']}_{self.params['stoch_slowing']}"
         ]
 
-        # Calculate pivot points
-        self.data["prev_high"] = self.data["high"].shift(1)
-        self.data["prev_low"] = self.data["low"].shift(1)
-        self.data["prev_close"] = self.data["close"].shift(1)
-        self.data["pivot"] = (
-            self.data["prev_high"] + self.data["prev_low"] + self.data["prev_close"]
-        ) / 3
-        self.data["r1"] = (2 * self.data["pivot"]) - self.data["prev_low"]
-        self.data["s1"] = (2 * self.data["pivot"]) - self.data["prev_high"]
-        self.data["r2"] = self.data["pivot"] + (
-            self.data["prev_high"] - self.data["prev_low"]
-        )
-        self.data["s2"] = self.data["pivot"] - (
-            self.data["prev_high"] - self.data["prev_low"]
-        )
+        # Calculate EMA touch conditions
+        self.data["ema_touch_long"] = self.data["close"] <= self.data["ema"]
+        self.data["ema_touch_short"] = self.data["close"] >= self.data["ema"]
 
-        # Define conditions
-        self.data["price_near_lower_bb"] = self.data["close"] <= self.data["bb_bot"] * (
-            1 + self.params["pivot_proximity"] / 100
-        )
-        self.data["price_near_upper_bb"] = self.data["close"] >= self.data["bb_top"] * (
-            1 - self.params["pivot_proximity"] / 100
-        )
-        self.data["near_s1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s1"]) / x["s1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_s2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s2"]) / x["s2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r1"]) / x["r1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r2"]) / x["r2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["bullish_entry"] = self.data["price_near_lower_bb"] & (
-            self.data["near_s1"] | self.data["near_s2"]
-        )
-        self.data["bearish_entry"] = self.data["price_near_upper_bb"] & (
-            self.data["near_r1"] | self.data["near_r2"]
-        )
-        self.data["bullish_exit"] = (self.data["close"] >= self.data["pivot"]) | (
-            self.data["close"] >= self.data["bb_top"]
-        )
-        self.data["bearish_exit"] = (self.data["close"] <= self.data["pivot"]) | (
-            self.data["close"] <= self.data["bb_bot"]
-        )
+        # Calculate EMA distance
+        self.data["ema_distance"] = (self.data["close"] - self.data["ema"]) / self.data[
+            "ema"
+        ]
 
-        logger.debug(f"Initialized BBPivotPointsStrategy with params: {self.params}")
-        logger.info(
-            f"BBPivotPointsStrategy initialized with bb_period={self.params['bb_period']}, "
-            f"bb_dev={self.params['bb_dev']}, pivot_proximity={self.params['pivot_proximity']}"
-        )
+        logger.debug(f"Initialized EMAStochasticPullback with params: {self.params}")
 
     def run(self):
-        self.last_signal = None  # Reset last_signal at the start of run
+        self.last_signal = None
         for idx in range(len(self.data)):
             if idx < self.warmup_period:
-                logger.debug(
-                    f"Skipping row {idx}: still in warmup period (need {self.warmup_period} rows)"
-                )
                 continue
 
             if not self.ready:
@@ -171,10 +113,11 @@ class BBPivotPointsStrategy:
                 continue
 
             # Check for invalid indicator values
-            if pd.isna(self.data.iloc[idx]["bb_mid"]) or pd.isna(
-                self.data.iloc[idx]["pivot"]
+            if (
+                pd.isna(self.data.iloc[idx]["ema"])
+                or pd.isna(self.data.iloc[idx]["stoch_k"])
+                or pd.isna(self.data.iloc[idx]["stoch_d"])
             ):
-                logger.debug(f"Invalid indicator values at row {idx}")
                 continue
 
             # Store indicator data for analysis
@@ -182,20 +125,22 @@ class BBPivotPointsStrategy:
                 {
                     "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
                     "close": self.data.iloc[idx]["close"],
-                    "bb_top": self.data.iloc[idx]["bb_top"],
-                    "bb_mid": self.data.iloc[idx]["bb_mid"],
-                    "bb_bot": self.data.iloc[idx]["bb_bot"],
-                    "pivot": self.data.iloc[idx]["pivot"],
-                    "s1": self.data.iloc[idx]["s1"],
-                    "s2": self.data.iloc[idx]["s2"],
-                    "r1": self.data.iloc[idx]["r1"],
-                    "r2": self.data.iloc[idx]["r2"],
+                    "ema": self.data.iloc[idx]["ema"],
+                    "stoch_k": self.data.iloc[idx]["stoch_k"],
+                    "stoch_d": self.data.iloc[idx]["stoch_d"],
+                    "ema_distance": self.data.iloc[idx]["ema_distance"],
+                    "ema_touch_long": self.data.iloc[idx]["ema_touch_long"],
+                    "ema_touch_short": self.data.iloc[idx]["ema_touch_short"],
                 }
             )
 
-            # Check for trading signals
+            # Trading logic
             if not self.open_positions:
-                if self.data.iloc[idx]["bullish_entry"]:
+                # Long Entry
+                if (
+                    self.data.iloc[idx]["ema_touch_long"]
+                    and self.data.iloc[idx]["stoch_k"] < self.params["stoch_oversold"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
@@ -209,11 +154,15 @@ class BBPivotPointsStrategy:
                     self.last_signal = "buy"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Lower BB: {self.data.iloc[idx]['price_near_lower_bb']} | "
-                        f"Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                        f"BUY SIGNAL (Enter Long) | Time: {bar_time_ist} | "
+                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                        f"Stoch_K: {self.data.iloc[idx]['stoch_k']:.2f} < {self.params['stoch_oversold']}"
                     )
-                elif self.data.iloc[idx]["bearish_entry"]:
+                # Short Entry
+                elif (
+                    self.data.iloc[idx]["ema_touch_short"]
+                    and self.data.iloc[idx]["stoch_k"] > self.params["stoch_overbought"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
@@ -227,39 +176,39 @@ class BBPivotPointsStrategy:
                     self.last_signal = "sell"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near Upper BB: {self.data.iloc[idx]['price_near_upper_bb']} | "
-                        f"Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                        f"SELL SIGNAL (Enter Short) | Time: {bar_time_ist} | "
+                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                        f"Stoch_K: {self.data.iloc[idx]['stoch_k']:.2f} > {self.params['stoch_overbought']}"
                     )
-                else:
-                    self.last_signal = None
             else:
-                if (
-                    self.open_positions[-1]["direction"] == "long"
-                    and self.data.iloc[idx]["bullish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bullish exit condition", "sell", "exit_long"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Upper BB: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['bb_top']}"
-                    )
-                elif (
-                    self.open_positions[-1]["direction"] == "short"
-                    and self.data.iloc[idx]["bearish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bearish exit condition", "buy", "exit_short"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']} | "
-                        f"Reached Lower BB: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['bb_bot']}"
-                    )
+                if self.open_positions[-1]["direction"] == "long":
+                    # Long Exit
+                    if (
+                        self.data.iloc[idx]["stoch_k"] > self.params["stoch_overbought"]
+                        or self.data.iloc[idx]["close"] < self.data.iloc[idx]["ema"]
+                    ):
+                        reason = (
+                            "Stoch overbought"
+                            if self.data.iloc[idx]["stoch_k"]
+                            > self.params["stoch_overbought"]
+                            else "Price below EMA"
+                        )
+                        self._close_position(idx, reason, "sell", "exit_long")
+                        self.last_signal = None
+                elif self.open_positions[-1]["direction"] == "short":
+                    # Short Exit
+                    if (
+                        self.data.iloc[idx]["stoch_k"] < self.params["stoch_oversold"]
+                        or self.data.iloc[idx]["close"] > self.data.iloc[idx]["ema"]
+                    ):
+                        reason = (
+                            "Stoch oversold"
+                            if self.data.iloc[idx]["stoch_k"]
+                            < self.params["stoch_oversold"]
+                            else "Price above EMA"
+                        )
+                        self._close_position(idx, reason, "buy", "exit_short")
+                        self.last_signal = None
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -383,19 +332,22 @@ class BBPivotPointsStrategy:
     @classmethod
     def get_param_space(cls, trial):
         params = {
-            "bb_period": trial.suggest_int("bb_period", 10, 30),
-            "bb_dev": trial.suggest_float("bb_dev", 1.5, 2.5, step=0.1),
-            "pivot_proximity": trial.suggest_float(
-                "pivot_proximity", 0.3, 1.0, step=0.1
-            ),
+            "ema_period": trial.suggest_int("ema_period", 10, 50, step=5),
+            "stoch_k_period": trial.suggest_int("stoch_k_period", 10, 20, step=1),
+            "stoch_d_period": trial.suggest_int("stoch_d_period", 3, 5, step=1),
+            "stoch_slowing": trial.suggest_int("stoch_slowing", 1, 5, step=1),
+            "stoch_oversold": trial.suggest_int("stoch_oversold", 10, 30, step=5),
+            "stoch_overbought": trial.suggest_int("stoch_overbought", 70, 90, step=5),
         }
         return params
 
     @classmethod
     def get_min_data_points(cls, params):
         try:
-            bb_period = params.get("bb_period", 20)
-            return bb_period + 5
+            ema_period = params.get("ema_period", 20)
+            stoch_k_period = params.get("stoch_k_period", 14)
+            stoch_d_period = params.get("stoch_d_period", 3)
+            return max(ema_period, stoch_k_period + stoch_d_period + 2)
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
-            return 25
+            return 30

@@ -315,7 +315,7 @@ class TrendlineWilliams:
                         f"Trendline Resistance: {resistance_trendline:.2f}"
                     )
 
-        return last_signal  # Return the last signal generated
+        return last_signal
 
     def _place_order(self, idx, action, order_type, size=1, commission=0.001):
         """
