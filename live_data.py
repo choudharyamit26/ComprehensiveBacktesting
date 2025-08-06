@@ -258,12 +258,8 @@ class CandleAggregator:
             candle_start = self._get_candle_start_time(tick.timestamp)
             # Initialize or update current candle
             if security_id not in self.current_candles:
-                logger.info(f"FROM LINE 250: {security_id} {self.current_candles}")
                 self.current_candles[security_id] = self._create_new_candle(
                     tick, candle_start
-                )
-                logger.info(
-                    f"FROM LINE 252 {security_id} {self.current_candles[security_id]}"
                 )
             else:
                 current_candle = self.current_candles[security_id]
@@ -333,9 +329,6 @@ class CandleAggregator:
     def get_completed_candles_df(self, security_id: int) -> pd.DataFrame:
         """Get completed candles as DataFrame."""
         with self.lock:
-            logger.info(
-                f"FROM LINE 306:{security_id}, {self.completed_candles}, {self.completed_candles[security_id]}"
-            )
             if (
                 security_id not in self.completed_candles
                 or not self.completed_candles[security_id]

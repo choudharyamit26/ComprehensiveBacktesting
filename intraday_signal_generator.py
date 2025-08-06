@@ -1,6 +1,5 @@
 import asyncio
 import pandas as pd
-import backtrader as bt
 import os
 import logging
 from datetime import date, datetime, timedelta, time
@@ -12,7 +11,7 @@ import aiohttp
 import sys
 import traceback
 from functools import lru_cache
-from collections import defaultdict, deque
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 from cachetools import TTLCache
@@ -27,9 +26,95 @@ from live_data import (
 
 # Import registry functions
 from comprehensive_backtesting.registry import get_strategy
+from live_strategies.trendline_williams import TrendlineWilliams
 
 # Initialize Dhan client
 dhan = init_dhan_client()
+
+IST = pytz.timezone("Asia/Kolkata")
+
+
+class DateTimeFormatter(logging.Formatter):
+    """Custom formatter with IST datetime"""
+
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=IST)
+        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " IST"
+
+
+# Setup logging
+formatter = DateTimeFormatter(
+    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logging.getLogger().handlers.clear()
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+file_handler = logging.FileHandler("trading_system.log", mode="a")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(console_handler)
+root_logger.addHandler(file_handler)
+logger = logging.getLogger("quant_trader")
+logger.setLevel(logging.INFO)
+trade_logger = logging.getLogger("trade_execution")
+trade_logger.setLevel(logging.INFO)
+trade_file_handler = logging.FileHandler("trades.log", mode="a")
+trade_file_handler.setFormatter(formatter)
+trade_logger.addHandler(trade_file_handler)
+trade_logger.propagate = False
+logger.info("Logging system initialized with IST timestamps")
+trade_logger.info("Trade logging system initialized")
+
+# Environment configuration
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1000000003")
+
+if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_ACCESS_TOKEN]):
+    logger.critical("Missing required environment variables")
+    raise EnvironmentError("Required environment variables not set")
+
+# Market configuration
+MARKET_OPEN_TIME = CONFIG["MARKET_OPEN"]
+MARKET_CLOSE_TIME = CONFIG["MARKET_CLOSE"]
+TRADING_END_TIME = time.fromisoformat(os.getenv("TRADING_END", "15:20:00"))
+FORCE_CLOSE_TIME = time.fromisoformat(os.getenv("FORCE_CLOSE", "15:15:00"))
+SQUARE_OFF_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
+
+# Trading configuration
+MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
+ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
+MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
+MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
+VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.012))
+API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 100))
+BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 500))
+RELATIVE_VOLUME_THRESHOLD = float(os.getenv("RELATIVE_VOLUME_THRESHOLD", 1.2))
+MIN_PRICE_THRESHOLD = float(os.getenv("MIN_PRICE_THRESHOLD", 50.0))
+MAX_PRICE_THRESHOLD = float(os.getenv("MAX_PRICE_THRESHOLD", 5000.0))
+# Add new environment variable
+QUOTE_API_RATE_LIMIT = int(os.getenv("QUOTE_API_RATE_LIMIT", 60))  # Default: 60/min
+
+# Initialize quote-specific rate limiter
+# Initialize thread pool
+dhan_lock = asyncio.Lock()
+thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dhan_worker")
+
+# Preload symbol map
+try:
+    nifty500_df = pd.read_csv("ind_nifty500list.csv")
+    TICKER_TO_ID_MAP = nifty500_df.set_index("ticker")["security_id"].to_dict()
+except Exception as e:
+    logger.error(f"Failed to load symbol map: {e}")
+    TICKER_TO_ID_MAP = {}
+
+# Initialize caches and managers
+HOLIDAY_CACHE = {}
+CANDLE_BUILDERS = {}
 
 
 class CacheManager:
@@ -49,7 +134,9 @@ class CacheManager:
         )
 
 
-# NEW: PositionManager class for active position management
+cache_manager = CacheManager(max_size=1000, ttl=3600)
+
+
 class PositionManager:
     def __init__(self):
         self.open_positions = {}
@@ -119,8 +206,18 @@ class PositionManager:
             try:
                 async with self.position_lock:
                     now = datetime.now(IST)
+                    security_ids = [
+                        pos["security_id"] for pos in self.open_positions.values()
+                    ]
+
+                    if not security_ids:
+                        await asyncio.sleep(60)
+                        continue
+
+                    quotes = await fetch_realtime_quote(security_ids)
+
                     for order_id, pos in list(self.open_positions.items()):
-                        quote = await fetch_realtime_quote(pos["security_id"])
+                        quote = quotes.get(pos["security_id"])
                         if not quote:
                             continue
                         current_price = quote["price"]
@@ -185,133 +282,6 @@ class PositionManager:
                 await asyncio.sleep(300)
 
 
-# NEW: BacktraderRunner for async execution
-class BacktraderRunner:
-    def __init__(self):
-        self.executor = ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="bt_runner"
-        )
-
-    async def run_strategy(
-        self, strategy_class, data: pd.DataFrame, params: Dict
-    ) -> Optional[str]:
-        try:
-
-            def run_cerebro():
-                cerebro = bt.Cerebro(stdstats=False, runonce=True, optdatas=True)
-                data_feed = bt.feeds.PandasData(
-                    dataname=data,
-                    datetime="datetime",
-                    fromdate=data.iloc[0]["datetime"],
-                    todate=data.iloc[-1]["datetime"],
-                )
-                cerebro.adddata(data_feed)
-                cerebro.addstrategy(
-                    OptimizedSignalGeneratorWrapper,
-                    strategy_class=strategy_class,
-                    **params,
-                )
-                results = cerebro.run()
-                return results[0].signal if results else None
-
-            loop = asyncio.get_event_loop()
-            signal = await loop.run_in_executor(self.executor, run_cerebro)
-            return signal
-        except Exception as e:
-            logger.error(f"Backtrader run failed: {e}")
-            return None
-
-    def shutdown(self):
-        self.executor.shutdown(wait=True)
-
-
-class DateTimeFormatter(logging.Formatter):
-    """Custom formatter with IST datetime"""
-
-    def formatTime(self, record, datefmt=None):
-        dt = datetime.fromtimestamp(record.created, tz=pytz.timezone("Asia/Kolkata"))
-        return dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3] + " IST"
-
-
-# Setup logging
-formatter = DateTimeFormatter(
-    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logging.getLogger().handlers.clear()
-console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.INFO)
-console_handler.setFormatter(formatter)
-file_handler = logging.FileHandler("trading_system.log", mode="a")
-file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(formatter)
-root_logger = logging.getLogger()
-root_logger.setLevel(logging.INFO)
-root_logger.addHandler(console_handler)
-root_logger.addHandler(file_handler)
-logger = logging.getLogger("quant_trader")
-logger.setLevel(logging.INFO)
-trade_logger = logging.getLogger("trade_execution")
-trade_logger.setLevel(logging.INFO)
-trade_file_handler = logging.FileHandler("trades.log", mode="a")
-trade_file_handler.setFormatter(formatter)
-trade_logger.addHandler(trade_file_handler)
-trade_logger.propagate = False
-logger.info("Logging system initialized with IST timestamps")
-trade_logger.info("Trade logging system initialized")
-
-# Environment configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DHAN_ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-DHAN_CLIENT_ID = os.getenv("DHAN_CLIENT_ID", "1000000003")
-
-if not all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DHAN_ACCESS_TOKEN]):
-    logger.critical("Missing required environment variables")
-    raise EnvironmentError("Required environment variables not set")
-
-# Market configuration
-MARKET_OPEN_TIME = CONFIG["MARKET_OPEN"]
-MARKET_CLOSE_TIME = CONFIG["MARKET_CLOSE"]
-TRADING_END_TIME = time.fromisoformat(os.getenv("TRADING_END", "15:20:00"))
-FORCE_CLOSE_TIME = time.fromisoformat(os.getenv("FORCE_CLOSE", "15:15:00"))
-SQUARE_OFF_TIME_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
-
-# Trading configuration
-MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
-WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", 6))
-MORNING_WINDOW_SIZE = int(os.getenv("MORNING_WINDOW_SIZE", 3))
-ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
-MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
-MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
-VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.012))
-LIQUIDITY_THRESHOLD = int(os.getenv("LIQUIDITY_THRESHOLD", 75000))
-API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 180))
-BID_ASK_THRESHOLD = int(os.getenv("BID_ASK_THRESHOLD", 500))
-RELATIVE_VOLUME_THRESHOLD = float(os.getenv("RELATIVE_VOLUME_THRESHOLD", 1.2))
-MIN_PRICE_THRESHOLD = float(os.getenv("MIN_PRICE_THRESHOLD", 50.0))
-MAX_PRICE_THRESHOLD = float(os.getenv("MAX_PRICE_THRESHOLD", 5000.0))
-
-# Initialize thread pool
-dhan_lock = asyncio.Lock()
-thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dhan_worker")
-
-# Preload symbol map
-try:
-    nifty500_df = pd.read_csv("ind_nifty500list.csv")
-    SYMBOL_MAP = nifty500_df.set_index("security_id")["ticker"].to_dict()
-    TICKER_TO_ID_MAP = nifty500_df.set_index("ticker")["security_id"].to_dict()
-except Exception as e:
-    logger.error(f"Failed to load symbol map: {e}")
-    SYMBOL_MAP = {}
-    TICKER_TO_ID_MAP = {}
-
-# Initialize caches and managers
-cache_manager = CacheManager(max_size=1000, ttl=3600)
-HOLIDAY_CACHE = {}
-CANDLE_BUILDERS = {}
-daily_pnl_tracker = {"realized": 0.0, "unrealized": 0.0, "last_updated": None}
-IST = pytz.timezone("Asia/Kolkata")
-backtrader_runner = BacktraderRunner()
 position_manager = PositionManager()
 
 
@@ -346,33 +316,29 @@ class OptimizedRateLimiter:
     def __init__(self, rate_limit: int):
         self.rate_limit = rate_limit
         self.tokens = rate_limit
-        self.last_refill = datetime.now()
+        self.last_refill = datetime.now(IST)
         self.lock = asyncio.Lock()
 
     async def acquire(self):
         async with self.lock:
-            now = datetime.now()
+            now = datetime.now(IST)
             elapsed = (now - self.last_refill).total_seconds()
-            if elapsed > 60:
-                self.tokens = self.rate_limit
-                self.last_refill = now
-            elif elapsed > 0:
-                tokens_to_add = int(elapsed * (self.rate_limit / 60))
+            if elapsed >= 1.0:
+                tokens_to_add = int(elapsed * (self.rate_limit / 60.0))
                 self.tokens = min(self.rate_limit, self.tokens + tokens_to_add)
-                if tokens_to_add > 0:
-                    self.last_refill = now
-
-            while self.tokens <= 0:
+                self.last_refill = now
+            while self.tokens < 1:
                 await asyncio.sleep(0.1)
-                elapsed = (datetime.now() - self.last_refill).total_seconds()
-                if elapsed > 60:
-                    self.tokens = self.rate_limit
-                    self.last_refill = datetime.now()
-
+                now = datetime.now(IST)
+                elapsed = (now - self.last_refill).total_seconds()
+                if elapsed >= 1.0:
+                    tokens_to_add = int(elapsed * (self.rate_limit / 60.0))
+                    self.tokens = min(self.rate_limit, self.tokens + tokens_to_add)
+                    self.last_refill = now
             self.tokens -= 1
 
 
-rate_limiter = OptimizedRateLimiter(API_RATE_LIMIT)
+rate_limiter = OptimizedRateLimiter(rate_limit=QUOTE_API_RATE_LIMIT)
 
 
 def is_high_volume_period() -> bool:
@@ -384,38 +350,16 @@ def is_high_volume_period() -> bool:
     return any(start <= now <= end for start, end in high_volume_periods)
 
 
-def get_volatility_threshold_for_time() -> float:
-    base_threshold = VOLATILITY_THRESHOLD
-    return base_threshold * 0.8 if is_high_volume_period() else base_threshold * 1.1
-
-
-def adjust_thresholds_for_regime(regime: str, base_threshold: float) -> float:
-    adjustments = {
-        "trending": 0.85,
-        "range_bound": 1.15,
-        "transitional": 1.0,
-        "unknown": 1.0,
-    }
-    return base_threshold * adjustments.get(regime, 1.0)
-
-
 def calculate_relative_volume(current_volume: float, avg_volume: float) -> float:
     return current_volume / avg_volume if avg_volume > 0 else 0.0
 
 
 class TelegramQueue:
     def __init__(self):
-        self.message_queue = None
+        self.message_queue = asyncio.Queue()
         self.is_running = False
-        self._initialized = False
-
-    async def _initialize(self):
-        if not self._initialized:
-            self.message_queue = asyncio.Queue()
-            self._initialized = True
 
     async def start(self):
-        await self._initialize()
         if not self.is_running:
             self.is_running = True
             asyncio.create_task(self._process_messages())
@@ -454,10 +398,7 @@ class TelegramQueue:
 
     def send_alert(self, message: str):
         try:
-            if self.message_queue is not None:
-                self.message_queue.put_nowait(message)
-            else:
-                logger.warning("Telegram queue not initialized, dropping message")
+            self.message_queue.put_nowait(message)
         except asyncio.QueueFull:
             logger.warning("Telegram queue full, dropping message")
 
@@ -466,32 +407,26 @@ telegram_queue = TelegramQueue()
 
 
 async def send_telegram_alert(message: str):
-    telegram_queue.send_alert(message)
+    await telegram_queue._send_message(message)
 
 
 class APIClient:
     def __init__(self):
         self.connector = None
-        self.timeout = None
+        self.timeout = aiohttp.ClientTimeout(total=10, connect=5)
         self.session = None
-        self._initialized = False
-
-    async def _initialize(self):
-        if not self._initialized:
-            self.connector = aiohttp.TCPConnector(
-                limit=100,
-                limit_per_host=20,
-                ttl_dns_cache=300,
-                use_dns_cache=True,
-                keepalive_timeout=30,
-                enable_cleanup_closed=True,
-            )
-            self.timeout = aiohttp.ClientTimeout(total=10, connect=5)
-            self._initialized = True
 
     async def get_session(self):
-        await self._initialize()
         if self.session is None or self.session.closed:
+            if self.connector is None:
+                self.connector = aiohttp.TCPConnector(
+                    limit=100,
+                    limit_per_host=20,
+                    ttl_dns_cache=300,
+                    use_dns_cache=True,
+                    keepalive_timeout=30,
+                    enable_cleanup_closed=True,
+                )
             self.session = aiohttp.ClientSession(
                 connector=self.connector,
                 timeout=self.timeout,
@@ -567,57 +502,6 @@ async def place_super_order(
     wait_exponential_multiplier=1000,
     wait_exponential_max=10000,
 )
-async def modify_super_order(order_id: str, leg_name: str, **params) -> Optional[Dict]:
-    try:
-        await rate_limiter.acquire()
-        url = f"https://api.dhan.co/v2/super/orders/{order_id}"
-        payload = {
-            "dhanClientId": DHAN_CLIENT_ID,
-            "orderId": order_id,
-            "legName": leg_name,
-        }
-        payload.update(params)
-        session = await api_client.get_session()
-        async with session.put(url, json=payload) as response:
-            if response.status == 200:
-                data = await response.json()
-                trade_logger.info(
-                    f"Order modified | {order_id} | {leg_name} | Params: {params}"
-                )
-                return data
-            else:
-                text = await response.text()
-                logger.error(f"Modify order failed: {text}")
-        return None
-    except Exception as e:
-        logger.error(f"Order modify exception: {str(e)}")
-        return None
-
-
-@retry(
-    stop_max_attempt_number=3,
-    wait_exponential_multiplier=1000,
-    wait_exponential_max=10000,
-)
-async def cancel_super_order(order_id: str, leg_name: str) -> Optional[Dict]:
-    try:
-        await rate_limiter.acquire()
-        url = f"https://api.dhan.co/v2/super/orders/{order_id}/{leg_name}"
-        session = await api_client.get_session()
-        async with session.delete(url) as response:
-            if response.status == 202:
-                data = await response.json()
-                trade_logger.info(f"Order canceled | {order_id} | {leg_name}")
-                return data
-            else:
-                text = await response.text()
-                logger.error(f"Cancel order failed: {text}")
-        return None
-    except Exception as e:
-        logger.error(f"Order cancel exception: {str(e)}")
-        return None
-
-
 async def place_market_order(
     security_id: int, transaction_type: str, quantity: int
 ) -> Optional[Dict]:
@@ -652,58 +536,68 @@ async def place_market_order(
         return None
 
 
-async def verify_order_execution(order_id: str) -> bool:
-    try:
+async def fetch_realtime_quote(security_ids: List[int]) -> Dict[int, Optional[Dict]]:
+    if not security_ids:
+        return {}
+
+    batch_size = 5  # Keep batch size small to avoid 429
+    results = {}
+
+    for i in range(0, len(security_ids), batch_size):
+        batch = security_ids[i : i + batch_size]
+        # Acquire from quote-specific rate limiter
         await rate_limiter.acquire()
-        url = f"https://api.dhan.co/v2/orders/{order_id}"
-        session = await api_client.get_session()
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                return data.get("status") == "EXECUTED"
-        return False
-    except Exception:
-        return False
+        batch_results = await _fetch_quote_batch(batch)
+        results.update(batch_results)
+
+    return results
 
 
-async def fetch_and_store_market_depth(security_id: int) -> bool:
+async def _fetch_quote_batch(security_ids: List[int]) -> Dict[int, Optional[Dict]]:
+    import time
+
+    time.sleep(2)
     try:
-        await rate_limiter.acquire()
-        url = "https://api.dhan.co/v2/marketDepth"
-        params = {"securityId": str(security_id), "exchangeSegment": "NSE_EQ"}
-        session = await api_client.get_session()
-        async with session.get(url, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get("data") and "depth" in data["data"]:
-                    depth = data["data"]["depth"]
-                    timestamp = datetime.now()
-                    buy_levels = depth.get("buy", [])
-                    sell_levels = depth.get("sell", [])
-                    bid_qty = buy_levels[0]["quantity"] if buy_levels else 0
-                    ask_qty = sell_levels[0]["quantity"] if sell_levels else 0
-                    bid_depth = sum(level["quantity"] for level in buy_levels[:5])
-                    ask_depth = sum(level["quantity"] for level in sell_levels[:5])
-                    cache_data = {
-                        "timestamp": timestamp,
-                        "bid_qty": bid_qty,
-                        "ask_qty": ask_qty,
-                        "bid_depth": bid_depth,
-                        "ask_depth": ask_depth,
-                        "ltp": float(depth["ltp"]),
-                        "volume": int(depth["volume"]),
-                    }
-                    cache_manager.depth_cache[security_id] = deque(
-                        [cache_data], maxlen=100
-                    )
-                    cache_manager.cache_hits["depth"] += 1
-                    return True
-                cache_manager.cache_misses["depth"] += 1
-        return False
+        payload = {"NSE_EQ": [int(sid) for sid in security_ids]}
+        response = dhan.quote_data(payload)
+        if response.get("status") == "success":
+            result = {}
+            for sec_id in security_ids:
+                sec_id_str = str(sec_id)
+                quote = response.get("data")["data"]["NSE_EQ"].get(sec_id_str)
+                if quote:
+                    try:
+                        trade_time = datetime.strptime(
+                            quote["last_trade_time"], "%d/%m/%Y %H:%M:%S"
+                        ).replace(tzinfo=IST)
+                        result[sec_id] = {
+                            "price": float(quote["last_price"]),
+                            "timestamp": trade_time,
+                        }
+                    except KeyError:
+                        logger.warning(f"Missing keys in quote for {sec_id}: {quote}")
+                        result[sec_id] = None
+                else:
+                    result[sec_id] = None
+            return result
+        elif response.get("status") == "failure":
+            backoff = 5.0
+            logger.warning(
+                f"Quote API rate limit exceeded. Backing off for {backoff:.2f}s"
+            )
+            await asyncio.sleep(backoff)
+            return await _fetch_quote_batch(security_ids)
+        else:
+            logger.error(
+                f"Quote API status {response.get("status")} for {security_ids}: {response}"
+            )
+            return {sec_id: None for sec_id in security_ids}
     except Exception as e:
-        logger.error(f"Market depth storage error: {str(e)}")
-        cache_manager.cache_misses["depth"] += 1
-        return False
+        import traceback
+
+        traceback.print_exc()
+        logger.error(f"Batch quote error for {security_ids}: {str(e)}")
+        return {sec_id: None for sec_id in security_ids}
 
 
 def build_enhanced_candles(
@@ -758,7 +652,6 @@ async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
         return cache_manager.historical_cache[cache_key]
 
     try:
-        # Use get_combined_data_with_persistent_live from live_data.py
         combined_data = await get_combined_data_with_persistent_live(
             security_id=int(security_id),
             exchange_segment="NSE_EQ",
@@ -768,7 +661,6 @@ async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
             cache_manager.cache_misses["historical"] += 1
             return None
 
-        # Add enhanced candles if available
         enhanced_candles = build_enhanced_candles(security_id)
         if enhanced_candles:
             enhanced_data = [
@@ -810,12 +702,6 @@ async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
         return None
 
 
-@lru_cache(maxsize=1000)
-def get_symbol_from_id(security_id: int) -> str:
-    symbol_map = get_security_symbol_map(security_id)
-    return symbol_map.get(security_id, f"UNKNOWN_{security_id}")
-
-
 async def fetch_dynamic_holidays(year: int) -> List[str]:
     if year in HOLIDAY_CACHE:
         return HOLIDAY_CACHE[year]
@@ -855,29 +741,6 @@ async def fetch_dynamic_holidays(year: int) -> List[str]:
     ]
     HOLIDAY_CACHE[year] = holidays
     return holidays
-
-
-async def fetch_realtime_quote(security_id: int) -> Optional[Dict]:
-    try:
-        await rate_limiter.acquire()
-        url = "https://api.dhan.co/v2/quotes"
-        params = {"securityId": str(security_id), "exchangeSegment": "NSE_EQ"}
-        session = await api_client.get_session()
-        async with session.get(url, params=params) as response:
-            if response.status == 200:
-                data = await response.json()
-                if data.get("data"):
-                    quote = data["data"][0]
-                    return {
-                        "price": float(quote["last_price"]),
-                        "timestamp": datetime.strptime(
-                            quote["last_trade_time"], "%d/%m/%Y %H:%M:%S"
-                        ).replace(tzinfo=IST),
-                    }
-        return None
-    except Exception as e:
-        logger.error(f"Realtime quote error: {str(e)}")
-        return None
 
 
 @lru_cache(maxsize=100)
@@ -990,31 +853,13 @@ def calculate_risk_params(
     )
 
 
-class OptimizedSignalGeneratorWrapper(bt.Strategy):
-    __slots__ = ("signal", "strategy")
-
-    def __init__(self, strategy_class, **params):
-        self.signal = None
-        self.strategy = strategy_class(self.datas[0], **params)
-
-    def next(self):
-        self.signal = None
-        self.strategy.next()
-
-    def buy(self, *args, **kwargs):
-        self.signal = "BUY"
-
-    def sell(self, *args, **kwargs):
-        self.signal = "SELL"
-
-
 class PnLTracker:
     def __init__(self):
         self.cache = {"realized": 0.0, "last_updated": None}
         self.cache_ttl = 300
 
     async def update_daily_pnl(self) -> float:
-        now = datetime.now()
+        now = datetime.now(IST)
         if (
             self.cache["last_updated"]
             and (now - self.cache["last_updated"]).total_seconds() < self.cache_ttl
@@ -1042,69 +887,6 @@ class PnLTracker:
         except Exception as e:
             logger.error(f"Failed to update P&L: {str(e)}")
             return 0.0
-
-
-async def enhanced_stock_filtering(
-    ticker: str, security_id: int, combined_data: pd.DataFrame, regime: str, atr: float
-) -> Tuple[bool, str]:
-    try:
-        if len(combined_data) < 30:
-            return False, "Insufficient data"
-
-        latest_price = combined_data["close"].iloc[-1]
-        if latest_price < MIN_PRICE_THRESHOLD or latest_price > MAX_PRICE_THRESHOLD:
-            return False, f"Price out of range: ₹{latest_price:.2f}"
-
-        volatility = await calculate_stock_volatility(security_id)
-        volatility_threshold = atr * 0.5
-        volatility_threshold = adjust_thresholds_for_regime(
-            regime, volatility_threshold
-        )
-
-        if volatility < volatility_threshold:
-            return (
-                False,
-                f"Low volatility: {volatility:.3f} < {volatility_threshold:.3f}",
-            )
-
-        avg_volume = await calculate_average_volume(security_id)
-        recent_volume = combined_data["volume"].tail(5).mean()
-        relative_vol = calculate_relative_volume(recent_volume, avg_volume)
-
-        min_relative_vol = RELATIVE_VOLUME_THRESHOLD * (
-            0.8 if is_high_volume_period() else 1.0
-        )
-
-        if relative_vol < min_relative_vol:
-            return (
-                False,
-                f"Low relative volume: {relative_vol:.2f}x (threshold: {min_relative_vol:.2f}x)",
-            )
-
-        if "bid_qty" in combined_data.columns and "ask_qty" in combined_data.columns:
-            latest = combined_data.iloc[-1]
-            bid_qty = latest.get("bid_qty", 0)
-            ask_qty = latest.get("ask_qty", 0)
-            min_qty = BID_ASK_THRESHOLD * (0.7 if avg_volume < 100000 else 1.0)
-
-            if bid_qty < min_qty or ask_qty < min_qty:
-                return (
-                    False,
-                    f"Poor liquidity: Bid={bid_qty}, Ask={ask_qty} (min: {min_qty})",
-                )
-
-        if len(combined_data) >= 10:
-            recent_vol_avg = combined_data["volume"].tail(5).mean()
-            earlier_vol_avg = combined_data["volume"].tail(10).head(5).mean()
-            if earlier_vol_avg > 0:
-                volume_trend = recent_vol_avg / earlier_vol_avg
-                if volume_trend < 0.8:
-                    return False, f"Declining volume trend: {volume_trend:.2f}"
-
-        return True, "Passed all filters"
-    except Exception as e:
-        logger.error(f"Enhanced filtering error for {ticker}: {str(e)}")
-        return False, f"Filtering error: {str(e)}"
 
 
 pnl_tracker = PnLTracker()
@@ -1135,7 +917,8 @@ async def execute_strategy_signal(
             logger.warning(f"Invalid signal for {ticker}: {signal}")
             return
 
-        quote = await fetch_realtime_quote(security_id)
+        quotes = await fetch_realtime_quote([security_id])
+        quote = quotes.get(security_id)
         if not quote:
             logger.warning(f"Price unavailable for {ticker}")
             return
@@ -1164,27 +947,34 @@ async def execute_strategy_signal(
             f"Risk: ₹{abs(entry_price - risk_params['stop_loss']) * risk_params['position_size']:.2f}\n"
             f"Time: {now.strftime('%H:%M:%S')}"
         )
-
-        order_response = await place_super_order(
-            security_id,
-            signal,
-            entry_price,
-            risk_params["stop_loss"],
-            risk_params["take_profit"],
-            risk_params["position_size"],
+        print(
+            ">>>>>>>>>>>>>>>>>>",
+            dhan.get_fund_limits().get("data").get("availabelBalance"),
         )
-
-        if order_response and order_response.get("orderId"):
-            await position_manager.add_position(
-                order_response["orderId"],
+        if (
+            dhan.get_fund_limits().get("data").get("availabelBalance")
+            > current_price / 5
+        ):
+            order_response = await place_super_order(
                 security_id,
-                ticker,
+                signal,
                 entry_price,
-                risk_params["position_size"],
                 risk_params["stop_loss"],
                 risk_params["take_profit"],
-                signal,
+                risk_params["position_size"],
             )
+
+            if order_response and order_response.get("orderId"):
+                await position_manager.add_position(
+                    order_response["orderId"],
+                    security_id,
+                    ticker,
+                    entry_price,
+                    risk_params["position_size"],
+                    risk_params["stop_loss"],
+                    risk_params["take_profit"],
+                    signal,
+                )
             await send_telegram_alert(message)
         else:
             await send_telegram_alert(
@@ -1239,8 +1029,6 @@ async def calculate_average_volume(security_id: int) -> float:
 class AdaptiveSemaphore:
     def __init__(self, initial_limit: int = 25):
         self.semaphore = asyncio.Semaphore(initial_limit)
-        self.current_limit = initial_limit
-        self.last_adjustment = datetime.now()
 
     async def acquire(self):
         return await self.semaphore.acquire()
@@ -1262,16 +1050,14 @@ adaptive_semaphore = AdaptiveSemaphore(25)
 async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -> None:
     async with adaptive_semaphore:
         try:
-            logger.info(f"=== PROCESSING {ticker} (ID: {security_id}) ===")
-            logger.info(f"{ticker} - Step 1: Fetching market depth and data")
+            logger.info(f"Processing {ticker} (ID: {security_id})")
             data_task = asyncio.create_task(get_combined_data(security_id))
             combined_data = await data_task
             if combined_data is None:
-                logger.warning(f"{ticker} - FAILED: No combined data available")
+                logger.warning(f"{ticker} - No data available")
                 return
 
             data_length = len(combined_data)
-            logger.info(f"{ticker} - Data length: {data_length} bars")
             min_bars_list = []
             for strat in strategies:
                 try:
@@ -1289,9 +1075,6 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                         params = {}
                     min_data_points = strategy_class.get_min_data_points(params)
                     min_bars_list.append(min_data_points)
-                    logger.debug(
-                        f"{ticker} - {strat['Strategy']} needs {min_data_points} bars"
-                    )
                 except Exception as e:
                     logger.warning(
                         f"{ticker} - Error calculating min bars for {strat.get('Strategy', 'unknown')}: {e}"
@@ -1299,11 +1082,9 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     min_bars_list.append(30)
 
             min_bars = max(min_bars_list) if min_bars_list else 30
-            logger.info(f"{ticker} - Maximum min_bars required: {min_bars}")
-
             if data_length < min_bars:
                 logger.warning(
-                    f"{ticker} - FAILED: Insufficient data ({data_length} < {min_bars})"
+                    f"{ticker} - Insufficient data ({data_length} < {min_bars})"
                 )
                 return
 
@@ -1312,23 +1093,11 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                 f"{ticker} - Regime: {regime} (ADX: {adx_value:.2f}, ATR: {atr_value:.2f})"
             )
 
-            logger.info(f"{ticker} - Step 3: Enhanced large cap filtering")
-            # filter_passed, filter_reason = await enhanced_stock_filtering(
-            #     ticker, security_id, combined_data, regime, atr_value
-            # )
-
-            # if not filter_passed:
-            #     logger.warning(f"{ticker} - FILTERED OUT: {filter_reason}")
-            #     return
-
-            # logger.info(f"{ticker} - PASSED FILTERING: {filter_reason}")
-
-            logger.info(f"{ticker} - Step 4: Processing {len(strategies)} strategies")
+            logger.info(f"{ticker} - Processing {len(strategies)} strategies")
             signals = []
 
             for i, strat in enumerate(strategies):
                 strategy_name = strat["Strategy"]
-                logger.info(f"{ticker} - Strategy {i+1}: {strategy_name}")
                 try:
                     strategy_class = get_strategy(strategy_name)
                 except KeyError:
@@ -1339,25 +1108,15 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                 if isinstance(params, str) and params.strip():
                     try:
                         params = ast.literal_eval(params)
-                        logger.info(f"{ticker} - {strategy_name} params: {params}")
                     except (ValueError, SyntaxError) as e:
                         logger.warning(f"{ticker} - Failed to parse params: {e}")
                         params = {}
                 elif not isinstance(params, dict):
-                    logger.warning(
-                        f"{ticker} - Invalid params type: {type(params)}, using default"
-                    )
                     params = {}
 
                 try:
                     min_bars_needed = strategy_class.get_min_data_points(params)
-                    logger.info(
-                        f"{ticker} - {strategy_name} needs {min_bars_needed} bars, have {data_length}"
-                    )
                     if data_length < min_bars_needed:
-                        logger.warning(
-                            f"{ticker} - {strategy_name} SKIPPED: Not enough data"
-                        )
                         continue
                 except Exception as e:
                     logger.error(
@@ -1365,35 +1124,27 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     )
                     continue
 
-                signal = await backtrader_runner.run_strategy(
-                    strategy_class, combined_data, params
-                )
-                if signal:
-                    signals.append(signal)
-                    logger.info(
-                        f"{ticker} - {strategy_name} GENERATED SIGNAL: {signal}"
+                try:
+                    strategy_instance = TrendlineWilliams(combined_data, **params)
+                    signal = strategy_instance.run()
+                    if signal in ["BUY", "SELL"]:
+                        signals.append(signal)
+                        logger.info(f"{ticker} - {strategy_name} signal: {signal}")
+                except Exception as e:
+                    logger.error(
+                        f"{ticker} - {strategy_name} execution failed: {str(e)}"
                     )
-                else:
-                    logger.info(f"{ticker} - {strategy_name} generated no signal")
-
-            logger.info(
-                f"{ticker} - Step 5: Signal voting from {len(signals)} signals: {signals}"
-            )
 
             if not signals:
-                logger.warning(f"{ticker} - FINAL: No signals generated")
+                logger.warning(f"{ticker} - No signals generated")
                 return
 
             signal_counts = {"BUY": signals.count("BUY"), "SELL": signals.count("SELL")}
             buy_votes = signal_counts["BUY"]
             sell_votes = signal_counts["SELL"]
 
-            logger.info(
-                f"{ticker} - Vote count - BUY: {buy_votes}, SELL: {sell_votes} (MIN_VOTES: {MIN_VOTES})"
-            )
-
             if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
-                logger.info(f"{ticker} - EXECUTING BUY SIGNAL")
+                logger.info(f"{ticker} - Executing BUY signal")
                 await execute_strategy_signal(
                     ticker,
                     security_id,
@@ -1404,7 +1155,7 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     combined_data,
                 )
             elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
-                logger.info(f"{ticker} - EXECUTING SELL SIGNAL")
+                logger.info(f"{ticker} - Executing SELL signal")
                 await execute_strategy_signal(
                     ticker,
                     security_id,
@@ -1415,9 +1166,9 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     combined_data,
                 )
             else:
-                logger.info(f"{ticker} - NO FINAL SIGNAL: Insufficient votes or tie")
+                logger.info(f"{ticker} - No final signal")
         except Exception as e:
-            logger.error(f"{ticker} - PROCESS FAILED: {str(e)}")
+            logger.error(f"{ticker} - Processing failed: {str(e)}")
             logger.error(traceback.format_exc())
 
 
@@ -1433,7 +1184,6 @@ def get_market_times_cached(date_str: str) -> Tuple[datetime, datetime, datetime
 async def market_hours_check() -> bool:
     now = datetime.now(IST)
     if now.weekday() >= 5:
-        logger.debug("Weekend - no trading")
         return False
     holidays = await fetch_dynamic_holidays(now.year)
     if now.strftime("%Y-%m-%d") in holidays:
@@ -1445,16 +1195,11 @@ async def market_hours_check() -> bool:
     if now < market_open_dt:
         sleep_time = (market_open_dt - now).total_seconds()
         if sleep_time > 0:
-            logger.info(
-                f"Pre-market: waiting {sleep_time/60:.1f} minutes until {MARKET_OPEN_TIME.strftime('%H:%M:%S')}"
-            )
             await asyncio.sleep(min(sleep_time, 300))
         return True
     elif now > market_close_dt:
-        logger.info("Market closed")
         return False
     elif now > trading_end_dt:
-        logger.info("Post trading end time")
         return False
     return True
 
@@ -1463,17 +1208,13 @@ async def schedule_square_off():
     while True:
         try:
             now = datetime.now(IST)
-            target_time = IST.localize(
-                datetime.combine(now.date(), SQUARE_OFF_TIME_TIME)
-            )
+            target_time = IST.localize(datetime.combine(now.date(), SQUARE_OFF_TIME))
             if now > target_time:
                 target_time += timedelta(days=1)
             sleep_seconds = (target_time - now).total_seconds()
             if sleep_seconds > 0:
-                logger.info(f"Square off scheduled in {sleep_seconds/60:.1f} minutes")
                 await asyncio.sleep(min(sleep_seconds, 3600))
                 if await market_hours_check():
-                    logger.info("Executing scheduled square off")
                     async with position_manager.position_lock:
                         for order_id in list(position_manager.open_positions.keys()):
                             pos = position_manager.open_positions[order_id]
@@ -1485,8 +1226,6 @@ async def schedule_square_off():
                             await send_telegram_alert(
                                 f"*{pos['ticker']} SQUARED OFF* 🛑\nPrice: Market"
                             )
-                else:
-                    logger.info("Skipping square off on non-trading day")
             else:
                 await asyncio.sleep(60)
         except Exception as e:
@@ -1527,7 +1266,6 @@ async def cleanup_resources():
             cache_manager.log_cache_stats("historical")
             cache_manager.log_cache_stats("volatility")
             cache_manager.log_cache_stats("volume")
-            logger.debug("Completed resource cleanup")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
@@ -1535,13 +1273,11 @@ async def cleanup_resources():
 async def main_trading_loop():
     try:
         await telegram_queue.start()
-        # Initialize live data collection
         await initialize_live_data_from_config()
 
         try:
             strategies_df = pd.read_csv("selected_stocks_strategies.csv")
             nifty500 = pd.read_csv("ind_nifty500list.csv")
-            logger.info(f"Loaded {len(strategies_df)} strategy configurations")
         except Exception as e:
             logger.critical(f"Data load failed: {str(e)}")
             return
@@ -1567,9 +1303,9 @@ async def main_trading_loop():
             asyncio.create_task(position_manager.monitor_positions()),
         ]
 
-        batch_size = 10
+        batch_size = 3
         while await market_hours_check():
-            start_time = datetime.now()
+            start_time = datetime.now(IST)
             for i in range(0, len(stock_universe), batch_size):
                 batch = stock_universe[i : i + batch_size]
                 batch_tasks = [
@@ -1584,16 +1320,14 @@ async def main_trading_loop():
                         timeout=25.0,
                     )
                 except asyncio.TimeoutError:
-                    logger.warning(f"Batch {i//batch_size + 1} timed out")
                     for task in batch_tasks:
                         if not task.done():
                             task.cancel()
                 await asyncio.sleep(1)
-            elapsed = (datetime.now() - start_time).total_seconds()
+            elapsed = (datetime.now(IST) - start_time).total_seconds()
             sleep_time = max(30 - elapsed, 5)
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
-        logger.info("Trading session completed")
     except Exception as e:
         logger.critical(f"Main loop failure: {str(e)}")
         logger.error(traceback.format_exc())
@@ -1601,7 +1335,6 @@ async def main_trading_loop():
     finally:
         await api_client.close()
         thread_pool.shutdown(wait=True)
-        backtrader_runner.shutdown()
         for task in background_tasks:
             task.cancel()
 
