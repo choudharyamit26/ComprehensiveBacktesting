@@ -654,9 +654,8 @@ async def get_combined_data_with_persistent_live(
                     ]
 
                     # Create unique filename for each security
-                    combined_csv = CONFIG["COMBINED_DATA_CSV"].replace(
-                        ".csv", f"_{security_id}.csv"
-                    )
+                    os.makedirs("combined_data", exist_ok=True)
+                    combined_csv = f"combined_data/combined_data_{security_id}.csv"
                     combined_data_with_id.to_csv(combined_csv, index=False)
                     logger.info(
                         f"Saved combined data for {security_id} to {combined_csv}"

@@ -11,139 +11,96 @@ logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
 
 
-class PivotCCI:
+class VERV:
     """
-    Pivot Points + CCI Strategy
-    (Documentation remains unchanged)
+    VWAP + EMA + RSI + Volume Deviation (pandas_ta implementation, sr_rsi structure)
     """
 
     params = {
-        "cci_period": 14,
-        "pivot_proximity": 0.5,
-        "cci_oversold": -100,
-        "cci_overbought": 100,
-        "cci_exit": 0,
+        "vwap_period": 20,
+        "ema_period": 20,
+        "rsi_period": 14,
+        "vol_sma_period": 14,
+        "vol_threshold": 1.5,
         "verbose": False,
     }
 
     optimization_params = {
-        "cci_period": {"type": "int", "low": 10, "high": 20, "step": 1},
-        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0, "step": 0.1},
-        "cci_oversold": {"type": "int", "low": -150, "high": -50, "step": 10},
-        "cci_overbought": {"type": "int", "low": 50, "high": 150, "step": 10},
-        "cci_exit": {"type": "int", "low": -20, "high": 20, "step": 5},
+        "vwap_period": {"type": "int", "low": 15, "high": 30, "step": 1},
+        "ema_period": {"type": "int", "low": 15, "high": 30, "step": 1},
+        "rsi_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "vol_sma_period": {"type": "int", "low": 10, "high": 20, "step": 1},
+        "vol_threshold": {"type": "float", "low": 1.2, "high": 2.0, "step": 0.1},
     }
 
     def __init__(self, data, tickers=None, **kwargs):
         self.data = data.copy()
         self.data["datetime"] = pd.to_datetime(self.data["datetime"])
         self.params.update(kwargs)
+
         self.order = None
         self.order_type = None
-        self.last_signal = None  # Initialize last_signal
+        self.last_signal = None
         self.ready = False
         self.trade_count = 0
-        self.warmup_period = self.params["cci_period"] + 5
+        self.warmup_period = (
+            max(
+                self.params["vwap_period"],
+                self.params["ema_period"],
+                self.params["rsi_period"],
+                self.params["vol_sma_period"],
+            )
+            + 5
+        )
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
 
-        # Initialize indicators using pandas_ta
-        self.data["cci"] = ta.cci(
-            self.data["high"],
-            self.data["low"],
-            self.data["close"],
-            length=self.params["cci_period"],
-        )
+        # EMA and RSI
+        self.data["ema"] = ta.ema(self.data["close"], length=self.params["ema_period"])
+        self.data["rsi"] = ta.rsi(self.data["close"], length=self.params["rsi_period"])
 
-        # Calculate pivot points
-        self.data["prev_high"] = self.data["high"].shift(1)
-        self.data["prev_low"] = self.data["low"].shift(1)
-        self.data["prev_close"] = self.data["close"].shift(1)
-        self.data["pivot"] = (
-            self.data["prev_high"] + self.data["prev_low"] + self.data["prev_close"]
-        ) / 3
-        self.data["r1"] = (2 * self.data["pivot"]) - self.data["prev_low"]
-        self.data["s1"] = (2 * self.data["pivot"]) - self.data["prev_high"]
-        self.data["r2"] = self.data["pivot"] + (
-            self.data["prev_high"] - self.data["prev_low"]
+        # Volume ratio
+        self.data["vol_sma"] = ta.sma(
+            self.data["volume"], length=self.params["vol_sma_period"]
         )
-        self.data["s2"] = self.data["pivot"] - (
-            self.data["prev_high"] - self.data["prev_low"]
-        )
+        self.data["vol_ratio"] = self.data["volume"] / self.data["vol_sma"]
 
-        # Define conditions
-        self.data["near_s1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s1"]) / x["s1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_s2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s2"]) / x["s2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r1"]) / x["r1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r2"]) / x["r2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["bullish_entry"] = (
-            self.data["cci"] < self.params["cci_oversold"]
-        ) & (self.data["near_s1"] | self.data["near_s2"])
-        self.data["bearish_entry"] = (
-            self.data["cci"] > self.params["cci_overbought"]
-        ) & (self.data["near_r1"] | self.data["near_r2"])
-        self.data["bullish_exit"] = (self.data["cci"] > self.params["cci_exit"]) | (
-            self.data["close"] >= self.data["pivot"]
-        )
-        self.data["bearish_exit"] = (self.data["cci"] < self.params["cci_exit"]) | (
-            self.data["close"] <= self.data["pivot"]
-        )
+        # VWAP (session-like reset by date)
+        typical = (self.data["high"] + self.data["low"] + self.data["close"]) / 3.0
+        tpv = typical * self.data["volume"]
+        dates = self.data["datetime"].dt.date
+        vwap = []
+        cum_tpv = 0.0
+        cum_vol = 0.0
+        last_date = None
+        for i in range(len(self.data)):
+            d = dates.iloc[i]
+            if last_date is None or d != last_date:
+                cum_tpv = 0.0
+                cum_vol = 0.0
+                last_date = d
+            cum_tpv += tpv.iloc[i]
+            cum_vol += self.data["volume"].iloc[i]
+            vwap.append(cum_tpv / cum_vol if cum_vol > 0 else np.nan)
+        self.data["vwap"] = pd.Series(vwap, index=self.data.index)
 
-        logger.debug(f"Initialized PivotCCI with params: {self.params}")
-        logger.info(
-            f"PivotCCI initialized with cci_period={self.params['cci_period']}, "
-            f"pivot_proximity={self.params['pivot_proximity']}, cci_oversold={self.params['cci_oversold']}, "
-            f"cci_overbought={self.params['cci_overbought']}, cci_exit={self.params['cci_exit']}"
-        )
+        logger.debug(f"Initialized VERV with params: {self.params}")
 
     def run(self):
-        self.last_signal = None  # Reset last_signal at the start of run
+        self.last_signal = None
         for idx in range(len(self.data)):
             if idx < self.warmup_period:
-                logger.debug(
-                    f"Skipping row {idx}: still in warmup period (need {self.warmup_period} rows)"
-                )
                 continue
 
             if not self.ready:
                 self.ready = True
                 logger.info(f"Strategy ready at row {idx}")
 
-            bar_time = self.data.iloc[idx]["datetime"]
-            bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+            bar_time = pd.Timestamp(self.data.iloc[idx]["datetime"])
+            if bar_time.tz is None:
+                bar_time = bar_time.tz_localize(pytz.UTC)
+            bar_time_ist = bar_time.tz_convert(pytz.timezone("Asia/Kolkata"))
             current_time = bar_time_ist.time()
 
             # Force close positions at 15:15 IST
@@ -161,92 +118,111 @@ class PivotCCI:
                 logger.debug(f"Order pending at row {idx}")
                 continue
 
-            # Check for invalid indicator values
-            if pd.isna(self.data.iloc[idx]["cci"]) or pd.isna(
-                self.data.iloc[idx]["pivot"]
-            ):
-                logger.debug(f"Invalid indicator values at row {idx}")
+            row = self.data.iloc[idx]
+            prev = self.data.iloc[idx - 1]
+            required = [
+                row["vwap"],
+                row["ema"],
+                row["rsi"],
+                row["vol_ratio"],
+                prev["rsi"],
+            ]
+            if any(pd.isna(x) for x in required):
                 continue
 
-            # Store indicator data for analysis
+            # States
+            price = row["close"]
+            price_below_vwap = price < row["vwap"]
+            price_above_vwap = price > row["vwap"]
+            rsi_rising = row["rsi"] > prev["rsi"] and 30 < row["rsi"] < 70
+            rsi_falling = row["rsi"] < prev["rsi"] and 30 < row["rsi"] < 70
+            price_above_ema = price > row["ema"]
+            price_below_ema = price < row["ema"]
+            high_volume = row["vol_ratio"] > self.params["vol_threshold"]
+            price_near_vwap = (
+                abs(price - row["vwap"]) / row["vwap"] < 0.01 if row["vwap"] else False
+            )
+            rsi_reversal_long = row["rsi"] < prev["rsi"]
+            rsi_reversal_short = row["rsi"] > prev["rsi"]
+            ema_reversal_long = price < row["ema"]
+            ema_reversal_short = price > row["ema"]
+            vol_decrease = row["vol_ratio"] < 1.0
+            signal_conflict_long = (
+                sum([rsi_reversal_long, ema_reversal_long, vol_decrease]) >= 2
+            )
+            signal_conflict_short = (
+                sum([rsi_reversal_short, ema_reversal_short, vol_decrease]) >= 2
+            )
+
+            # Store snapshot
             self.indicator_data.append(
                 {
                     "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
-                    "close": self.data.iloc[idx]["close"],
-                    "cci": self.data.iloc[idx]["cci"],
-                    "pivot": self.data.iloc[idx]["pivot"],
-                    "s1": self.data.iloc[idx]["s1"],
-                    "s2": self.data.iloc[idx]["s2"],
-                    "r1": self.data.iloc[idx]["r1"],
-                    "r2": self.data.iloc[idx]["r2"],
+                    "close": price,
+                    "vwap": row["vwap"],
+                    "ema": row["ema"],
+                    "rsi": row["rsi"],
+                    "vol_ratio": row["vol_ratio"],
                 }
             )
 
-            # Check for trading signals
             if not self.open_positions:
-                if self.data.iloc[idx]["bullish_entry"]:
+                # Long Entry
+                if price_below_vwap and rsi_rising and price_above_ema and high_volume:
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
                         "order_type": "enter_long",
                         "status": "Completed",
-                        "executed_price": self.data.iloc[idx]["close"],
+                        "executed_price": price,
                         "size": 100,
-                        "commission": abs(self.data.iloc[idx]["close"] * 100 * 0.001),
+                        "commission": abs(price * 100 * 0.001),
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "buy"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                        f"BUY SIGNAL (VERV) | Time: {bar_time_ist} | Price: {price:.2f}"
                     )
-                elif self.data.iloc[idx]["bearish_entry"]:
+                # Short Entry
+                elif (
+                    price_above_vwap and rsi_falling and price_below_ema and high_volume
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
                         "order_type": "enter_short",
                         "status": "Completed",
-                        "executed_price": self.data.iloc[idx]["close"],
+                        "executed_price": price,
                         "size": -100,
-                        "commission": abs(self.data.iloc[idx]["close"] * 100 * 0.001),
+                        "commission": abs(price * 100 * 0.001),
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                        f"SELL SIGNAL (VERV) | Time: {bar_time_ist} | Price: {price:.2f}"
                     )
-                else:
-                    self.last_signal = None
             else:
-                if (
-                    self.open_positions[-1]["direction"] == "long"
-                    and self.data.iloc[idx]["bullish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bullish exit condition", "sell", "exit_long"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']}"
-                    )
-                elif (
-                    self.open_positions[-1]["direction"] == "short"
-                    and self.data.iloc[idx]["bearish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bearish exit condition", "buy", "exit_short"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']}"
-                    )
-                else:
-                    self.last_signal = None
+                if self.open_positions[-1]["direction"] == "long":
+                    if price_near_vwap or signal_conflict_long:
+                        self._close_position(
+                            idx,
+                            "Price near VWAP or signals conflict",
+                            "sell",
+                            "exit_long",
+                        )
+                        self.last_signal = None
+                elif self.open_positions[-1]["direction"] == "short":
+                    if price_near_vwap or signal_conflict_short:
+                        self._close_position(
+                            idx,
+                            "Price near VWAP or signals conflict",
+                            "buy",
+                            "exit_short",
+                        )
+                        self.last_signal = None
+
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -370,21 +346,22 @@ class PivotCCI:
     @classmethod
     def get_param_space(cls, trial):
         params = {
-            "cci_period": trial.suggest_int("cci_period", 10, 20),
-            "pivot_proximity": trial.suggest_float(
-                "pivot_proximity", 0.3, 1.0, step=0.1
-            ),
-            "cci_oversold": trial.suggest_int("cci_oversold", -150, -50, step=10),
-            "cci_overbought": trial.suggest_int("cci_overbought", 50, 150, step=10),
-            "cci_exit": trial.suggest_int("cci_exit", -20, 20, step=5),
+            "vwap_period": trial.suggest_int("vwap_period", 15, 30),
+            "ema_period": trial.suggest_int("ema_period", 15, 30),
+            "rsi_period": trial.suggest_int("rsi_period", 10, 20),
+            "vol_sma_period": trial.suggest_int("vol_sma_period", 10, 20),
+            "vol_threshold": trial.suggest_float("vol_threshold", 1.2, 2.0, step=0.1),
         }
         return params
 
     @classmethod
     def get_min_data_points(cls, params):
         try:
-            cci_period = params.get("cci_period", 14)
-            return cci_period + 5
+            vwap_period = params.get("vwap_period", 20)
+            ema_period = params.get("ema_period", 20)
+            rsi_period = params.get("rsi_period", 14)
+            vol_sma_period = params.get("vol_sma_period", 14)
+            return max(vwap_period, ema_period, rsi_period, vol_sma_period) + 5
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
-            return 20
+            return 35

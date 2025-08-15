@@ -14,7 +14,7 @@ trade_logger = logging.getLogger("trade_logger")
 class RSISupertrendIntraday:
     """
     RSI + Supertrend Intraday Strategy
-    (Documentation remains unchanged)
+    Fixed version with proper position management
     """
 
     params = {
@@ -157,36 +157,39 @@ class RSISupertrendIntraday:
                         f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f}"
                     )
             else:
-                if self.open_positions[-1]["direction"] == "long":
-                    target_price = self.entry_price * (
-                        1 + self.params["target_percent"] / 100
-                    )
-                    if (
-                        self.data.iloc[idx]["close"] >= target_price
-                        or self.data.iloc[idx]["rsi"] > self.params["rsi_overbought"]
-                    ):
-                        reason = (
-                            "Target hit"
-                            if self.data.iloc[idx]["close"] >= target_price
-                            else "RSI overbought"
+                # Check if we have a valid open position and entry price
+                if self.open_positions and self.entry_price is not None:
+                    if self.open_positions[-1]["direction"] == "long":
+                        target_price = self.entry_price * (
+                            1 + self.params["target_percent"] / 100
                         )
-                        self._close_position(idx, reason, "sell", "exit_long")
-                        self.last_signal = None
-                elif self.open_positions[-1]["direction"] == "short":
-                    target_price = self.entry_price * (
-                        1 - self.params["target_percent"] / 100
-                    )
-                    if (
-                        self.data.iloc[idx]["close"] <= target_price
-                        or self.data.iloc[idx]["rsi"] < self.params["rsi_oversold"]
-                    ):
-                        reason = (
-                            "Target hit"
-                            if self.data.iloc[idx]["close"] <= target_price
-                            else "RSI oversold"
+                        if (
+                            self.data.iloc[idx]["close"] >= target_price
+                            or self.data.iloc[idx]["rsi"]
+                            > self.params["rsi_overbought"]
+                        ):
+                            reason = (
+                                "Target hit"
+                                if self.data.iloc[idx]["close"] >= target_price
+                                else "RSI overbought"
+                            )
+                            self._close_position(idx, reason, "sell", "exit_long")
+                            self.last_signal = None
+                    elif self.open_positions[-1]["direction"] == "short":
+                        target_price = self.entry_price * (
+                            1 - self.params["target_percent"] / 100
                         )
-                        self._close_position(idx, reason, "buy", "exit_short")
-                        self.last_signal = None
+                        if (
+                            self.data.iloc[idx]["close"] <= target_price
+                            or self.data.iloc[idx]["rsi"] < self.params["rsi_oversold"]
+                        ):
+                            reason = (
+                                "Target hit"
+                                if self.data.iloc[idx]["close"] <= target_price
+                                else "RSI oversold"
+                            )
+                            self._close_position(idx, reason, "buy", "exit_short")
+                            self.last_signal = None
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -230,6 +233,14 @@ class RSISupertrendIntraday:
             return
 
         entry_info = self.open_positions[-1]
+
+        # Use entry_price from the position info if self.entry_price is None
+        if self.entry_price is None:
+            self.entry_price = entry_info["entry_price"]
+            logger.warning(
+                f"entry_price was None, using position entry_price: {self.entry_price}"
+            )
+
         self.order = {
             "ref": str(uuid4()),
             "action": action,
@@ -245,7 +256,9 @@ class RSISupertrendIntraday:
         order = self.order
 
         if order["order_type"] == "exit_long" and order["action"] == "sell":
-            entry_info = self.open_positions.pop(0)
+            entry_info = (
+                self.open_positions.pop()
+            )  # Changed from pop(0) to pop() for LIFO
             pnl = (order["executed_price"] - entry_info["entry_price"]) * abs(
                 entry_info["size"]
             )
@@ -273,7 +286,9 @@ class RSISupertrendIntraday:
                 f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
             )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
-            entry_info = self.open_positions.pop(0)
+            entry_info = (
+                self.open_positions.pop()
+            )  # Changed from pop(0) to pop() for LIFO
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
                 entry_info["size"]
             )
@@ -303,7 +318,9 @@ class RSISupertrendIntraday:
 
         self.order = None
         self.order_type = None
-        self.entry_price = None  # Reset entry price
+        # Only reset entry_price if no more open positions
+        if not self.open_positions:
+            self.entry_price = None
 
     def get_completed_trades(self):
         return self.completed_trades.copy()

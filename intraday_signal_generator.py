@@ -1,4 +1,5 @@
 import asyncio
+import pickle
 import pandas as pd
 import os
 import logging
@@ -20,13 +21,9 @@ from live_data import (
     get_combined_data_with_persistent_live,
     read_live_data_from_csv,
     initialize_live_data_from_config,
-    get_security_symbol_map,
     CONFIG,
 )
 
-# Import registry functions
-from comprehensive_backtesting.registry import get_strategy
-from live_strategies.trendline_williams import TrendlineWilliams
 
 # Initialize Dhan client
 dhan = init_dhan_client()
@@ -116,6 +113,103 @@ except Exception as e:
 HOLIDAY_CACHE = {}
 CANDLE_BUILDERS = {}
 
+STRATEGY_REGISTRY = {}
+
+
+def register_strategy(name: str, strategy_class):
+    """Register a new strategy in the framework with multiple aliases.
+
+    Args:
+        name (str): Unique name for the strategy.
+        strategy_class: Backtrader strategy class to register.
+
+    Raises:
+        ValueError: If the name is already registered or strategy_class is invalid.
+
+    Example:
+        >>> from ema_rsi import EMARSI
+        >>> register_strategy("EMARSI", EMARSI)
+    """
+    import re
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("Strategy name must be a non-empty string")
+
+    # Only register the provided name and the class name as aliases
+    aliases = set()
+    aliases.add(name)
+    aliases.add(strategy_class.__name__)
+
+    for alias in aliases:
+        if alias in STRATEGY_REGISTRY:
+            logger.warning(f"Strategy alias '{alias}' already registered, overwriting")
+        STRATEGY_REGISTRY[alias] = strategy_class
+        logger.info(f"Registered strategy alias: {alias}")
+
+
+def get_strategy(strategy_name: str):
+    """Retrieve a strategy class by name.
+
+    Args:
+        strategy_name (str): Name of the strategy to retrieve.
+
+    Returns:
+        The strategy class or None if not found.
+
+    Raises:
+        KeyError: If the strategy_name is not registered.
+
+    Example:
+        >>> strategy = get_strategy("EMARSI")
+    """
+    strategy = STRATEGY_REGISTRY.get(strategy_name)
+    if strategy is None:
+        logger.error(f"Strategy '{strategy_name}' not found in registry")
+        raise KeyError(f"Strategy '{strategy_name}' not found")
+    return strategy
+
+
+try:
+    from live_strategies.trendline_williams import TrendlineWilliams
+    from live_strategies.vwap_bounce_rejection import VWAPBounceRejection
+    from live_strategies.BB_PivotPoints_Strategy import BBPivotPointsStrategy
+    from live_strategies.BB_VWAP_Strategy import BBVWAPStrategy
+    from live_strategies.rsi_bb import RSIBB
+    from live_strategies.sr_rsi import SRRSI
+    from live_strategies.EMAStochasticPullback import EMAStochasticPullback
+    from live_strategies.rsi_adx import RSIADX
+    from live_strategies.RSI_Supertrend_Intraday import RSISupertrendIntraday
+    from live_strategies.sr_rsi_volume import SRRSIVolume
+    from live_strategies.supertrend_cci_cmf import SupertrendCCICMF
+    from live_strategies.volume_atr_price_action import Volume_ATR_PriceAction
+    from live_strategies.rsi_cci import RSICCI
+    from live_strategies.head_shoulders_confirmation import HeadShouldersConfirmation
+    from live_strategies.ema_adx import EMAADXTrend
+    from live_strategies.rmbev_intraday import RMBEV
+    from live_strategies.pivot_cci import PivotCCI
+    from live_strategies.BB_Supertrend_Strategy import BBSupertrendStrategy
+
+    register_strategy("TrendlineWilliams", TrendlineWilliams)
+    register_strategy("VWAPBounceRejection", VWAPBounceRejection)
+    register_strategy("BBPivotPointsStrategy", BBPivotPointsStrategy)
+    register_strategy("BBVWAPStrategy", BBVWAPStrategy)
+    register_strategy("RSIBB", RSIBB)
+    register_strategy("SRRSI", SRRSI)
+    register_strategy("EMAStochasticPullback", EMAStochasticPullback)
+    register_strategy("RSIADX", RSIADX)
+    register_strategy("RSISupertrendIntraday", RSISupertrendIntraday)
+    register_strategy("SRRSIVolume", SRRSIVolume)
+    register_strategy("SupertrendCCICMF", SupertrendCCICMF)
+    register_strategy("Volume_ATR_PriceAction", Volume_ATR_PriceAction)
+    register_strategy("RSICCI", RSICCI)
+    register_strategy("HeadShouldersConfirmation", HeadShouldersConfirmation)
+    register_strategy("EMAADXTrend", EMAADXTrend)
+    register_strategy("RMBevIntraday", RMBEV)
+    register_strategy("PivotCCI", PivotCCI)
+    register_strategy("BBSupertrendStrategy", BBSupertrendStrategy)
+except ImportError as e:
+    logger.error(f"Failed to register EMARSI: {str(e)}")
+
 
 class CacheManager:
     def __init__(self, max_size=1000, ttl=3600):
@@ -137,11 +231,348 @@ class CacheManager:
 cache_manager = CacheManager(max_size=1000, ttl=3600)
 
 
+# class PositionManager:
+#     def __init__(self):
+#         self.open_positions = {}
+#         self.positions_by_security = {}
+#         self.strategy_instances = {}
+#         self.max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", 10))
+#         self.position_lock = asyncio.Lock()
+#         self.last_trade_times = {}
+#         self.last_trade_lock = asyncio.Lock()
+
+#     def get_last_trade_time(self, ticker: str) -> Optional[datetime]:
+#         return self.last_trade_times.get(ticker)
+
+#     async def update_last_trade_time(self, ticker: str, trade_time: datetime):
+#         async with self.last_trade_lock:
+#             self.last_trade_times[ticker] = trade_time
+#         logger.debug(f"Updated last trade time for {ticker}: {trade_time}")
+
+#     async def add_position(
+#         self,
+#         order_id: str,
+#         security_id: int,
+#         ticker: str,
+#         entry_price: float,
+#         quantity: int,
+#         stop_loss: float,
+#         take_profit: float,
+#         direction: str,
+#         strategy_name: str,
+#         strategy_instance=None,
+#     ):
+#         async with self.position_lock:
+#             # Check for existing position for this security
+#             if security_id in self.positions_by_security:
+#                 logger.warning(
+#                     f"Position already exists for {ticker} (security_id: {security_id})"
+#                 )
+#                 return False
+
+#             # Enforce max positions limit
+#             if len(self.open_positions) >= self.max_open_positions:
+#                 logger.warning(
+#                     f"Max open positions ({self.max_open_positions}) reached, cannot add {ticker}"
+#                 )
+#                 return False
+
+#             # Create new position
+#             self.open_positions[order_id] = {
+#                 "security_id": security_id,
+#                 "ticker": ticker,
+#                 "entry_price": entry_price,
+#                 "quantity": quantity,
+#                 "stop_loss": stop_loss,
+#                 "take_profit": take_profit,
+#                 "direction": direction,
+#                 "strategy_name": strategy_name,
+#                 "entry_time": datetime.now(IST),
+#                 "last_updated": datetime.now(IST),
+#             }
+#             self.positions_by_security[security_id] = order_id
+
+#             # Store strategy instance for exit signal monitoring
+#             if strategy_instance:
+#                 self.strategy_instances[order_id] = strategy_instance
+
+#             logger.info(
+#                 f"Added position {order_id} for {ticker}: {direction} @ ₹{entry_price:.2f} using {strategy_name}"
+#             )
+#             return True
+
+#     async def check_strategy_exit_signals(
+#         self, security_id: int, current_data: pd.DataFrame
+#     ):
+#         """Check if any strategy is generating exit signals for open positions"""
+#         async with self.position_lock:
+#             order_id = self.positions_by_security.get(security_id)
+#             if not order_id or order_id not in self.open_positions:
+#                 return None
+
+#             position = self.open_positions[order_id]
+#             strategy_instance = self.strategy_instances.get(order_id)
+
+#             if not strategy_instance:
+#                 return None
+
+#             try:
+#                 # Update strategy instance with new data
+#                 strategy_instance.data = current_data
+
+#                 # Check if strategy wants to exit
+#                 # For strategies with open positions, we need to check their exit conditions
+#                 if hasattr(strategy_instance, "should_exit"):
+#                     exit_signal = strategy_instance.should_exit()
+#                     if exit_signal:
+#                         return {
+#                             "action": "exit",
+#                             "reason": exit_signal.get("reason", "Strategy exit signal"),
+#                             "price": current_data.iloc[-1]["close"],
+#                         }
+
+#                 # Alternative: Run strategy and check if it closed the position
+#                 last_signal = strategy_instance.run()
+#                 if (
+#                     strategy_instance.open_positions == []
+#                     and len(strategy_instance.completed_trades) > 0
+#                 ):
+#                     # Position was closed by strategy
+#                     last_trade = strategy_instance.completed_trades[-1]
+#                     return {
+#                         "action": "exit",
+#                         "reason": "Strategy completed trade",
+#                         "price": last_trade["exit_price"],
+#                         "pnl": last_trade["pnl"],
+#                     }
+
+#             except Exception as e:
+#                 logger.error(
+#                     f"Error checking exit signal for {position['ticker']}: {e}"
+#                 )
+
+#             return None
+
+#     async def execute_strategy_exit(self, order_id: str, exit_info: dict):
+#         """Execute exit based on strategy signal"""
+#         async with self.position_lock:
+#             if order_id not in self.open_positions:
+#                 return False
+
+#             position = self.open_positions[order_id]
+#             exit_direction = "SELL" if position["direction"] == "BUY" else "BUY"
+
+#             # Place market order for exit
+#             exit_order = await place_market_order(
+#                 position["security_id"], exit_direction, position["quantity"]
+#             )
+
+#             if exit_order and exit_order.get("orderId"):
+#                 # Calculate P&L
+#                 current_price = exit_info["price"]
+#                 entry_price = position["entry_price"]
+#                 quantity = position["quantity"]
+
+#                 if position["direction"] == "BUY":
+#                     pnl = (current_price - entry_price) * quantity
+#                 else:
+#                     pnl = (entry_price - current_price) * quantity
+
+#                 # Send exit notification
+#                 await self.send_exit_notification(
+#                     position, exit_info, pnl, current_price
+#                 )
+
+#                 # Remove position
+#                 await self.close_position(order_id)
+
+#                 return True
+
+#             return False
+
+#     async def send_exit_notification(
+#         self, position: dict, exit_info: dict, pnl: float, exit_price: float
+#     ):
+#         """Send detailed exit notification"""
+#         pnl_emoji = "📈" if pnl > 0 else "📉"
+#         status_emoji = "✅" if pnl > 0 else "❌"
+
+#         hold_time = datetime.now(IST) - position["entry_time"]
+#         hold_minutes = int(hold_time.total_seconds() / 60)
+
+#         message = (
+#             f"*{position['ticker']} EXIT SIGNAL* {status_emoji}\n"
+#             f"Strategy: {position['strategy_name']}\n"
+#             f"Direction: {position['direction']}\n"
+#             f"Entry: ₹{position['entry_price']:.2f} → Exit: ₹{exit_price:.2f}\n"
+#             f"Quantity: {position['quantity']}\n"
+#             f"P&L: ₹{pnl:.2f} {pnl_emoji}\n"
+#             f"Hold Time: {hold_minutes} minutes\n"
+#             f"Reason: {exit_info['reason']}\n"
+#             f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
+#         )
+
+#         await send_telegram_alert(message)
+
+#         # Log the exit
+#         trade_logger.info(
+#             f"EXIT EXECUTED | {position['ticker']} | {position['direction']} | "
+#             f"Entry: ₹{position['entry_price']:.2f} | Exit: ₹{exit_price:.2f} | "
+#             f"P&L: ₹{pnl:.2f} | Reason: {exit_info['reason']}"
+#         )
+
+#     async def monitor_positions(self):
+#         """Enhanced position monitoring with strategy exit signals"""
+#         while True:
+#             try:
+#                 async with self.position_lock:
+#                     now = datetime.now(IST)
+
+#                     if not self.open_positions:
+#                         await asyncio.sleep(60)
+#                         continue
+
+#                     # Check each position for exit signals
+#                     for order_id, position in list(self.open_positions.items()):
+#                         security_id = position["security_id"]
+#                         ticker = position["ticker"]
+
+#                         # Get current market data
+#                         combined_data = await get_combined_data(security_id)
+#                         if combined_data is None or len(combined_data) < 10:
+#                             continue
+
+#                         # Get current quote for price monitoring
+#                         quotes = await fetch_realtime_quote([security_id])
+#                         quote = quotes.get(security_id)
+#                         if not quote:
+#                             continue
+
+#                         current_price = quote["price"]
+
+#                         # 1. Check strategy exit signals first
+#                         strategy_exit = await self.check_strategy_exit_signals(
+#                             security_id, combined_data
+#                         )
+#                         if strategy_exit:
+#                             logger.info(
+#                                 f"Strategy exit signal for {ticker}: {strategy_exit['reason']}"
+#                             )
+#                             await self.execute_strategy_exit(order_id, strategy_exit)
+#                             continue
+
+#                         # 2. Check traditional stop-loss/take-profit
+#                         exit_triggered = False
+#                         exit_reason = ""
+
+#                         if position["direction"] == "BUY":
+#                             if current_price <= position["stop_loss"]:
+#                                 exit_triggered = True
+#                                 exit_reason = "Stop-loss hit"
+#                             elif current_price >= position["take_profit"]:
+#                                 exit_triggered = True
+#                                 exit_reason = "Take-profit hit"
+#                         else:  # SELL
+#                             if current_price >= position["stop_loss"]:
+#                                 exit_triggered = True
+#                                 exit_reason = "Stop-loss hit"
+#                             elif current_price <= position["take_profit"]:
+#                                 exit_triggered = True
+#                                 exit_reason = "Take-profit hit"
+
+#                         if exit_triggered:
+#                             exit_info = {
+#                                 "action": "exit",
+#                                 "reason": exit_reason,
+#                                 "price": current_price,
+#                             }
+#                             await self.execute_strategy_exit(order_id, exit_info)
+#                             continue
+
+#                         # 3. Update trailing stops
+#                         if (
+#                             now - position["last_updated"]
+#                         ).total_seconds() > 300:  # Every 5 minutes
+#                             regime, adx_value, atr_value = calculate_regime(
+#                                 combined_data
+#                             )
+#                             if atr_value > 0:
+#                                 if position["direction"] == "BUY":
+#                                     new_sl = max(
+#                                         position["stop_loss"],
+#                                         current_price - atr_value * 1.5,
+#                                     )
+#                                     if new_sl > position["stop_loss"]:
+#                                         await self.update_position(
+#                                             order_id, stop_loss=new_sl
+#                                         )
+#                                         logger.info(
+#                                             f"Updated trailing stop for {ticker}: ₹{new_sl:.2f}"
+#                                         )
+#                                 else:
+#                                     new_sl = min(
+#                                         position["stop_loss"],
+#                                         current_price + atr_value * 1.5,
+#                                     )
+#                                     if new_sl < position["stop_loss"]:
+#                                         await self.update_position(
+#                                             order_id, stop_loss=new_sl
+#                                         )
+#                                         logger.info(
+#                                             f"Updated trailing stop for {ticker}: ₹{new_sl:.2f}"
+#                                         )
+
+#                 await asyncio.sleep(
+#                     30
+#                 )  # Check every 30 seconds for faster exit signals
+
+#             except Exception as e:
+#                 logger.error(f"Enhanced position monitor error: {e}", exc_info=True)
+#                 await asyncio.sleep(300)
+
+
 class PositionManager:
     def __init__(self):
         self.open_positions = {}
+        self.positions_by_security = {}
+        self.strategy_instances = {}
         self.max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", 10))
         self.position_lock = asyncio.Lock()
+        self.last_trade_times = {}
+        self.last_trade_lock = asyncio.Lock()
+        self.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", 30))
+
+    async def get_last_trade_time(self, ticker: str) -> Optional[datetime]:
+        """Get last trade time for a ticker with thread safety"""
+        async with self.last_trade_lock:
+            return self.last_trade_times.get(ticker)
+
+    async def update_last_trade_time(self, ticker: str, trade_time: datetime):
+        """Update last trade time for a ticker with thread safety"""
+        async with self.last_trade_lock:
+            self.last_trade_times[ticker] = trade_time
+            logger.debug(f"Updated last trade time for {ticker}: {trade_time}")
+            await self.save_trade_times()
+
+    async def save_trade_times(self):
+        """Persist trade times to disk for restart resilience"""
+        try:
+            with open("last_trades.pkl", "wb") as f:
+                pickle.dump(self.last_trade_times, f)
+        except Exception as e:
+            logger.error(f"Failed to save trade times: {e}")
+
+    async def load_trade_times(self):
+        """Load trade times from disk on startup"""
+        try:
+            if os.path.exists("last_trades.pkl"):
+                with open("last_trades.pkl", "rb") as f:
+                    self.last_trade_times = pickle.load(f)
+                    logger.info(
+                        f"Loaded {len(self.last_trade_times)} trade times from disk"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to load trade times: {e}")
 
     async def add_position(
         self,
@@ -153,13 +584,24 @@ class PositionManager:
         stop_loss: float,
         take_profit: float,
         direction: str,
+        strategy_name: str,
+        strategy_instance=None,
     ):
+        """Add a new position to the manager"""
         async with self.position_lock:
+            # Check for existing position
+            if security_id in self.positions_by_security:
+                logger.warning(f"Position already exists for {ticker}")
+                return False
+
+            # Enforce max positions limit
             if len(self.open_positions) >= self.max_open_positions:
                 logger.warning(
-                    f"Max open positions ({self.max_open_positions}) reached, cannot add {ticker}"
+                    f"Max open positions reached ({self.max_open_positions})"
                 )
                 return False
+
+            # Create new position
             self.open_positions[order_id] = {
                 "security_id": security_id,
                 "ticker": ticker,
@@ -168,121 +610,732 @@ class PositionManager:
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
                 "direction": direction,
+                "strategy_name": strategy_name,
+                "entry_time": datetime.now(IST),
                 "last_updated": datetime.now(IST),
             }
+            self.positions_by_security[security_id] = order_id
+
+            # Store strategy instance for exit monitoring
+            if strategy_instance:
+                self.strategy_instances[order_id] = strategy_instance
+
             logger.info(
                 f"Added position {order_id} for {ticker}: {direction} @ ₹{entry_price:.2f}"
             )
             return True
 
-    async def update_position(
-        self, order_id: str, stop_loss: float = None, take_profit: float = None
+    async def update_position(self, order_id: str, **updates):
+        """Update position parameters (e.g., trailing stop)"""
+        async with self.position_lock:
+            if order_id in self.open_positions:
+                position = self.open_positions[order_id]
+                position.update(updates)
+                position["last_updated"] = datetime.now(IST)
+                logger.info(f"Updated position {order_id}: {updates}")
+
+    async def close_position(self, order_id: str):
+        """Remove a position from the manager"""
+        async with self.position_lock:
+            if order_id in self.open_positions:
+                position = self.open_positions[order_id]
+                security_id = position["security_id"]
+
+                # Remove from security index
+                if security_id in self.positions_by_security:
+                    del self.positions_by_security[security_id]
+
+                # Remove strategy instance
+                if order_id in self.strategy_instances:
+                    del self.strategy_instances[order_id]
+
+                # Remove position
+                del self.open_positions[order_id]
+
+                logger.info(f"Closed position {order_id} for {position['ticker']}")
+
+    async def check_strategy_exit_signals(
+        self, security_id: int, current_data: pd.DataFrame
     ):
+        """Check for exit signals from strategy instances"""
+        async with self.position_lock:
+            order_id = self.positions_by_security.get(security_id)
+            if not order_id or order_id not in self.open_positions:
+                return None
+
+            position = self.open_positions[order_id]
+            strategy_instance = self.strategy_instances.get(order_id)
+
+            if not strategy_instance:
+                return None
+
+            try:
+                # Update strategy with new data
+                strategy_instance.data = current_data
+
+                # Check strategy-specific exit conditions
+                if hasattr(strategy_instance, "should_exit"):
+                    exit_signal = strategy_instance.should_exit()
+                    if exit_signal:
+                        return {
+                            "action": "exit",
+                            "reason": exit_signal.get("reason", "Strategy exit"),
+                            "price": current_data.iloc[-1]["close"],
+                        }
+
+                # Check if strategy automatically closed position
+                if hasattr(strategy_instance, "open_positions") and hasattr(
+                    strategy_instance, "completed_trades"
+                ):
+                    if (
+                        not strategy_instance.open_positions
+                        and strategy_instance.completed_trades
+                    ):
+                        last_trade = strategy_instance.completed_trades[-1]
+                        return {
+                            "action": "exit",
+                            "reason": "Strategy closed position",
+                            "price": last_trade.get(
+                                "exit_price", current_data.iloc[-1]["close"]
+                            ),
+                        }
+
+            except Exception as e:
+                logger.error(f"Exit signal check error for {position['ticker']}: {e}")
+
+            return None
+
+    async def execute_strategy_exit(self, order_id: str, exit_info: dict):
+        """Execute exit based on strategy signal"""
         async with self.position_lock:
             if order_id not in self.open_positions:
                 return False
-            pos = self.open_positions[order_id]
-            if stop_loss:
-                pos["stop_loss"] = stop_loss
-            if take_profit:
-                pos["take_profit"] = take_profit
-            pos["last_updated"] = datetime.now(IST)
-            logger.info(
-                f"Updated position {order_id} for {pos['ticker']}: SL=₹{pos['stop_loss']:.2f}, TP=₹{pos['take_profit']:.2f}"
-            )
-            return True
 
-    async def close_position(self, order_id: str):
-        async with self.position_lock:
-            if order_id in self.open_positions:
-                pos = self.open_positions.pop(order_id)
-                logger.info(f"Closed position {order_id} for {pos['ticker']}")
+            position = self.open_positions[order_id]
+            exit_direction = "SELL" if position["direction"] == "BUY" else "BUY"
+
+            # Place market order for exit
+            exit_order = await place_market_order(
+                position["security_id"], exit_direction, position["quantity"]
+            )
+
+            if exit_order and exit_order.get("orderId"):
+                # Calculate P&L
+                current_price = exit_info["price"]
+                entry_price = position["entry_price"]
+                quantity = position["quantity"]
+                pnl = (
+                    (current_price - entry_price) * quantity
+                    if position["direction"] == "BUY"
+                    else (entry_price - current_price) * quantity
+                )
+
+                # Send exit notification
+                await self.send_exit_notification(
+                    position, exit_info, pnl, current_price
+                )
+
+                # Remove position
+                await self.close_position(order_id)
                 return True
             return False
 
+    async def send_exit_notification(
+        self, position: dict, exit_info: dict, pnl: float, exit_price: float
+    ):
+        """Send detailed exit notification"""
+        pnl_emoji = "📈" if pnl > 0 else "📉"
+        status_emoji = "✅" if pnl > 0 else "❌"
+        hold_time = datetime.now(IST) - position["entry_time"]
+        hold_minutes = int(hold_time.total_seconds() / 60)
+
+        message = (
+            f"*{position['ticker']} EXIT SIGNAL* {status_emoji}\n"
+            f"Strategy: {position['strategy_name']}\n"
+            f"Direction: {position['direction']}\n"
+            f"Entry: ₹{position['entry_price']:.2f} → Exit: ₹{exit_price:.2f}\n"
+            f"Quantity: {position['quantity']}\n"
+            f"P&L: ₹{pnl:.2f} {pnl_emoji}\n"
+            f"Hold Time: {hold_minutes} minutes\n"
+            f"Reason: {exit_info['reason']}\n"
+            f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
+        )
+
+        await send_telegram_alert(message)
+        trade_logger.info(
+            f"EXIT | {position['ticker']} | {position['direction']} | "
+            f"Entry: ₹{position['entry_price']:.2f} | Exit: ₹{exit_price:.2f} | "
+            f"P&L: ₹{pnl:.2f} | Reason: {exit_info['reason']}"
+        )
+
     async def monitor_positions(self):
-        """Background task to monitor and update positions"""
+        """Continuous position monitoring with exit checks"""
         while True:
             try:
                 async with self.position_lock:
-                    now = datetime.now(IST)
-                    security_ids = [
-                        pos["security_id"] for pos in self.open_positions.values()
-                    ]
-
-                    if not security_ids:
-                        await asyncio.sleep(60)
+                    if not self.open_positions:
+                        await asyncio.sleep(30)
                         continue
 
-                    quotes = await fetch_realtime_quote(security_ids)
+                    # Process each position
+                    for order_id, position in list(self.open_positions.items()):
+                        security_id = position["security_id"]
+                        ticker = position["ticker"]
 
-                    for order_id, pos in list(self.open_positions.items()):
-                        quote = quotes.get(pos["security_id"])
+                        # Get current market data
+                        combined_data = await get_combined_data(security_id)
+                        if combined_data is None or len(combined_data) < 10:
+                            continue
+
+                        # Get current quote
+                        quotes = await fetch_realtime_quote([security_id])
+                        quote = quotes.get(security_id)
                         if not quote:
                             continue
                         current_price = quote["price"]
 
-                        if pos["direction"] == "BUY":
-                            if current_price <= pos["stop_loss"]:
-                                await place_market_order(
-                                    pos["security_id"], "SELL", pos["quantity"]
-                                )
-                                await self.close_position(order_id)
-                                await send_telegram_alert(
-                                    f"*{pos['ticker']} STOP-LOSS HIT* 🛑\nPrice: ₹{current_price:.2f}"
-                                )
-                            elif current_price >= pos["take_profit"]:
-                                await place_market_order(
-                                    pos["security_id"], "SELL", pos["quantity"]
-                                )
-                                await self.close_position(order_id)
-                                await send_telegram_alert(
-                                    f"*{pos['ticker']} TAKE-PROFIT HIT* 🎯\nPrice: ₹{current_price:.2f}"
-                                )
-                        else:  # SELL
-                            if current_price >= pos["stop_loss"]:
-                                await place_market_order(
-                                    pos["security_id"], "BUY", pos["quantity"]
-                                )
-                                await self.close_position(order_id)
-                                await send_telegram_alert(
-                                    f"*{pos['ticker']} STOP-LOSS HIT* 🛑\nPrice: ₹{current_price:.2f}"
-                                )
-                            elif current_price <= pos["take_profit"]:
-                                await place_market_order(
-                                    pos["security_id"], "BUY", pos["quantity"]
-                                )
-                                await self.close_position(order_id)
-                                await send_telegram_alert(
-                                    f"*{pos['ticker']} TAKE-PROFIT HIT* 🎯\nPrice: ₹{current_price:.2f}"
-                                )
+                        # 1. Check strategy exit signals
+                        exit_signal = await self.check_strategy_exit_signals(
+                            security_id, combined_data
+                        )
+                        if exit_signal:
+                            logger.info(
+                                f"{ticker} exit signal: {exit_signal['reason']}"
+                            )
+                            await self.execute_strategy_exit(order_id, exit_signal)
+                            continue
 
-                        if (now - pos["last_updated"]).total_seconds() > 300:
-                            hist_data = await get_combined_data(pos["security_id"])
-                            if hist_data is not None:
-                                _, _, atr = calculate_regime(hist_data)
-                                if pos["direction"] == "BUY":
+                        # 2. Check stop-loss/take-profit
+                        exit_triggered = False
+                        if position["direction"] == "BUY":
+                            if current_price <= position["stop_loss"]:
+                                exit_info = {
+                                    "reason": "Stop-loss hit",
+                                    "price": current_price,
+                                }
+                                exit_triggered = True
+                            elif current_price >= position["take_profit"]:
+                                exit_info = {
+                                    "reason": "Take-profit hit",
+                                    "price": current_price,
+                                }
+                                exit_triggered = True
+                        else:  # SELL
+                            if current_price >= position["stop_loss"]:
+                                exit_info = {
+                                    "reason": "Stop-loss hit",
+                                    "price": current_price,
+                                }
+                                exit_triggered = True
+                            elif current_price <= position["take_profit"]:
+                                exit_info = {
+                                    "reason": "Take-profit hit",
+                                    "price": current_price,
+                                }
+                                exit_triggered = True
+
+                        if exit_triggered:
+                            await self.execute_strategy_exit(order_id, exit_info)
+                            continue
+
+                        # 3. Update trailing stops every 5 minutes
+                        now = datetime.now(IST)
+                        if (now - position["last_updated"]).total_seconds() > 300:
+                            regime, adx_value, atr_value = calculate_regime(
+                                combined_data
+                            )
+                            if atr_value > 0:
+                                if position["direction"] == "BUY":
                                     new_sl = max(
-                                        pos["stop_loss"], current_price - atr * 1.5
+                                        position["stop_loss"],
+                                        current_price - atr_value * 1.5,
                                     )
-                                    await self.update_position(
-                                        order_id, stop_loss=new_sl
-                                    )
+                                    if new_sl > position["stop_loss"]:
+                                        await self.update_position(
+                                            order_id, stop_loss=new_sl
+                                        )
                                 else:
                                     new_sl = min(
-                                        pos["stop_loss"], current_price + atr * 1.5
+                                        position["stop_loss"],
+                                        current_price + atr_value * 1.5,
                                     )
-                                    await self.update_position(
-                                        order_id, stop_loss=new_sl
-                                    )
+                                    if new_sl < position["stop_loss"]:
+                                        await self.update_position(
+                                            order_id, stop_loss=new_sl
+                                        )
 
-                await asyncio.sleep(60)
+                await asyncio.sleep(30)  # Check every 30 seconds
+
             except Exception as e:
                 logger.error(f"Position monitor error: {e}")
-                await asyncio.sleep(300)
+                await asyncio.sleep(60)
 
 
 position_manager = PositionManager()
+
+
+async def execute_strategy_signal(
+    ticker: str,
+    security_id: int,
+    signal: str,
+    regime: str,
+    adx_value: float,
+    atr_value: float,
+    hist_data: pd.DataFrame,
+    strategy_name: str,
+    strategy_instance=None,
+    **params,
+) -> bool:
+    """Enhanced signal execution with success tracking"""
+    try:
+        # Add volatility filter
+        volatility = await calculate_stock_volatility(security_id)
+        if volatility > VOLATILITY_THRESHOLD:
+            logger.warning(
+                f"Skipping {ticker} due to high volatility: {volatility:.4f}"
+            )
+            return False
+
+        current_pnl = await pnl_tracker.update_daily_pnl()
+        if current_pnl <= -MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:
+            message = (
+                f"🛑 TRADING HALTED: Daily loss limit reached\n"
+                f"Current P&L: ₹{current_pnl:.2f}\n"
+                f"Limit: ₹{-MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:.2f}"
+            )
+            await send_telegram_alert(message)
+            logger.critical("Daily loss limit reached - trading halted")
+            return False
+
+        quotes = await fetch_realtime_quote([security_id])
+        quote = quotes.get(security_id)
+        if not quote:
+            logger.warning(f"Price unavailable for {ticker}")
+            return False
+
+        current_price = quote["price"]
+        vwap = await calculate_vwap(hist_data)
+        entry_price = (
+            min(current_price, vwap * 0.998)
+            if signal == "BUY"
+            else max(current_price, vwap * 1.002)
+        )
+
+        risk_params = calculate_risk_params(regime, atr_value, entry_price, signal)
+        now = datetime.now(IST)
+
+        # Add emoji for direction
+        direction_emoji = "[BUY]" if signal == "BUY" else "[SELL]"
+        funds = dhan.get_fund_limits().get("data", {}).get("availabelBalance", 0)
+        if funds > current_price / 5:
+            position_size = (
+                risk_params["position_size"] if funds > (entry_price / 5) * 2 else 1
+            )
+            message = (
+                f"*{ticker} ENTRY SIGNAL* {direction_emoji}\n"
+                f"Strategy: {strategy_name}\n"
+                f"Direction: {signal}\n"
+                f"Entry: ₹{entry_price:.2f} | VWAP: ₹{vwap:.2f}\n"
+                f"Current: ₹{current_price:.2f}\n"
+                f"Regime: {regime} (ADX: {adx_value:.2f})\n"
+                f"Volatility: {volatility:.4f}\n"
+                f"Size: {risk_params['position_size']} | SL: ₹{risk_params['stop_loss']:.2f}\n"
+                f"TP: ₹{risk_params['take_profit']:.2f}\n"
+                f"Risk: ₹{abs(entry_price - risk_params['stop_loss']) * risk_params['position_size']:.2f}\n"
+                f"Params: {params}\n"
+                f"Time: {now.strftime('%H:%M:%S')}"
+            )
+            logger.info(
+                f"Executing {signal} signal for {ticker}: {message.replace('₹', 'Rs')}"
+            )
+            order_response = await place_super_order(
+                security_id,
+                signal,
+                entry_price,
+                risk_params["stop_loss"],
+                risk_params["take_profit"],
+                position_size,
+            )
+
+            if order_response and order_response.get("orderId"):
+                # Use enhanced position manager
+                await position_manager.add_position(
+                    order_response["orderId"],
+                    security_id,
+                    ticker,
+                    entry_price,
+                    position_size,
+                    risk_params["stop_loss"],
+                    risk_params["take_profit"],
+                    signal,
+                    strategy_name,
+                    strategy_instance,
+                )
+                await send_telegram_alert(message)
+                return True  # Success!
+            else:
+                await send_telegram_alert(
+                    f"*{ticker} Order Failed* ❌\nSignal: {signal} at ₹{entry_price:.2f}"
+                )
+                return False
+        else:
+            await send_telegram_alert(
+                f"*{ticker} Order Failed* ❌\nSignal: {signal} at ₹{entry_price:.2f} due to insufficient funds"
+            )
+            return False
+
+    except Exception as e:
+        logger.error(f"Enhanced signal execution failed for {ticker}: {str(e)}")
+        return False
+
+
+# async def process_stock_with_exit_monitoring(
+#     ticker: str, security_id: int, strategies: List[Dict]
+# ) -> None:
+#     """Enhanced stock processing with exit signal monitoring"""
+#     async with adaptive_semaphore:
+#         try:
+#             logger.info(f"Processing {ticker} (ID: {security_id})")
+
+#             combined_data = await get_combined_data(security_id)
+#             if combined_data is None:
+#                 logger.warning(f"{ticker} - No data available")
+#                 return
+
+#             # Check if we have existing position for this stock
+#             existing_position = position_manager.positions_by_security.get(security_id)
+
+#             if existing_position:
+#                 # For existing positions, focus on exit signal monitoring
+#                 exit_signal = await position_manager.check_strategy_exit_signals(
+#                     security_id, combined_data
+#                 )
+#                 if exit_signal:
+#                     logger.info(
+#                         f"{ticker} - Exit signal detected: {exit_signal['reason']}"
+#                     )
+#                 return
+
+#             # Regular entry signal processing (existing code)
+#             data_length = len(combined_data)
+#             min_bars_list = []
+
+#             for strat in strategies:
+#                 try:
+#                     strategy_class = get_strategy(strat["Strategy"])
+#                     params = strat.get("Best_Parameters", {})
+#                     if isinstance(params, str) and params.strip():
+#                         try:
+#                             params = ast.literal_eval(params)
+#                         except (ValueError, SyntaxError) as e:
+#                             logger.warning(f"{ticker} - Failed to parse params: {e}")
+#                             params = {}
+#                     elif not isinstance(params, dict):
+#                         params = {}
+
+#                     min_data_points = strategy_class.get_min_data_points(params)
+#                     min_bars_list.append(min_data_points)
+#                 except Exception as e:
+#                     logger.warning(f"{ticker} - Error calculating min bars: {e}")
+#                     min_bars_list.append(30)
+
+#             min_bars = max(min_bars_list) if min_bars_list else 30
+#             if data_length < min_bars:
+#                 logger.warning(
+#                     f"{ticker} - Insufficient data ({data_length} < {min_bars})"
+#                 )
+#                 return
+
+#             regime, adx_value, atr_value = calculate_regime(combined_data)
+#             logger.info(
+#                 f"{ticker} - Regime: {regime} (ADX: {adx_value:.2f}, ATR: {atr_value:.2f})"
+#             )
+
+#             signals = []
+#             strategy_instances = []
+
+#             for strat in strategies:
+#                 strategy_name = strat["Strategy"]
+#                 try:
+#                     strategy_class = get_strategy(strategy_name)
+#                 except KeyError:
+#                     logger.warning(f"{ticker} - Strategy {strategy_name} not found")
+#                     continue
+
+#                 params = strat.get("Best_Parameters", {})
+#                 if isinstance(params, str) and params.strip():
+#                     try:
+#                         params = ast.literal_eval(params)
+#                     except (ValueError, SyntaxError) as e:
+#                         logger.warning(f"{ticker} - Failed to parse params: {e}")
+#                         params = {}
+#                 elif not isinstance(params, dict):
+#                     params = {}
+
+#                 try:
+#                     strategy_instance = strategy_class(combined_data, **params)
+#                     signal = strategy_instance.run()
+
+#                     if signal in ["BUY", "SELL"]:
+#                         signals.append(signal)
+#                         strategy_instances.append(
+#                             {
+#                                 "instance": strategy_instance,
+#                                 "name": strategy_name,
+#                                 "signal": signal,
+#                                 "params": params,
+#                             }
+#                         )
+#                         logger.info(f"{ticker} - {strategy_name} signal: {signal}")
+
+#                 except Exception as e:
+#                     logger.error(
+#                         f"{ticker} - {strategy_name} execution failed: {str(e)}"
+#                     )
+
+#             if not signals:
+#                 return
+
+#             signal_counts = {"BUY": signals.count("BUY"), "SELL": signals.count("SELL")}
+#             buy_votes = signal_counts["BUY"]
+#             sell_votes = signal_counts["SELL"]
+#             logger.info(
+#                 f"{ticker} - Signal votes - BUY: {buy_votes}, SELL: {sell_votes}, Strategy: {strategy_name}"
+#             )
+#             # Execute signal with strategy instance for exit monitoring
+#             if buy_votes >= MIN_VOTES and buy_votes > sell_votes:
+#                 # Find the strongest BUY signal strategy instance
+#                 buy_strategies = [s for s in strategy_instances if s["signal"] == "BUY"]
+#                 primary_strategy = buy_strategies[
+#                     0
+#                 ]  # Use first BUY strategy for monitoring
+
+#                 await execute_strategy_signal(
+#                     ticker,
+#                     security_id,
+#                     "BUY",
+#                     regime,
+#                     adx_value,
+#                     atr_value,
+#                     combined_data,
+#                     primary_strategy["name"],
+#                     primary_strategy["instance"],
+#                     **primary_strategy["params"],
+#                 )
+
+#             elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
+#                 # Find the strongest SELL signal strategy instance
+#                 sell_strategies = [
+#                     s for s in strategy_instances if s["signal"] == "SELL"
+#                 ]
+#                 primary_strategy = sell_strategies[
+#                     0
+#                 ]  # Use first SELL strategy for monitoring
+
+#                 await execute_strategy_signal(
+#                     ticker,
+#                     security_id,
+#                     "SELL",
+#                     regime,
+#                     adx_value,
+#                     atr_value,
+#                     combined_data,
+#                     primary_strategy["name"],
+#                     primary_strategy["instance"],
+#                     **primary_strategy["params"],
+#                 )
+
+#         except Exception as e:
+#             logger.error(f"{ticker} - Enhanced processing failed: {str(e)}")
+
+
+async def process_stock_with_exit_monitoring(
+    ticker: str, security_id: int, strategies: List[Dict]
+) -> None:
+    """Enhanced stock processing with exit signal monitoring and cooldown period"""
+    async with adaptive_semaphore:
+        try:
+            logger.info(f"Processing {ticker} (ID: {security_id})")
+
+            # Get current time with timezone
+            current_time = datetime.now(IST)
+
+            # Check if we have existing position for this stock (bypass cooldown for exits)
+            existing_position = position_manager.positions_by_security.get(security_id)
+
+            if existing_position:
+                # For existing positions, focus on exit signal monitoring (bypass cooldown)
+                combined_data = await get_combined_data(security_id)
+                if combined_data is None:
+                    logger.warning(f"{ticker} - No data available for exit check")
+                    return
+
+                exit_signal = await position_manager.check_strategy_exit_signals(
+                    security_id, combined_data
+                )
+                if exit_signal:
+                    logger.info(
+                        f"{ticker} - Exit signal detected: {exit_signal['reason']}"
+                    )
+                    await position_manager.execute_strategy_exit(
+                        existing_position, exit_signal
+                    )
+                return
+
+            # Check cooldown period for new entries
+            last_trade_time = await position_manager.get_last_trade_time(ticker)
+
+            if last_trade_time and current_time < last_trade_time + timedelta(
+                minutes=position_manager.cooldown_minutes
+            ):
+                logger.info(
+                    f"{ticker} - Skipping due to {position_manager.cooldown_minutes}-minute cooldown period"
+                )
+                return
+
+            combined_data = await get_combined_data(security_id)
+            if combined_data is None:
+                logger.warning(f"{ticker} - No data available")
+                return
+
+            # Regular entry signal processing
+            data_length = len(combined_data)
+            min_bars_list = []
+
+            for strat in strategies:
+                try:
+                    strategy_class = get_strategy(strat["Strategy"])
+                    params = strat.get("Best_Parameters", {})
+                    if isinstance(params, str) and params.strip():
+                        try:
+                            params = ast.literal_eval(params)
+                        except (ValueError, SyntaxError) as e:
+                            logger.warning(f"{ticker} - Failed to parse params: {e}")
+                            params = {}
+                    elif not isinstance(params, dict):
+                        params = {}
+
+                    min_data_points = strategy_class.get_min_data_points(params)
+                    min_bars_list.append(min_data_points)
+                except Exception as e:
+                    logger.warning(f"{ticker} - Error calculating min bars: {e}")
+                    min_bars_list.append(30)
+
+            min_bars = max(min_bars_list) if min_bars_list else 30
+            if data_length < min_bars:
+                logger.warning(
+                    f"{ticker} - Insufficient data ({data_length} < {min_bars})"
+                )
+                return
+
+            regime, adx_value, atr_value = calculate_regime(combined_data)
+            logger.info(
+                f"{ticker} - Regime: {regime} (ADX: {adx_value:.2f}, ATR: {atr_value:.2f})"
+            )
+
+            signals = []
+            strategy_instances = []
+
+            for strat in strategies:
+                strategy_name = strat["Strategy"]
+                try:
+                    strategy_class = get_strategy(strategy_name)
+                except KeyError:
+                    logger.warning(f"{ticker} - Strategy {strategy_name} not found")
+                    continue
+
+                params = strat.get("Best_Parameters", {})
+                if isinstance(params, str) and params.strip():
+                    try:
+                        params = ast.literal_eval(params)
+                    except (ValueError, SyntaxError) as e:
+                        logger.warning(f"{ticker} - Failed to parse params: {e}")
+                        params = {}
+                elif not isinstance(params, dict):
+                    params = {}
+
+                try:
+                    strategy_instance = strategy_class(combined_data, **params)
+                    signal = strategy_instance.run()
+
+                    if signal in ["BUY", "SELL"]:
+                        signals.append(signal)
+                        strategy_instances.append(
+                            {
+                                "instance": strategy_instance,
+                                "name": strategy_name,
+                                "signal": signal,
+                                "params": params,
+                            }
+                        )
+                        logger.info(f"{ticker} - {strategy_name} signal: {signal}")
+
+                except Exception as e:
+                    logger.error(
+                        f"{ticker} - {strategy_name} execution failed: {str(e)}"
+                    )
+
+            if not signals:
+                return
+
+            signal_counts = {"BUY": signals.count("BUY"), "SELL": signals.count("SELL")}
+            buy_votes = signal_counts["BUY"]
+            sell_votes = signal_counts["SELL"]
+            min_vote_diff = int(os.getenv("MIN_VOTE_DIFF", 1))
+
+            logger.info(
+                f"{ticker} - Signal votes - BUY: {buy_votes}, SELL: {sell_votes}"
+            )
+
+            # Execute signal with strategy instance for exit monitoring
+            if buy_votes >= MIN_VOTES and (buy_votes - sell_votes) >= min_vote_diff:
+                # Find the strongest BUY signal strategy instance
+                buy_strategies = [s for s in strategy_instances if s["signal"] == "BUY"]
+                primary_strategy = buy_strategies[0]
+
+                # Execute and update trade time only if successful
+                executed = await execute_strategy_signal(
+                    ticker,
+                    security_id,
+                    "BUY",
+                    regime,
+                    adx_value,
+                    atr_value,
+                    combined_data,
+                    primary_strategy["name"],
+                    primary_strategy["instance"],
+                    **primary_strategy["params"],
+                )
+
+                if executed:
+                    await position_manager.update_last_trade_time(ticker, current_time)
+
+            elif sell_votes >= MIN_VOTES and (sell_votes - buy_votes) >= min_vote_diff:
+                # Find the strongest SELL signal strategy instance
+                sell_strategies = [
+                    s for s in strategy_instances if s["signal"] == "SELL"
+                ]
+                primary_strategy = sell_strategies[0]
+
+                # Execute and update trade time only if successful
+                executed = await execute_strategy_signal(
+                    ticker,
+                    security_id,
+                    "SELL",
+                    regime,
+                    adx_value,
+                    atr_value,
+                    combined_data,
+                    primary_strategy["name"],
+                    primary_strategy["instance"],
+                    **primary_strategy["params"],
+                )
+
+                if executed:
+                    await position_manager.update_last_trade_time(ticker, current_time)
+
+        except Exception as e:
+            logger.error(f"{ticker} - Enhanced processing failed: {str(e)}")
 
 
 class EnhancedCandle:
@@ -487,13 +1540,13 @@ async def place_super_order(
                     )
                     return data
                 else:
-                    logger.error(f"Order placement failed: {data}")
+                    trade_logger.error(f"Order placement failed: {data}")
             else:
                 text = await response.text()
-                logger.error(f"HTTP error {response.status}: {text}")
+                trade_logger.error(f"HTTP error {response.status}: {text}")
         return None
     except Exception as e:
-        logger.error(f"Order placement exception: {str(e)}")
+        trade_logger.error(f"Order placement exception: {str(e)}")
         return None
 
 
@@ -892,98 +1945,6 @@ class PnLTracker:
 pnl_tracker = PnLTracker()
 
 
-async def execute_strategy_signal(
-    ticker: str,
-    security_id: int,
-    signal: str,
-    regime: str,
-    adx_value: float,
-    atr_value: float,
-    hist_data: pd.DataFrame,
-):
-    try:
-        current_pnl = await pnl_tracker.update_daily_pnl()
-        if current_pnl <= -MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:
-            message = (
-                f"🛑 TRADING HALTED: Daily loss limit reached\n"
-                f"Current P&L: ₹{current_pnl:.2f}\n"
-                f"Limit: ₹{-MAX_DAILY_LOSS_PERCENT * ACCOUNT_SIZE:.2f}"
-            )
-            await send_telegram_alert(message)
-            logger.critical("Daily loss limit reached - trading halted")
-            return
-
-        if signal not in ["BUY", "SELL"]:
-            logger.warning(f"Invalid signal for {ticker}: {signal}")
-            return
-
-        quotes = await fetch_realtime_quote([security_id])
-        quote = quotes.get(security_id)
-        if not quote:
-            logger.warning(f"Price unavailable for {ticker}")
-            return
-
-        current_price = quote["price"]
-        vwap = await calculate_vwap(hist_data)
-        entry_price = (
-            min(current_price, vwap * 0.998)
-            if signal == "BUY"
-            else max(current_price, vwap * 1.002)
-        )
-
-        risk_params = calculate_risk_params(regime, atr_value, entry_price, signal)
-        now = datetime.now(IST)
-        volatility = await calculate_stock_volatility(security_id)
-
-        message = (
-            f"*{ticker} Signal* 📈\n"
-            f"Direction: {signal}\n"
-            f"Entry: ₹{entry_price:.2f} | VWAP: ₹{vwap:.2f}\n"
-            f"Current: ₹{current_price:.2f}\n"
-            f"Regime: {regime} (ADX: {adx_value:.2f})\n"
-            f"Volatility: {volatility:.3f}\n"
-            f"Size: {risk_params['position_size']} | SL: ₹{risk_params['stop_loss']:.2f}\n"
-            f"TP: ₹{risk_params['take_profit']:.2f}\n"
-            f"Risk: ₹{abs(entry_price - risk_params['stop_loss']) * risk_params['position_size']:.2f}\n"
-            f"Time: {now.strftime('%H:%M:%S')}"
-        )
-        print(
-            ">>>>>>>>>>>>>>>>>>",
-            dhan.get_fund_limits().get("data").get("availabelBalance"),
-        )
-        if (
-            dhan.get_fund_limits().get("data").get("availabelBalance")
-            > current_price / 5
-        ):
-            order_response = await place_super_order(
-                security_id,
-                signal,
-                entry_price,
-                risk_params["stop_loss"],
-                risk_params["take_profit"],
-                risk_params["position_size"],
-            )
-
-            if order_response and order_response.get("orderId"):
-                await position_manager.add_position(
-                    order_response["orderId"],
-                    security_id,
-                    ticker,
-                    entry_price,
-                    risk_params["position_size"],
-                    risk_params["stop_loss"],
-                    risk_params["take_profit"],
-                    signal,
-                )
-            await send_telegram_alert(message)
-        else:
-            await send_telegram_alert(
-                f"*{ticker} Order Failed* ❌\nSignal: {signal} at ₹{entry_price:.2f}"
-            )
-    except Exception as e:
-        logger.error(f"Signal execution failed for {ticker}: {str(e)}")
-
-
 async def calculate_stock_volatility(security_id: int) -> float:
     cache_key = f"vol_{security_id}_{date.today()}"
     if cache_key in cache_manager.volatility_cache:
@@ -1125,12 +2086,15 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     continue
 
                 try:
-                    strategy_instance = TrendlineWilliams(combined_data, **params)
+                    strategy_instance = strategy_class(combined_data, **params)
                     signal = strategy_instance.run()
                     if signal in ["BUY", "SELL"]:
                         signals.append(signal)
                         logger.info(f"{ticker} - {strategy_name} signal: {signal}")
                 except Exception as e:
+                    import traceback
+
+                    traceback.print_exc()
                     logger.error(
                         f"{ticker} - {strategy_name} execution failed: {str(e)}"
                     )
@@ -1153,6 +2117,8 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     adx_value,
                     atr_value,
                     combined_data,
+                    strategy_name,
+                    **params,
                 )
             elif sell_votes >= MIN_VOTES and sell_votes > buy_votes:
                 logger.info(f"{ticker} - Executing SELL signal")
@@ -1164,6 +2130,8 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                     adx_value,
                     atr_value,
                     combined_data,
+                    strategy_name,
+                    **params,
                 )
             else:
                 logger.info(f"{ticker} - No final signal")
@@ -1273,6 +2241,7 @@ async def cleanup_resources():
 async def main_trading_loop():
     try:
         await telegram_queue.start()
+        await send_telegram_alert("Bot started successfully")
         await initialize_live_data_from_config()
 
         try:
@@ -1301,6 +2270,8 @@ async def main_trading_loop():
             asyncio.create_task(send_heartbeat()),
             asyncio.create_task(cleanup_resources()),
             asyncio.create_task(position_manager.monitor_positions()),
+            asyncio.create_task(position_manager.load_trade_times()),
+            asyncio.create_task(position_manager.monitor_positions()),
         ]
 
         batch_size = 3
@@ -1310,7 +2281,9 @@ async def main_trading_loop():
                 batch = stock_universe[i : i + batch_size]
                 batch_tasks = [
                     asyncio.create_task(
-                        process_stock(s["ticker"], s["security_id"], s["strategies"])
+                        process_stock_with_exit_monitoring(
+                            s["ticker"], s["security_id"], s["strategies"]
+                        )
                     )
                     for s in batch
                 ]

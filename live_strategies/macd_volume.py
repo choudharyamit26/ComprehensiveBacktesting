@@ -11,131 +11,87 @@ logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
 
 
-class PivotCCI:
+class MACDVolume:
     """
-    Pivot Points + CCI Strategy
-    (Documentation remains unchanged)
+    MACD + Volume Confirmation Strategy (pandas_ta implementation)
+
+    This version conforms to the same structure as sr_rsi.py:
+    - params and optimization_params
+    - __init__(data, **kwargs) computing indicators with pandas_ta
+    - run() with market hour checks and position management
+    - _notify_order() and _close_position() to manage positions and trade logs
+    - get_param_space() and get_min_data_points()
     """
 
     params = {
-        "cci_period": 14,
-        "pivot_proximity": 0.5,
-        "cci_oversold": -100,
-        "cci_overbought": 100,
-        "cci_exit": 0,
+        "fast_period": 12,
+        "slow_period": 26,
+        "signal_period": 9,
+        "volume_period": 20,
+        "volume_spike": 1.5,
+        "volume_dry": 1.0,
         "verbose": False,
     }
 
     optimization_params = {
-        "cci_period": {"type": "int", "low": 10, "high": 20, "step": 1},
-        "pivot_proximity": {"type": "float", "low": 0.3, "high": 1.0, "step": 0.1},
-        "cci_oversold": {"type": "int", "low": -150, "high": -50, "step": 10},
-        "cci_overbought": {"type": "int", "low": 50, "high": 150, "step": 10},
-        "cci_exit": {"type": "int", "low": -20, "high": 20, "step": 5},
+        "fast_period": {"type": "int", "low": 8, "high": 16, "step": 1},
+        "slow_period": {"type": "int", "low": 20, "high": 35, "step": 1},
+        "signal_period": {"type": "int", "low": 6, "high": 12, "step": 1},
+        "volume_period": {"type": "int", "low": 10, "high": 50, "step": 1},
+        "volume_spike": {"type": "float", "low": 1.2, "high": 2.0, "step": 0.05},
+        "volume_dry": {"type": "float", "low": 0.5, "high": 1.0, "step": 0.05},
     }
 
     def __init__(self, data, tickers=None, **kwargs):
         self.data = data.copy()
         self.data["datetime"] = pd.to_datetime(self.data["datetime"])
         self.params.update(kwargs)
+
         self.order = None
         self.order_type = None
-        self.last_signal = None  # Initialize last_signal
+        self.last_signal = None
         self.ready = False
         self.trade_count = 0
-        self.warmup_period = self.params["cci_period"] + 5
+        self.warmup_period = (
+            max(
+                self.params["slow_period"] + self.params["signal_period"],
+                self.params["volume_period"],
+            )
+            + 5
+        )
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
 
-        # Initialize indicators using pandas_ta
-        self.data["cci"] = ta.cci(
-            self.data["high"],
-            self.data["low"],
+        # Indicators: MACD line, signal line, histogram
+        macd = ta.macd(
             self.data["close"],
-            length=self.params["cci_period"],
+            fast=self.params["fast_period"],
+            slow=self.params["slow_period"],
+            signal=self.params["signal_period"],
         )
+        self.data["macd_line"] = macd[
+            f"MACD_{self.params['fast_period']}_{self.params['slow_period']}_{self.params['signal_period']}"
+        ]
+        self.data["macd_signal"] = macd[
+            f"MACDs_{self.params['fast_period']}_{self.params['slow_period']}_{self.params['signal_period']}"
+        ]
+        self.data["macd_hist"] = macd[
+            f"MACDh_{self.params['fast_period']}_{self.params['slow_period']}_{self.params['signal_period']}"
+        ]
 
-        # Calculate pivot points
-        self.data["prev_high"] = self.data["high"].shift(1)
-        self.data["prev_low"] = self.data["low"].shift(1)
-        self.data["prev_close"] = self.data["close"].shift(1)
-        self.data["pivot"] = (
-            self.data["prev_high"] + self.data["prev_low"] + self.data["prev_close"]
-        ) / 3
-        self.data["r1"] = (2 * self.data["pivot"]) - self.data["prev_low"]
-        self.data["s1"] = (2 * self.data["pivot"]) - self.data["prev_high"]
-        self.data["r2"] = self.data["pivot"] + (
-            self.data["prev_high"] - self.data["prev_low"]
+        # Volume indicators
+        self.data["volume_sma"] = ta.sma(
+            self.data["volume"], length=self.params["volume_period"]
         )
-        self.data["s2"] = self.data["pivot"] - (
-            self.data["prev_high"] - self.data["prev_low"]
-        )
+        self.data["vol_ratio"] = self.data["volume"] / self.data["volume_sma"]
 
-        # Define conditions
-        self.data["near_s1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s1"]) / x["s1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_s2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["s2"]) / x["s2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["s2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r1"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r1"]) / x["r1"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r1"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["near_r2"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["r2"]) / x["r2"]
-                < self.params["pivot_proximity"] / 100
-                if pd.notna(x["r2"])
-                else False
-            ),
-            axis=1,
-        )
-        self.data["bullish_entry"] = (
-            self.data["cci"] < self.params["cci_oversold"]
-        ) & (self.data["near_s1"] | self.data["near_s2"])
-        self.data["bearish_entry"] = (
-            self.data["cci"] > self.params["cci_overbought"]
-        ) & (self.data["near_r1"] | self.data["near_r2"])
-        self.data["bullish_exit"] = (self.data["cci"] > self.params["cci_exit"]) | (
-            self.data["close"] >= self.data["pivot"]
-        )
-        self.data["bearish_exit"] = (self.data["cci"] < self.params["cci_exit"]) | (
-            self.data["close"] <= self.data["pivot"]
-        )
-
-        logger.debug(f"Initialized PivotCCI with params: {self.params}")
-        logger.info(
-            f"PivotCCI initialized with cci_period={self.params['cci_period']}, "
-            f"pivot_proximity={self.params['pivot_proximity']}, cci_oversold={self.params['cci_oversold']}, "
-            f"cci_overbought={self.params['cci_overbought']}, cci_exit={self.params['cci_exit']}"
-        )
+        logger.debug(f"Initialized MACDVolume with params: {self.params}")
 
     def run(self):
-        self.last_signal = None  # Reset last_signal at the start of run
+        self.last_signal = None
         for idx in range(len(self.data)):
             if idx < self.warmup_period:
-                logger.debug(
-                    f"Skipping row {idx}: still in warmup period (need {self.warmup_period} rows)"
-                )
                 continue
 
             if not self.ready:
@@ -161,92 +117,102 @@ class PivotCCI:
                 logger.debug(f"Order pending at row {idx}")
                 continue
 
-            # Check for invalid indicator values
-            if pd.isna(self.data.iloc[idx]["cci"]) or pd.isna(
-                self.data.iloc[idx]["pivot"]
+            # Validate indicator values
+            if (
+                pd.isna(self.data.iloc[idx]["macd_line"])
+                or pd.isna(self.data.iloc[idx]["macd_signal"])
+                or pd.isna(self.data.iloc[idx]["volume_sma"])
+                or pd.isna(self.data.iloc[idx - 1]["macd_line"])
+                or pd.isna(self.data.iloc[idx - 1]["macd_signal"])
+                or self.data.iloc[idx]["volume_sma"] == 0
             ):
-                logger.debug(f"Invalid indicator values at row {idx}")
                 continue
 
-            # Store indicator data for analysis
+            current = self.data.iloc[idx]
+            prev = self.data.iloc[idx - 1]
+
+            # Signals
+            cross_up = (current["macd_line"] > current["macd_signal"]) and (
+                prev["macd_line"] <= prev["macd_signal"]
+            )
+            cross_down = (current["macd_line"] < current["macd_signal"]) and (
+                prev["macd_line"] >= prev["macd_signal"]
+            )
+            vol_spike = current["vol_ratio"] > self.params["volume_spike"]
+            volume_dry = current["vol_ratio"] < self.params["volume_dry"]
+
+            # Store indicator data
             self.indicator_data.append(
                 {
                     "date": bar_time_ist.strftime("%Y-%m-%d %H:%M:%S"),
-                    "close": self.data.iloc[idx]["close"],
-                    "cci": self.data.iloc[idx]["cci"],
-                    "pivot": self.data.iloc[idx]["pivot"],
-                    "s1": self.data.iloc[idx]["s1"],
-                    "s2": self.data.iloc[idx]["s2"],
-                    "r1": self.data.iloc[idx]["r1"],
-                    "r2": self.data.iloc[idx]["r2"],
+                    "close": current["close"],
+                    "macd": current["macd_line"],
+                    "signal": current["macd_signal"],
+                    "hist": current["macd_hist"],
+                    "vol_ratio": current["vol_ratio"],
+                    "cross_up": cross_up,
+                    "cross_down": cross_down,
                 }
             )
 
-            # Check for trading signals
             if not self.open_positions:
-                if self.data.iloc[idx]["bullish_entry"]:
+                if cross_up and vol_spike:
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
                         "order_type": "enter_long",
                         "status": "Completed",
-                        "executed_price": self.data.iloc[idx]["close"],
+                        "executed_price": current["close"],
                         "size": 100,
-                        "commission": abs(self.data.iloc[idx]["close"] * 100 * 0.001),
+                        "commission": abs(current["close"] * 100 * 0.001),
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "buy"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                        f"BUY SIGNAL (MACD Bullish + Volume Spike) | Time: {bar_time_ist} | "
+                        f"Price: {current['close']:.2f} | MACD: {current['macd_line']:.4f} > Signal: {current['macd_signal']:.4f} | "
+                        f"VolRatio: {current['vol_ratio']:.2f} > {self.params['volume_spike']:.2f}"
                     )
-                elif self.data.iloc[idx]["bearish_entry"]:
+                elif cross_down and vol_spike:
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
                         "order_type": "enter_short",
                         "status": "Completed",
-                        "executed_price": self.data.iloc[idx]["close"],
+                        "executed_price": current["close"],
                         "size": -100,
-                        "commission": abs(self.data.iloc[idx]["close"] * 100 * 0.001),
+                        "commission": abs(current["close"] * 100 * 0.001),
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
                     self._notify_order(idx)
                     trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                        f"SELL SIGNAL (MACD Bearish + Volume Spike) | Time: {bar_time_ist} | "
+                        f"Price: {current['close']:.2f} | MACD: {current['macd_line']:.4f} < Signal: {current['macd_signal']:.4f} | "
+                        f"VolRatio: {current['vol_ratio']:.2f} > {self.params['volume_spike']:.2f}"
                     )
                 else:
                     self.last_signal = None
             else:
-                if (
-                    self.open_positions[-1]["direction"] == "long"
-                    and self.data.iloc[idx]["bullish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bullish exit condition", "sell", "exit_long"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']}"
-                    )
-                elif (
-                    self.open_positions[-1]["direction"] == "short"
-                    and self.data.iloc[idx]["bearish_exit"]
-                ):
-                    self._close_position(
-                        idx, "Bearish exit condition", "buy", "exit_short"
-                    )
-                    self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']}"
-                    )
-                else:
-                    self.last_signal = None
+                # Exit logic
+                if self.open_positions[-1]["direction"] == "long":
+                    if cross_down or volume_dry:
+                        reason = "MACD Bearish Cross" if cross_down else "Volume Dry"
+                        self._close_position(idx, reason, "sell", "exit_long")
+                        self.last_signal = None
+                        trade_logger.info(
+                            f"EXIT LONG | Time: {bar_time_ist} | Price: {current['close']:.2f} | Reason: {reason}"
+                        )
+                elif self.open_positions[-1]["direction"] == "short":
+                    if cross_up or volume_dry:
+                        reason = "MACD Bullish Cross" if cross_up else "Volume Dry"
+                        self._close_position(idx, reason, "buy", "exit_short")
+                        self.last_signal = None
+                        trade_logger.info(
+                            f"EXIT SHORT | Time: {bar_time_ist} | Price: {current['close']:.2f} | Reason: {reason}"
+                        )
+
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -370,21 +336,23 @@ class PivotCCI:
     @classmethod
     def get_param_space(cls, trial):
         params = {
-            "cci_period": trial.suggest_int("cci_period", 10, 20),
-            "pivot_proximity": trial.suggest_float(
-                "pivot_proximity", 0.3, 1.0, step=0.1
-            ),
-            "cci_oversold": trial.suggest_int("cci_oversold", -150, -50, step=10),
-            "cci_overbought": trial.suggest_int("cci_overbought", 50, 150, step=10),
-            "cci_exit": trial.suggest_int("cci_exit", -20, 20, step=5),
+            "fast_period": trial.suggest_int("fast_period", 8, 16),
+            "slow_period": trial.suggest_int("slow_period", 20, 35),
+            "signal_period": trial.suggest_int("signal_period", 6, 12),
+            "volume_period": trial.suggest_int("volume_period", 10, 50),
+            "volume_spike": trial.suggest_float("volume_spike", 1.2, 2.0),
+            "volume_dry": trial.suggest_float("volume_dry", 0.5, 1.0),
         }
         return params
 
     @classmethod
     def get_min_data_points(cls, params):
         try:
-            cci_period = params.get("cci_period", 14)
-            return cci_period + 5
+            slow_period = params.get("slow_period", 26)
+            signal_period = params.get("signal_period", 9)
+            volume_period = params.get("volume_period", 20)
+            max_period = max(slow_period + signal_period, volume_period)
+            return max_period + 5
         except Exception as e:
             logger.error(f"Error calculating min_data_points: {str(e)}")
-            return 20
+            return 65

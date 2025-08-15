@@ -740,7 +740,7 @@ def plot_composite_backtest_results(results, data):
         return None
 
 
-def load_tickers_from_file(file_path="etfs.csv"):
+def load_tickers_from_file(file_path="nifty50_highbeta_stocks.csv"):
     """
     Load tickers from a CSV file with a 'ticker' column, validate them using yfinance,
     and save validated tickers to a new CSV file.

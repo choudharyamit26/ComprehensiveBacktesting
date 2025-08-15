@@ -14,7 +14,7 @@ trade_logger = logging.getLogger("trade_logger")
 class VWAPBounceRejection:
     """
     VWAP Bounce/Rejection Strategy
-    (Documentation remains unchanged)
+    Fixed version to handle RangeIndex to_period error
     """
 
     params = {
@@ -36,7 +36,23 @@ class VWAPBounceRejection:
 
     def __init__(self, data, tickers=None, **kwargs):
         self.data = data.copy()
+
+        # Convert datetime column to datetime if it's not already
         self.data["datetime"] = pd.to_datetime(self.data["datetime"])
+
+        # CRITICAL FIX: Set datetime as index for pandas_ta functions
+        # Store the original index if needed
+        self.original_index = self.data.index.copy()
+
+        # Create a temporary DataFrame with DatetimeIndex for indicator calculations
+        temp_data = self.data.set_index("datetime").copy()
+        # Ensure pandas_ta sees a tz-naive DatetimeIndex to avoid PeriodArray tz warning
+        if (
+            isinstance(temp_data.index, pd.DatetimeIndex)
+            and temp_data.index.tz is not None
+        ):
+            temp_data.index = temp_data.index.tz_convert(pytz.UTC).tz_localize(None)
+
         self.params.update(kwargs)
         self.order = None
         self.order_type = None
@@ -52,42 +68,146 @@ class VWAPBounceRejection:
         self.session_open_price = None
         self.current_date = None
 
-        # Initialize indicators using pandas_ta
-        self.data["vwap"] = ta.vwap(
-            self.data["high"], self.data["low"], self.data["close"], self.data["volume"]
-        )
-        self.data["atr"] = ta.atr(
-            self.data["high"],
-            self.data["low"],
-            self.data["close"],
-            length=self.params["atr_period"],
-        )
-        self.data["volume_avg"] = (
-            self.data["volume"].rolling(window=self.params["volume_lookback"]).mean()
-        )
+        try:
+            # Initialize indicators using pandas_ta with DatetimeIndex
+            logger.debug("Calculating VWAP with DatetimeIndex...")
+            vwap_values = ta.vwap(
+                temp_data["high"],
+                temp_data["low"],
+                temp_data["close"],
+                temp_data["volume"],
+            )
 
-        # Candlestick pattern detection
-        self.data["bullish_pattern"] = self._detect_bullish_pattern()
-        self.data["bearish_pattern"] = self._detect_bearish_pattern()
+            logger.debug("Calculating ATR...")
+            atr_values = ta.atr(
+                temp_data["high"],
+                temp_data["low"],
+                temp_data["close"],
+                length=self.params["atr_period"],
+            )
 
-        # Define conditions
-        self.data["volume_rising"] = self.data["volume"] > self.data["volume_avg"]
-        self.data["near_vwap"] = self.data.apply(
-            lambda x: (
-                abs(x["close"] - x["vwap"])
-                <= x["atr"] * self.params["vwap_proximity_mult"]
-                if pd.notna(x["vwap"]) and pd.notna(x["atr"])
-                else False
-            ),
-            axis=1,
-        )
+            # Assign calculated indicators back to original DataFrame
+            self.data["vwap"] = (
+                vwap_values.values if vwap_values is not None else np.nan
+            )
+            self.data["atr"] = atr_values.values if atr_values is not None else np.nan
 
-        logger.debug(f"Initialized VWAPBounceRejection with params: {self.params}")
-        logger.info(
-            f"VWAPBounceRejection initialized with atr_period={self.params['atr_period']}, "
-            f"volume_lookback={self.params['volume_lookback']}, stop_loss_atr_mult={self.params['stop_loss_atr_mult']}, "
-            f"vwap_proximity_mult={self.params['vwap_proximity_mult']}, profit_target_mult={self.params['profit_target_mult']}"
-        )
+            logger.debug("Calculating volume average...")
+            self.data["volume_avg"] = (
+                self.data["volume"]
+                .rolling(window=self.params["volume_lookback"])
+                .mean()
+            )
+
+            # Candlestick pattern detection
+            logger.debug("Detecting candlestick patterns...")
+            self.data["bullish_pattern"] = self._detect_bullish_pattern()
+            self.data["bearish_pattern"] = self._detect_bearish_pattern()
+
+            # Define conditions
+            self.data["volume_rising"] = self.data["volume"] > self.data["volume_avg"]
+            self.data["near_vwap"] = self.data.apply(
+                lambda x: (
+                    abs(x["close"] - x["vwap"])
+                    <= x["atr"] * self.params["vwap_proximity_mult"]
+                    if pd.notna(x["vwap"]) and pd.notna(x["atr"])
+                    else False
+                ),
+                axis=1,
+            )
+
+            logger.debug(f"Initialized VWAPBounceRejection with params: {self.params}")
+            logger.info(
+                f"VWAPBounceRejection initialized with atr_period={self.params['atr_period']}, "
+                f"volume_lookback={self.params['volume_lookback']}, stop_loss_atr_mult={self.params['stop_loss_atr_mult']}, "
+                f"vwap_proximity_mult={self.params['vwap_proximity_mult']}, profit_target_mult={self.params['profit_target_mult']}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error initializing indicators: {str(e)}")
+            # Fallback: calculate VWAP manually if pandas_ta fails
+            logger.info("Falling back to manual VWAP calculation...")
+            self.data["vwap"] = self._calculate_vwap_manual()
+            self.data["atr"] = self._calculate_atr_manual()
+            self.data["volume_avg"] = (
+                self.data["volume"]
+                .rolling(window=self.params["volume_lookback"])
+                .mean()
+            )
+            self.data["bullish_pattern"] = self._detect_bullish_pattern()
+            self.data["bearish_pattern"] = self._detect_bearish_pattern()
+            self.data["volume_rising"] = self.data["volume"] > self.data["volume_avg"]
+            self.data["near_vwap"] = self.data.apply(
+                lambda x: (
+                    abs(x["close"] - x["vwap"])
+                    <= x["atr"] * self.params["vwap_proximity_mult"]
+                    if pd.notna(x["vwap"]) and pd.notna(x["atr"])
+                    else False
+                ),
+                axis=1,
+            )
+
+    def _calculate_vwap_manual(self):
+        """Manual VWAP calculation as fallback"""
+        try:
+            typical_price = (
+                self.data["high"] + self.data["low"] + self.data["close"]
+            ) / 3
+            cumulative_typical_price_volume = (
+                typical_price * self.data["volume"]
+            ).cumsum()
+            cumulative_volume = self.data["volume"].cumsum()
+
+            # Reset cumulative values at the start of each day
+            dates = self.data["datetime"].dt.date
+            date_changed = dates != dates.shift(1)
+
+            vwap = np.full(len(self.data), np.nan)
+
+            for i in range(len(self.data)):
+                if date_changed.iloc[i] and i > 0:
+                    # Reset for new day
+                    start_idx = i
+                else:
+                    start_idx = 0 if i == 0 else start_idx
+
+                if i >= start_idx:
+                    cum_tpv = cumulative_typical_price_volume.iloc[i] - (
+                        cumulative_typical_price_volume.iloc[start_idx - 1]
+                        if start_idx > 0
+                        else 0
+                    )
+                    cum_vol = cumulative_volume.iloc[i] - (
+                        cumulative_volume.iloc[start_idx - 1] if start_idx > 0 else 0
+                    )
+
+                    if cum_vol > 0:
+                        vwap[i] = cum_tpv / cum_vol
+
+            return pd.Series(vwap, index=self.data.index)
+        except Exception as e:
+            logger.error(f"Manual VWAP calculation failed: {str(e)}")
+            return pd.Series(np.nan, index=self.data.index)
+
+    def _calculate_atr_manual(self):
+        """Manual ATR calculation as fallback"""
+        try:
+            high = self.data["high"]
+            low = self.data["low"]
+            close = self.data["close"]
+            prev_close = close.shift(1)
+
+            tr1 = high - low
+            tr2 = (high - prev_close).abs()
+            tr3 = (low - prev_close).abs()
+
+            true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            atr = true_range.rolling(window=self.params["atr_period"]).mean()
+
+            return atr
+        except Exception as e:
+            logger.error(f"Manual ATR calculation failed: {str(e)}")
+            return pd.Series(np.nan, index=self.data.index)
 
     def _detect_bullish_pattern(self):
         body = abs(self.data["close"] - self.data["open"])
@@ -110,9 +230,10 @@ class VWAPBounceRejection:
         )
 
     def _set_session_open(self, idx):
-        bar_time = self.data.iloc[idx]["datetime"].astimezone(
-            pytz.timezone("Asia/Kolkata")
-        )
+        bar_time = pd.Timestamp(self.data.iloc[idx]["datetime"])
+        if bar_time.tz is None:
+            bar_time = bar_time.tz_localize(pytz.UTC)
+        bar_time = bar_time.tz_convert(pytz.timezone("Asia/Kolkata"))
         current_date = bar_time.date()
         current_time = bar_time.time()
 
@@ -138,8 +259,10 @@ class VWAPBounceRejection:
                 self.ready = True
                 logger.info(f"Strategy ready at row {idx}")
 
-            bar_time = self.data.iloc[idx]["datetime"]
-            bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+            bar_time = pd.Timestamp(self.data.iloc[idx]["datetime"])
+            if bar_time.tz is None:
+                bar_time = bar_time.tz_localize(pytz.UTC)
+            bar_time_ist = bar_time.tz_convert(pytz.timezone("Asia/Kolkata"))
             current_time = bar_time_ist.time()
 
             # Set session open price

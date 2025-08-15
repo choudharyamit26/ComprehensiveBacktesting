@@ -40,32 +40,83 @@ def get_strategy_default_params(strategy_name):
                     if param_name not in ["verbose", "tickers", "analyzers"]:
                         defaults[param_name] = default_value
             return defaults
+
+        # Try optimization_params if params doesn't exist
+        if hasattr(strategy_class, "optimization_params"):
+            defaults = {}
+            for param_name, param_range in strategy_class.optimization_params.items():
+                if isinstance(param_range, (list, tuple)) and len(param_range) > 0:
+                    # Use middle value or first value as default
+                    if len(param_range) >= 2 and isinstance(
+                        param_range[0], (int, float)
+                    ):
+                        defaults[param_name] = param_range[len(param_range) // 2]
+                    else:
+                        defaults[param_name] = param_range[0]
+            return defaults
+
     except Exception as e:
         logger.warning(f"Could not get default params for {strategy_name}: {e}")
     return {}
 
 
 def extract_best_params_with_fallback(strategy_name, combined_metrics, ticker):
-    """Extract best params with fallback to defaults"""
+    """Extract best params with improved fallback logic"""
     best_params = {}
 
     # First try to get from walk-forward results
     for metric in combined_metrics:
         if metric["Ticker"] == ticker and metric["Strategy"] == strategy_name:
+            # Check walk-forward results first (most reliable)
             if "walkforward" in metric and metric["walkforward"]:
-                best_params = metric["walkforward"].get("best_params", {})
-                if best_params:  # Non-empty params found
-                    logger.info(
-                        f"Using walk-forward params for {ticker}-{strategy_name}: {best_params}"
-                    )
-                    return best_params
-            elif "optimization" in metric and metric["optimization"]:
-                best_params = metric["optimization"].get("best_params", {})
-                if best_params:  # Non-empty params found
-                    logger.info(
-                        f"Using optimization params for {ticker}-{strategy_name}: {best_params}"
-                    )
-                    return best_params
+                wf_data = metric["walkforward"]
+                if "best_params" in wf_data and wf_data["best_params"]:
+                    best_params = wf_data["best_params"]
+                    if isinstance(best_params, str):
+                        try:
+                            best_params = ast.literal_eval(best_params)
+                        except:
+                            best_params = {}
+
+                    if best_params and isinstance(best_params, dict):
+                        logger.info(
+                            f"Using walk-forward params for {ticker}-{strategy_name}: {best_params}"
+                        )
+                        return best_params
+
+            # Then check optimization results
+            if "optimization" in metric and metric["optimization"]:
+                opt_data = metric["optimization"]
+                if "best_params" in opt_data and opt_data["best_params"]:
+                    best_params = opt_data["best_params"]
+                    if isinstance(best_params, str):
+                        try:
+                            best_params = ast.literal_eval(best_params)
+                        except:
+                            best_params = {}
+
+                    if best_params and isinstance(best_params, dict):
+                        logger.info(
+                            f"Using optimization params for {ticker}-{strategy_name}: {best_params}"
+                        )
+                        return best_params
+
+            # Check backtest results for any saved params
+            if "backtest" in metric and metric["backtest"]:
+                bt_data = metric["backtest"]
+                if "best_params" in bt_data and bt_data["best_params"]:
+                    best_params = bt_data["best_params"]
+                    if isinstance(best_params, str):
+                        try:
+                            best_params = ast.literal_eval(best_params)
+                        except:
+                            best_params = {}
+
+                    if best_params and isinstance(best_params, dict):
+                        logger.info(
+                            f"Using backtest params for {ticker}-{strategy_name}: {best_params}"
+                        )
+                        return best_params
 
     # Fallback to strategy defaults
     default_params = get_strategy_default_params(strategy_name)
@@ -89,8 +140,29 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
     start_date = end_date - timedelta(days=365)
     interval = "5m"
     n_trials = 20
-    tickers = [stock["Stock"] for stock in selected_stocks]
-
+    # tickers = [stock["Stock"] for stock in selected_stocks]
+    tickers = [
+        "TATAMOTORS",
+        "JSWSTEEL",
+        "TATASTEEL",
+        "HINDALCO",
+        "SBIN",
+        "ADANIENT",
+        "ICICIBANK",
+        "AXISBANK",
+        "BAJFINANCE",
+        "M&M",
+        "KOTAKBANK",
+        "EICHERMOT",
+        "HDFCBANK",
+        "INDUSINDBK",
+        "MARUTI",
+        "LT",
+        "ULTRACEMCO",
+        "BAJAJFINSV",
+        "TECHM",
+        "ONGC",
+    ]
     all_basic_metrics = []
     all_walkforward_metrics = []
 
@@ -129,9 +201,17 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
 
                 if bt_report:
                     key = (ticker, strategy_name)
-                    ticker_basic_metrics[key] = {
-                        "backtest": extract_report_metrics(bt_report)
-                    }
+                    extracted_metrics = extract_report_metrics(bt_report)
+
+                    # Store any parameters that might be in the bt_report
+                    if hasattr(results[0], "_params") or "Params" in bt_report:
+                        params = getattr(
+                            results[0], "_params", bt_report.get("Params", {})
+                        )
+                        if params:
+                            extracted_metrics["best_params"] = params
+
+                    ticker_basic_metrics[key] = {"backtest": extracted_metrics}
 
             except Exception as e:
                 logger.warning(
@@ -210,12 +290,14 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
                         window_summary = wf.get_window_summary()
                         overall_metrics = wf.get_overall_metrics()
 
-                        # Process window summary
+                        # Process window summary and extract best params
+                        best_params_from_windows = {}
                         if (
                             not window_summary.empty
                             and "best_params" in window_summary.columns
                         ):
                             try:
+                                # Convert string representations to actual dicts
                                 window_summary["best_params"] = window_summary[
                                     "best_params"
                                 ].apply(
@@ -223,10 +305,31 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
                                         ast.literal_eval(x) if isinstance(x, str) else x
                                     )
                                 )
-                            except Exception:
-                                logger.warning(
-                                    "Could not convert best_params string to dict"
+
+                                # Get the best params from the most recent or best performing window
+                                latest_window = window_summary.iloc[-1]
+                                best_params_from_windows = latest_window.get(
+                                    "best_params", {}
                                 )
+
+                                logger.info(
+                                    f"Extracted best params from walk-forward: {best_params_from_windows}"
+                                )
+
+                            except Exception as param_error:
+                                logger.warning(
+                                    f"Could not convert best_params: {param_error}"
+                                )
+                                # Try to get params from the last window as backup
+                                if not window_summary.empty:
+                                    try:
+                                        last_params = window_summary.iloc[-1].get(
+                                            "best_params", {}
+                                        )
+                                        if isinstance(last_params, dict):
+                                            best_params_from_windows = last_params
+                                    except:
+                                        pass
 
                         # Clean up percentage columns
                         percent_cols = [
@@ -262,27 +365,21 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
                             / 100,  # Convert to decimal
                             "Max Drawdown": 0,  # Could calculate from window results if needed
                             "Total Trades": overall_metrics.get("total_windows", 0),
-                            "Params": {},  # Best params would need to be aggregated from windows
+                            "Params": best_params_from_windows,  # Include best params
                         }
 
                         key = (ticker, strategy_name)
+                        extracted_wf_metrics = extract_report_metrics(wf_report)
+
+                        # Ensure best_params is included
+                        if best_params_from_windows:
+                            extracted_wf_metrics["best_params"] = (
+                                best_params_from_windows
+                            )
+
                         ticker_walkforward_metrics[key] = {
-                            "walkforward": extract_report_metrics(wf_report)
+                            "walkforward": extracted_wf_metrics
                         }
-
-                        # Store the best parameters from the most recent window
-                        if not window_summary.empty:
-                            latest_window = window_summary.iloc[-1]
-                            best_params = latest_window.get("best_params", {})
-                            if isinstance(best_params, str):
-                                try:
-                                    best_params = ast.literal_eval(best_params)
-                                except:
-                                    best_params = {}
-
-                            ticker_walkforward_metrics[key]["walkforward"][
-                                "best_params"
-                            ] = best_params
 
                         logger.info(
                             f"Completed walk-forward analysis for {ticker} - {strategy_name}"
@@ -343,27 +440,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
         # Create consolidated metrics for final ranking
         final_consolidated_df = create_consolidated_metrics(combined_metrics)
 
-        # Format dictionary for proper display
-        format_dict = {}
-        for col in final_consolidated_df.columns:
-            if "win_rate" in col.lower():
-                format_dict[col] = "{:.2%}"
-            elif "composite_win_rate" in col.lower():
-                format_dict[col] = "{:.2%}"
-            elif "ratio" in col.lower() and "sharpe" in col.lower():
-                format_dict[col] = "{:.3f}"
-            elif (
-                "pct" in col.lower()
-                or "return" in col.lower()
-                or "degradation" in col.lower()
-            ):
-                format_dict[col] = "{:.2f}%"
-            elif "sharpe" in col.lower():
-                format_dict[col] = "{:.3f}"
-            elif "factor" in col.lower():
-                format_dict[col] = "{:.2f}"
-
-        # Generate top strategies per stock from the final results
+        # Generate top 8 strategies per stock from the final results
         top_strategies_per_stock = {}
         for ticker in final_consolidated_df["Ticker"].unique():
             stock_df = final_consolidated_df[final_consolidated_df["Ticker"] == ticker]
@@ -379,9 +456,10 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
             if not sort_columns:
                 sort_columns = ["Composite_Sharpe", "Composite_Win_Rate"]
 
+            # Get top 8 strategies instead of 5
             top_strategies = stock_df.sort_values(
                 by=sort_columns, ascending=False
-            ).head(5)[["Strategy"] + sort_columns]
+            ).head(8)[["Strategy"] + sort_columns]
 
             top_strategies_list = []
             for _, row in top_strategies.iterrows():
@@ -413,14 +491,30 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
             ]
         )
 
-        # Convert Best_Parameters to string for CSV export
+        # Convert Best_Parameters to string for CSV export, but ensure they're not empty
         if not top_strategies_df.empty:
+
+            def format_params(params):
+                if isinstance(params, dict) and params:
+                    return str(params)
+                elif isinstance(params, str) and params.strip() and params != "{}":
+                    return params
+                else:
+                    return "No parameters available"
+
             top_strategies_df["Best_Parameters"] = top_strategies_df[
                 "Best_Parameters"
-            ].apply(lambda x: str(x) if isinstance(x, dict) else x)
+            ].apply(format_params)
 
             # Save to CSV
-            top_strategies_df.to_csv("selected_stocks_strategies.csv", index=False)
+            top_strategies_df.to_csv(
+                "selected_stocks_strategies_with_walkforward.csv", index=False
+            )
+
+            # Log summary statistics
+            param_stats = top_strategies_df["Best_Parameters"].value_counts()
+            logger.info(f"Parameter statistics: {param_stats}")
+
             logger.info(
                 "Final backtest results with walk-forward analysis saved to 'selected_stocks_strategies.csv'"
             )
@@ -431,6 +525,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
             logger.info(
                 f"Final results include {len(top_strategies_df)} strategy-stock combinations"
             )
+            logger.info(f"Top 8 strategies saved per stock")
         else:
             logger.warning("No final results to save - empty DataFrame")
     else:
