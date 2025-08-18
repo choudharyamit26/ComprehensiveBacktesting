@@ -7,6 +7,9 @@ import os
 import argparse
 from datetime import time
 import pytz
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Parse command line arguments early
 parser = argparse.ArgumentParser(add_help=False)
