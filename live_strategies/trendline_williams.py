@@ -5,28 +5,29 @@ import datetime
 import logging
 import os
 from uuid import uuid4
-from vwap_bounce_rejection import VWAPBounceRejection
-from pivot_cci import PivotCCI
-from BB_PivotPoints_Strategy import BBPivotPointsStrategy
-from BB_VWAP_Strategy import BBVWAPStrategy
-from rsi_bb import RSIBB
-from head_shoulders_confirmation import HeadShouldersConfirmation
-from RSI_Supertrend_Intraday import RSISupertrendIntraday
-from rsi_cci import RSICCI
-from sr_rsi import SRRSI
-from sr_rsi_volume import SRRSIVolume
-from rsi_adx import RSIADX
-from EMAStochasticPullback import EMAStochasticPullback
-from BB_Supertrend_Strategy import BBSupertrendStrategy
-from ATR_Volume_expansion import ATRVolumeExpansion
-from supertrend_cci_cmf import SupertrendCCICMF
-from bsav_intraday import BSAV
-from ema_adx import EMAADXTrend
-from emamulti_strategy import EMAMultiStrategy
-from macd_volume import MACDVolume
-from rmbev_intraday import RMBEV
-from verv import VERV
-from pivot_cci import PivotCCI
+
+# from vwap_bounce_rejection import VWAPBounceRejection
+# from pivot_cci import PivotCCI
+# from BB_PivotPoints_Strategy import BBPivotPointsStrategy
+# from BB_VWAP_Strategy import BBVWAPStrategy
+# from rsi_bb import RSIBB
+# from head_shoulders_confirmation import HeadShouldersConfirmation
+# from RSI_Supertrend_Intraday import RSISupertrendIntraday
+# from rsi_cci import RSICCI
+# from sr_rsi import SRRSI
+# from sr_rsi_volume import SRRSIVolume
+# from rsi_adx import RSIADX
+# from EMAStochasticPullback import EMAStochasticPullback
+# from BB_Supertrend_Strategy import BBSupertrendStrategy
+# from ATR_Volume_expansion import ATRVolumeExpansion
+# from supertrend_cci_cmf import SupertrendCCICMF
+# from bsav_intraday import BSAV
+# from ema_adx import EMAADXTrend
+# from emamulti_strategy import EMAMultiStrategy
+# from macd_volume import MACDVolume
+# from rmbev_intraday import RMBEV
+# from verv import VERV
+# from pivot_cci import PivotCCI
 
 # Set up loggers
 logger = logging.getLogger(__name__)
@@ -564,220 +565,220 @@ class TrendlineWilliams:
             return 30
 
 
-if __name__ == "__main__":
-    os.makedirs("orders", exist_ok=True)
-    tickers = [
-        1922,
-        25,
-        317,
-        467,
-        694,
-        881,
-        910,
-        1333,
-        1363,
-        1394,
-        1594,
-        1922,
-        2031,
-        2475,
-        2885,
-        3045,
-        3456,
-        3499,
-        3787,
-        4306,
-        4963,
-        5258,
-        5900,
-        10999,
-        11483,
-        11532,
-        11630,
-        11723,
-        13538,
-        14977,
-        15083,
-        16675,
-        18143,
-        20374,
-    ]
-    for ticker in tickers:
-        print(f"Running strategy for ticker: {ticker}")
-        data = pd.read_csv(f"combined_data_{ticker}.csv")
-        strategy1 = TrendlineWilliams(data)
-        strategy1.run()
-        orders = strategy1.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_1.csv", index=False)
-        print("orders saved to orders_{ticker}_1.csv")
-        print("=================")
-        strategy2 = VWAPBounceRejection(data)
-        strategy2.run()
-        orders = strategy2.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_2.csv", index=False)
-        print("orders saved to orders_{ticker}_2.csv")
-        print("=================")
-        strategy3 = PivotCCI(data)
-        strategy3.run()
-        orders = strategy3.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_3.csv", index=False)
-        print("orders saved to orders_{ticker}_3.csv")
-        print("=================")
-        strategy4 = BBPivotPointsStrategy(data)
-        strategy4.run()
-        orders = strategy4.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_4.csv", index=False)
-        print("orders saved to orders_{ticker}_4.csv")
-        print("=================")
-        strategy5 = BBVWAPStrategy(data)
-        strategy5.run()
-        orders = strategy5.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_5.csv", index=False)
-        print("orders saved to orders_{ticker}_5.csv")
-        print("=================")
-        strategy6 = RSIBB(data)
-        strategy6.run()
-        orders = strategy6.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_6.csv", index=False)
-        print("orders saved to orders_{ticker}_6.csv")
-        print("=================")
-        strategy7 = HeadShouldersConfirmation(data)
-        strategy7.run()
-        orders = strategy7.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_7.csv", index=False)
-        print("orders saved to orders_{ticker}_7.csv")
-        print("=================")
-        strategy8 = RSISupertrendIntraday(data)
-        strategy8.run()
-        orders = strategy8.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_8.csv", index=False)
-        print("orders saved to orders_{ticker}_8.csv")
-        print("=================")
-        strategy9 = RSICCI(data)
-        strategy9.run()
-        orders = strategy9.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_9.csv", index=False)
-        print("orders saved to orders_{ticker}_9.csv")
-        print("=================")
-        strategy10 = SRRSI(data)
-        strategy10.run()
-        orders = strategy10.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_10.csv", index=False)
-        print("orders saved to orders_{ticker}_10.csv")
-        print("=================")
-        strategy11 = SRRSIVolume(data)
-        strategy11.run()
-        orders = strategy11.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_11.csv", index=False)
-        print("orders saved to orders_{ticker}_11.csv")
-        print("=================")
-        strategy12 = RSIADX(data)
-        strategy12.run()
-        orders = strategy12.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_12.csv", index=False)
-        print("orders saved to orders_{ticker}_12.csv")
-        print("=================")
-        strategy13 = EMAStochasticPullback(data)
-        strategy13.run()
-        orders = strategy13.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_13.csv", index=False)
-        print("orders saved to orders_{ticker}_13.csv")
-        print("=================")
-        strategy14 = BBSupertrendStrategy(data)
-        strategy14.run()
-        orders = strategy14.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_14.csv", index=False)
-        print("orders saved to orders_{ticker}_14.csv")
-        print("=================")
-        strategy15 = ATRVolumeExpansion(data)
-        strategy15.run()
-        orders = strategy15.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_15.csv", index=False)
-        print("orders saved to orders_{ticker}_15.csv")
-        print("=================")
-        strategy16 = SupertrendCCICMF(data)
-        strategy16.run()
-        orders = strategy16.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_16.csv", index=False)
-        print("orders saved to orders_{ticker}_16.csv")
-        print("=================")
-        strategy17 = BSAV(data)
-        strategy17.run()
-        orders = strategy17.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_17.csv", index=False)
-        print("orders saved to orders_{ticker}_17.csv")
-        print("=================")
-        strategy18 = EMAADXTrend(data)
-        strategy18.run()
-        orders = strategy18.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_18.csv", index=False)
-        print("orders saved to orders_{ticker}_18.csv")
-        print("=================")
-        strategy19 = EMAMultiStrategy(data)
-        strategy19.run()
-        orders = strategy19.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_19.csv", index=False)
-        print("orders saved to orders_{ticker}_19.csv")
-        print("=================")
-        strategy20 = MACDVolume(data)
-        strategy20.run()
-        orders = strategy20.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_20.csv", index=False)
-        print("orders saved to orders_{ticker}_20.csv")
-        print("=================")
-        strategy21 = RMBEV(data)
-        strategy21.run()
-        orders = strategy21.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_21.csv", index=False)
-        print("orders saved to orders_{ticker}_21.csv")
-        print("=================")
-        strategy22 = VERV(data)
-        strategy22.run()
-        orders = strategy22.completed_trades
-        print("================")
-        orders_df = pd.DataFrame(orders)
-        orders_df.to_csv(f"orders/orders_{ticker}_22.csv", index=False)
-        print("orders saved to orders_{ticker}_22.csv")
-        print("=================")
+# if __name__ == "__main__":
+#     os.makedirs("orders", exist_ok=True)
+#     tickers = [
+#         1922,
+#         25,
+#         317,
+#         467,
+#         694,
+#         881,
+#         910,
+#         1333,
+#         1363,
+#         1394,
+#         1594,
+#         1922,
+#         2031,
+#         2475,
+#         2885,
+#         3045,
+#         3456,
+#         3499,
+#         3787,
+#         4306,
+#         4963,
+#         5258,
+#         5900,
+#         10999,
+#         11483,
+#         11532,
+#         11630,
+#         11723,
+#         13538,
+#         14977,
+#         15083,
+#         16675,
+#         18143,
+#         20374,
+#     ]
+#     for ticker in tickers:
+#         print(f"Running strategy for ticker: {ticker}")
+#         data = pd.read_csv(f"combined_data/combined_data_{ticker}.csv")
+#         strategy1 = TrendlineWilliams(data)
+#         strategy1.run()
+#         orders = strategy1.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_1.csv", index=False)
+#         print("orders saved to orders_{ticker}_1.csv")
+#         print("=================")
+#         strategy2 = VWAPBounceRejection(data)
+#         strategy2.run()
+#         orders = strategy2.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_2.csv", index=False)
+#         print("orders saved to orders_{ticker}_2.csv")
+#         print("=================")
+#         strategy3 = PivotCCI(data)
+#         strategy3.run()
+#         orders = strategy3.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_3.csv", index=False)
+#         print("orders saved to orders_{ticker}_3.csv")
+#         print("=================")
+#         strategy4 = BBPivotPointsStrategy(data)
+#         strategy4.run()
+#         orders = strategy4.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_4.csv", index=False)
+#         print("orders saved to orders_{ticker}_4.csv")
+#         print("=================")
+#         strategy5 = BBVWAPStrategy(data)
+#         strategy5.run()
+#         orders = strategy5.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_5.csv", index=False)
+#         print("orders saved to orders_{ticker}_5.csv")
+#         print("=================")
+#         strategy6 = RSIBB(data)
+#         strategy6.run()
+#         orders = strategy6.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_6.csv", index=False)
+#         print("orders saved to orders_{ticker}_6.csv")
+#         print("=================")
+#         strategy7 = HeadShouldersConfirmation(data)
+#         strategy7.run()
+#         orders = strategy7.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_7.csv", index=False)
+#         print("orders saved to orders_{ticker}_7.csv")
+#         print("=================")
+#         strategy8 = RSISupertrendIntraday(data)
+#         strategy8.run()
+#         orders = strategy8.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_8.csv", index=False)
+#         print("orders saved to orders_{ticker}_8.csv")
+#         print("=================")
+#         strategy9 = RSICCI(data)
+#         strategy9.run()
+#         orders = strategy9.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_9.csv", index=False)
+#         print("orders saved to orders_{ticker}_9.csv")
+#         print("=================")
+#         strategy10 = SRRSI(data)
+#         strategy10.run()
+#         orders = strategy10.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_10.csv", index=False)
+#         print("orders saved to orders_{ticker}_10.csv")
+#         print("=================")
+#         strategy11 = SRRSIVolume(data)
+#         strategy11.run()
+#         orders = strategy11.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_11.csv", index=False)
+#         print("orders saved to orders_{ticker}_11.csv")
+#         print("=================")
+#         strategy12 = RSIADX(data)
+#         strategy12.run()
+#         orders = strategy12.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_12.csv", index=False)
+#         print("orders saved to orders_{ticker}_12.csv")
+#         print("=================")
+#         strategy13 = EMAStochasticPullback(data)
+#         strategy13.run()
+#         orders = strategy13.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_13.csv", index=False)
+#         print("orders saved to orders_{ticker}_13.csv")
+#         print("=================")
+#         strategy14 = BBSupertrendStrategy(data)
+#         strategy14.run()
+#         orders = strategy14.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_14.csv", index=False)
+#         print("orders saved to orders_{ticker}_14.csv")
+#         print("=================")
+#         strategy15 = ATRVolumeExpansion(data)
+#         strategy15.run()
+#         orders = strategy15.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_15.csv", index=False)
+#         print("orders saved to orders_{ticker}_15.csv")
+#         print("=================")
+#         strategy16 = SupertrendCCICMF(data)
+#         strategy16.run()
+#         orders = strategy16.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_16.csv", index=False)
+#         print("orders saved to orders_{ticker}_16.csv")
+#         print("=================")
+#         strategy17 = BSAV(data)
+#         strategy17.run()
+#         orders = strategy17.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_17.csv", index=False)
+#         print("orders saved to orders_{ticker}_17.csv")
+#         print("=================")
+#         strategy18 = EMAADXTrend(data)
+#         strategy18.run()
+#         orders = strategy18.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_18.csv", index=False)
+#         print("orders saved to orders_{ticker}_18.csv")
+#         print("=================")
+#         strategy19 = EMAMultiStrategy(data)
+#         strategy19.run()
+#         orders = strategy19.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_19.csv", index=False)
+#         print("orders saved to orders_{ticker}_19.csv")
+#         print("=================")
+#         strategy20 = MACDVolume(data)
+#         strategy20.run()
+#         orders = strategy20.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_20.csv", index=False)
+#         print("orders saved to orders_{ticker}_20.csv")
+#         print("=================")
+#         strategy21 = RMBEV(data)
+#         strategy21.run()
+#         orders = strategy21.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_21.csv", index=False)
+#         print("orders saved to orders_{ticker}_21.csv")
+#         print("=================")
+#         strategy22 = VERV(data)
+#         strategy22.run()
+#         orders = strategy22.completed_trades
+#         print("================")
+#         orders_df = pd.DataFrame(orders)
+#         orders_df.to_csv(f"orders/orders_{ticker}_22.csv", index=False)
+#         print("orders saved to orders_{ticker}_22.csv")
+#         print("=================")

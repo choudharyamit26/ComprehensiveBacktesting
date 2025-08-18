@@ -10,6 +10,12 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import threading
 import queue
+from historical_cache import (
+    historical_cache,
+    fetch_historical_data_with_cache,
+    get_cache_info,
+    clear_cache_for_today,
+)
 
 logger = logging.getLogger(__name__)
 from comprehensive_backtesting.data import init_dhan_client
@@ -84,136 +90,95 @@ CONFIG = {
 
 
 async def fetch_historical_data(tickers, exchange_segment):
-    if not dhan:
-        logger.error(f"Cannot fetch historical data: Dhan client not initialized")
-        return None
-    try:
-        ist_tz = pytz.timezone("Asia/Kolkata")
-        today = datetime.now(ist_tz)
-        current_date = today - timedelta(days=1)
-        trading_sessions = {sec_id: [] for sec_id in tickers[exchange_segment]}
-        days_checked = 0
-        max_days_to_check = 10
-        NSE_HOLIDAYS_2025 = [
-            "2025-01-26",
-            "2025-03-14",
-        ]
-        while (
-            any(len(sessions) < 2 for sessions in trading_sessions.values())
-            and days_checked < max_days_to_check
-        ):
-            if (
-                current_date.weekday() >= 5
-                or current_date.strftime("%Y-%m-%d") in NSE_HOLIDAYS_2025
-            ):
-                logger.info(f"Skipping non-trading day {current_date.date()}")
-                current_date -= timedelta(days=1)
-                days_checked += 1
-                continue
-            from_date = datetime.combine(
-                current_date.date(), CONFIG["MARKET_OPEN"]
-            ).replace(tzinfo=ist_tz)
-            to_date = datetime.combine(
-                current_date.date(), CONFIG["HISTORICAL_DATA_END"]
-            ).replace(tzinfo=ist_tz)
-            from_date_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
-            to_date_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
-            for security_id in tickers[exchange_segment]:
-                if len(trading_sessions[security_id]) >= 2:
-                    continue
-                logger.info(
-                    f"Fetching historical data for {security_id} from {from_date_str} to {to_date_str}"
-                )
-                import time
+    """
+    Enhanced fetch_historical_data with intelligent caching.
+    This replaces the original function in live_data.py
+    """
+    return await fetch_historical_data_with_cache(tickers, exchange_segment)
 
-                time.sleep(1)
-                data = dhan.intraday_minute_data(
-                    security_id=security_id,
-                    exchange_segment=exchange_segment,
-                    instrument_type="EQUITY",
-                    interval=CONFIG["TIMEFRAME"],
-                    from_date=from_date_str,
-                    to_date=to_date_str,
+
+def get_historical_cache_stats():
+    """Get statistics about the historical data cache."""
+    return get_cache_info()
+
+
+def clear_today_cache():
+    """Clear cache for today's data (useful during active trading)."""
+    clear_cache_for_today()
+
+
+def warm_cache_for_securities(security_ids: List[int]) -> Dict:
+    """
+    Pre-warm the cache for a list of securities.
+    This is useful to run before market open.
+    """
+    import asyncio
+
+    async def _warm_cache():
+        results = {}
+        for security_id in security_ids:
+            try:
+                logger.info(f"Warming cache for security {security_id}")
+                data = await get_combined_data_with_persistent_live(
+                    security_id=security_id, auto_start_live_collection=False
                 )
-                if (
-                    data
-                    and data.get("status") == "success"
-                    and "data" in data
-                    and data["data"]
-                ):
-                    df_chunk = pd.DataFrame(data["data"])
-                    required_fields = [
-                        "open",
-                        "high",
-                        "low",
-                        "close",
-                        "volume",
-                        "timestamp",
-                    ]
-                    missing_fields = [
-                        field
-                        for field in required_fields
-                        if field not in df_chunk.columns
-                    ]
-                    if missing_fields:
-                        logger.warning(
-                            f"Missing fields {missing_fields} for {security_id} from {from_date_str} to {to_date_str}"
-                        )
-                        current_date -= timedelta(days=1)
-                        days_checked += 1
-                        continue
-                    df_chunk["datetime"] = pd.to_datetime(
-                        df_chunk["timestamp"], unit="s", utc=True, errors="coerce"
-                    )
-                    df_chunk["datetime"] = df_chunk["datetime"].dt.tz_convert(ist_tz)
-                    df_chunk = df_chunk.dropna(subset=["datetime"])
-                    valid_date_range = (df_chunk["datetime"] >= from_date) & (
-                        df_chunk["datetime"] <= to_date
-                    )
-                    df_chunk = df_chunk[valid_date_range]
-                    if len(df_chunk) < 50:
-                        logger.info(
-                            f"Insufficient data ({len(df_chunk)} rows) for {security_id} on {from_date.date()}"
-                        )
-                        current_date -= timedelta(days=1)
-                        days_checked += 1
-                        continue
-                    df_chunk = df_chunk[
-                        ["datetime", "open", "high", "low", "close", "volume"]
-                    ]
-                    trading_sessions[security_id].append(df_chunk)
-                    logger.info(
-                        f"Fetched {len(df_chunk)} rows for {security_id} from {from_date_str} to {to_date_str}"
-                    )
-                else:
-                    logger.warning(
-                        f"No data or failed fetch for {security_id} from {from_date_str} to {to_date_str}: {data.get('remarks', 'No remarks')}"
-                    )
-            current_date -= timedelta(days=1)
-            days_checked += 1
-        logger.info(
-            f"Checked {days_checked} days, found trading sessions: { {k: len(v) for k, v in trading_sessions.items()} }"
-        )
-        result = {}
-        for security_id in tickers[exchange_segment]:
-            sessions = trading_sessions[security_id]
-            if len(sessions) >= 2:
-                df = pd.concat(sessions, ignore_index=True)
-                df = df.drop_duplicates(subset=["datetime"], keep="last")
-                df = df.sort_values("datetime").reset_index(drop=True)
+                results[security_id] = data is not None
+            except Exception as e:
+                logger.error(f"Failed to warm cache for {security_id}: {e}")
+                results[security_id] = False
+        return results
+
+    return asyncio.run(_warm_cache())
+
+
+# Enhanced startup function with cache warming:
+
+
+async def startup_live_data_system_with_cache(warm_cache: bool = True):
+    """
+    Enhanced startup script with optional cache warming.
+    """
+    try:
+        logger.info("🚀 Starting trading system with live data collection and caching")
+
+        # Show initial cache state
+        cache_stats = get_historical_cache_stats()
+        logger.info(f"📊 Initial cache state: {cache_stats}")
+
+        # Start live data system
+        success = await initialize_live_data_from_config()
+
+        if success:
+            # Optionally warm cache for all securities
+            if warm_cache:
+                logger.info("🔥 Warming cache for configured securities...")
+                security_ids = CONFIG["TICKERS"]["NSE_EQ"][
+                    :5
+                ]  # Limit to first 5 for demo
+                warm_results = warm_cache_for_securities(security_ids)
+                successful_warm = sum(1 for result in warm_results.values() if result)
                 logger.info(
-                    f"Combined {len(df)} rows of historical data for {security_id} across {len(sessions)} trading sessions"
+                    f"✅ Cache warmed for {successful_warm}/{len(warm_results)} securities"
                 )
-                result[security_id] = df
-            else:
-                logger.error(
-                    f"Failed to fetch data for 2 trading sessions for {security_id} after checking {days_checked} days"
-                )
-                result[security_id] = None
-        return result
+
+            status = get_live_data_status()
+            final_cache_stats = get_historical_cache_stats()
+
+            logger.info(f"✅ Live data system ready: {status}")
+            logger.info(f"📊 Final cache state: {final_cache_stats}")
+
+            import atexit
+
+            atexit.register(stop_persistent_live_data)
+
+            return True
+        else:
+            logger.error("❌ Failed to initialize live data system")
+            return False
+
     except Exception as e:
-        logger.error(f"Error fetching historical data: {e}")
-        raise
+        logger.error(f"❌ Error during live data system startup: {e}")
+        return False
 
 
 @dataclass
@@ -585,14 +550,22 @@ async def get_combined_data_with_persistent_live(
     security_id: int,
     exchange_segment: str = "NSE_EQ",
     auto_start_live_collection: bool = True,
+    use_cache: bool = True,  # New parameter to control caching
 ) -> Optional[pd.DataFrame]:
     """
     Get combined historical and live tick-aggregated 5-minute data using persistent collector.
+    Now with enhanced historical data caching.
     """
     try:
         tickers = {exchange_segment: [security_id]}
 
+        if use_cache:
+            cache_stats = get_cache_info()
+            logger.info(f"Cache stats before fetch: {cache_stats}")
+
         logger.info(f"Fetching historical 5-min data for security {security_id}")
+
+        # This now uses the cached version
         hist_data_dict = await fetch_historical_data(
             tickers=tickers, exchange_segment=exchange_segment
         )
@@ -610,6 +583,7 @@ async def get_combined_data_with_persistent_live(
             f"Historical data: {len(historical_data)} records from {historical_data['datetime'].min()} to {historical_data['datetime'].max()}"
         )
 
+        # Rest of the function remains the same...
         logger.info("Initializing live data collection...")
         live_manager = await get_live_data_manager(
             dhan, [security_id], exchange_segment
