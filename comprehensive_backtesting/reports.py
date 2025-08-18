@@ -737,8 +737,8 @@ class PerformanceAnalyzer:
             if "error" not in summary and summary:
                 print("\nSummary Metrics")
                 print("-" * 30)
-                print(f"Initial Cash: ${summary.get('initial_cash', 0):,.2f}")
-                print(f"Final Value: ${summary.get('final_value', 0):,.2f}")
+                print(f"Initial Cash: {summary.get('initial_cash', 0):,.2f}")
+                print(f"Final Value: {summary.get('final_value', 0):,.2f}")
                 print(f"Total Return: {summary.get('total_return_pct', 0):.2f}%")
                 print(f"Annual Return: {summary.get('annual_return_pct', 0):.2f}%")
                 print(f"Sharpe Ratio: {summary.get('sharpe_ratio', 0):.2f}")
@@ -746,7 +746,7 @@ class PerformanceAnalyzer:
                 print(f"Max Drawdown: {summary.get('max_drawdown_pct', 0):.2f}%")
                 print(f"Calmar Ratio: {summary.get('calmar_ratio', 0):.2f}")
                 print(f"SQN: {summary.get('sqn', 0):.2f}")
-                print(f"Profit/Loss: ${summary.get('profit_loss', 0):,.2f}")
+                print(f"Profit/Loss: {summary.get('profit_loss', 0):,.2f}")
 
             trade_analysis = report.get("trade_analysis", {})
             if (
@@ -759,8 +759,8 @@ class PerformanceAnalyzer:
                 print(f"Winning Trades: {trade_analysis.get('winning_trades', 0)}")
                 print(f"Losing Trades: {trade_analysis.get('losing_trades', 0)}")
                 print(f"Win Rate: {trade_analysis.get('win_rate_percent', 0):.2f}%")
-                print(f"Average Win: ${trade_analysis.get('average_win', 0):,.2f}")
-                print(f"Average Loss: ${trade_analysis.get('average_loss', 0):,.2f}")
+                print(f"Average Win: {trade_analysis.get('average_win', 0):,.2f}")
+                print(f"Average Loss: {trade_analysis.get('average_loss', 0):,.2f}")
 
                 profit_factor = trade_analysis.get("profit_factor", 0)
                 if profit_factor == float("inf"):

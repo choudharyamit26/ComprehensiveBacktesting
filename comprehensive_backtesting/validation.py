@@ -211,9 +211,9 @@ class ValidationAnalyzer:
         current_start = start_dt
 
         while True:
-            in_sample_end = current_start + timedelta(days=in_sample_days)
-            out_sample_start = in_sample_end + timedelta(days=gap_days)
-            out_sample_end = out_sample_start + timedelta(days=out_sample_days)
+            in_sample_end = current_start + pd.Timedelta(days=in_sample_days)
+            out_sample_start = in_sample_end + pd.Timedelta(days=gap_days)
+            out_sample_end = out_sample_start + pd.Timedelta(days=out_sample_days)
 
             if out_sample_end > end_dt:
                 break
@@ -228,7 +228,7 @@ class ValidationAnalyzer:
 
             if in_sample_data.empty:
                 logger.warning(f"Window {window_id}: No in-sample data available")
-                current_start = current_start + timedelta(days=step_days)
+                current_start = current_start + pd.Timedelta(days=step_days)
                 continue
 
             # Check if sufficient data points
@@ -236,7 +236,7 @@ class ValidationAnalyzer:
                 logger.warning(
                     f"Window {window_id}: Insufficient in-sample data ({len(in_sample_data)} < {min_required})"
                 )
-                current_start = current_start + timedelta(days=step_days)
+                current_start = current_start + pd.Timedelta(days=step_days)
                 continue
 
             windows.append(
@@ -250,7 +250,7 @@ class ValidationAnalyzer:
             )
 
             window_id += 1
-            current_start = current_start + timedelta(days=step_days)
+            current_start = current_start + pd.Timedelta(days=step_days)
 
             if window_id > 1000:
                 logger.warning("Generated maximum number of windows (1000)")
@@ -295,8 +295,8 @@ class ValidationAnalyzer:
             )
 
         split_days = int(total_days * split_ratio)
-        split_date = start_dt + timedelta(days=split_days)
-        gap_start_date = split_date + timedelta(days=gap_days)
+        split_date = start_dt + pd.Timedelta(days=split_days)
+        gap_start_date = split_date + pd.Timedelta(days=gap_days)
         split_date_str = split_date.strftime("%Y-%m-%d")
         gap_start_str = gap_start_date.strftime("%Y-%m-%d")
 

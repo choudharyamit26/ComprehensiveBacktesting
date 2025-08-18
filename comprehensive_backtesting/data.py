@@ -30,7 +30,7 @@ CONFIG = {
     "MARKET_OPEN": time(9, 15),
     "MARKET_CLOSE": time(15, 30),
     "EXIT_BUFFER_MINUTES": 15,
-    "CSV_FILE": "trading_signals.csv",
+    "CSV_FILE": "csv/trading_signals.csv",
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN"),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID"),
     "DAYS_TO_FETCH": 2,
@@ -58,7 +58,7 @@ def init_dhan_client():
 dhan = init_dhan_client()
 
 
-def get_security_id(ticker, csv_path="ind_nifty500list.csv"):
+def get_security_id(ticker, csv_path="csv/ind_nifty500list.csv"):
     if not isinstance(ticker, str):
         logger.error(f"Invalid ticker: {ticker}, must be a string")
         return None
@@ -292,7 +292,7 @@ async def fetch_intraday_data(ticker, exchange_segment="NSE_EQ"):
                     continue
 
                 # Map security_id to ticker
-                df_csv = pd.read_csv("ind_nifty500list.csv")
+                df_csv = pd.read_csv("csv/ind_nifty500list.csv")
                 match = df_csv[df_csv["security_id"] == security_id]
                 symbol = (
                     match["ticker"].iloc[0]

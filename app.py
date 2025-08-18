@@ -740,7 +740,7 @@ def plot_composite_backtest_results(results, data):
         return None
 
 
-def load_tickers_from_file(file_path="nifty50_highbeta_stocks.csv"):
+def load_tickers_from_file(file_path="csv/nifty50_highbeta_stocks.csv"):
     """
     Load tickers from a CSV file with a 'ticker' column, validate them using yfinance,
     and save validated tickers to a new CSV file.
@@ -4221,8 +4221,8 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         st.metric("Win Rate", f"{win_rate:.1f}%")
 
                     with col2:
-                        st.metric("Avg Win", f"${avg_win:.2f}")
-                        st.metric("Avg Loss", f"${avg_loss:.2f}")
+                        st.metric("Avg Win", f"{avg_win:.2f}")
+                        st.metric("Avg Loss", f"{avg_loss:.2f}")
 
                     with col3:
                         profit_factor = abs(avg_win / avg_loss) if avg_loss else 0
@@ -4236,7 +4236,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         st.metric(
                             "Max Win",
                             (
-                                f"${max(t['pnl'] for t in win_trades):.2f}"
+                                f"{max(t['pnl'] for t in win_trades):.2f}"
                                 if win_trades
                                 else "N/A"
                             ),
@@ -4244,7 +4244,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         st.metric(
                             "Max Loss",
                             (
-                                f"${min(t['pnl'] for t in loss_trades):.2f}"
+                                f"{min(t['pnl'] for t in loss_trades):.2f}"
                                 if loss_trades
                                 else "N/A"
                             ),
@@ -4338,8 +4338,8 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         st.metric("Win Rate", f"{win_rate:.1f}%")
 
                     with col2:
-                        st.metric("Avg Win", f"${avg_win:.2f}")
-                        st.metric("Avg Loss", f"${avg_loss:.2f}")
+                        st.metric("Avg Win", f"{avg_win:.2f}")
+                        st.metric("Avg Loss", f"{avg_loss:.2f}")
 
                     with col3:
                         profit_factor = abs(avg_win / avg_loss) if avg_loss else 0
@@ -4353,7 +4353,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         st.metric(
                             "Max Win",
                             (
-                                f"${max(t['pnl'] for t in win_trades):.2f}"
+                                f"{max(t['pnl'] for t in win_trades):.2f}"
                                 if win_trades
                                 else "N/A"
                             ),
@@ -4361,7 +4361,7 @@ def display_walkforward_results(results, ticker, timeframe, params, progress_bar
                         st.metric(
                             "Max Loss",
                             (
-                                f"${min(t['pnl'] for t in loss_trades):.2f}"
+                                f"{min(t['pnl'] for t in loss_trades):.2f}"
                                 if loss_trades
                                 else "N/A"
                             ),

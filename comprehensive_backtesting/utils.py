@@ -154,13 +154,13 @@ def run_backtest(
     # Add data to cerebro
     cerebro.adddata(data, name=interval)
 
-    print(f"Starting Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
+    print(f"Starting Portfolio Value: {cerebro.broker.getvalue():,.2f}")
     print(f"Data range: {data_df.index.min()} to {data_df.index.max()}")
     print(f"Total bars: {len(data_df)}")
 
     try:
         results = cerebro.run()
-        print(f"Final Portfolio Value: ${cerebro.broker.getvalue():,.2f}")
+        print(f"Final Portfolio Value: {cerebro.broker.getvalue():,.2f}")
         return results, cerebro
     except Exception as e:
         logger.error(f"Backtest failed: {str(e)}")

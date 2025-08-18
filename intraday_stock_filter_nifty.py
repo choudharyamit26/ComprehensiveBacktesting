@@ -66,7 +66,9 @@ class DataManager:
         self.cache_dir = cache_dir
         os.makedirs(cache_dir, exist_ok=True)
 
-    def read_stocks_from_csv(self, csv_file: str = "ind_nifty50list.csv") -> List[str]:
+    def read_stocks_from_csv(
+        self, csv_file: str = "csv/ind_nifty50list.csv"
+    ) -> List[str]:
         """Read and validate stock symbols from CSV"""
         try:
             if not os.path.exists(csv_file):
@@ -897,7 +899,7 @@ class IntradayStockFilter:
         self.max_workers = max_workers
         self.signal_priority = {"BUY": 1, "SELL": 2, "HOLD": 3}
 
-    def select_stocks(self, csv_file: str = "ind_nifty50list.csv") -> List[Dict]:
+    def select_stocks(self, csv_file: str = "csv/ind_nifty50list.csv") -> List[Dict]:
         """Main method to select stocks for intraday trading"""
         logger.info("Starting stock selection for intraday trading...")
         logger.info(f"Analysis Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1085,7 +1087,7 @@ class IntradayStockFilter:
             ]
             df = df[column_order]
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"selected_stocks_with_recommendations_{timestamp}.csv"
+            filename = f"csv/selected_stocks_with_recommendations_{timestamp}.csv"
             df.to_csv(filename, index=False)
             logger.info(f"Results saved to '{filename}'")
 
@@ -1238,4 +1240,4 @@ if __name__ == "__main__":
 
     # Example usage
     filter = IntradayStockFilter()
-    selected_stocks = filter.select_stocks(csv_file="ind_nifty50list.csv")
+    selected_stocks = filter.select_stocks(csv_file="csv/ind_nifty50list.csv")

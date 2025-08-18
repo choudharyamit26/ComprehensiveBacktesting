@@ -197,7 +197,7 @@ thread_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dhan_worker"
 
 # Preload symbol map
 try:
-    nifty500_df = pd.read_csv("ind_nifty500list.csv")
+    nifty500_df = pd.read_csv("csv/ind_nifty500list.csv")
     TICKER_TO_ID_MAP = nifty500_df.set_index("ticker")["security_id"].to_dict()
 except Exception as e:
     logger.error(f"Failed to load symbol map: {e}")
@@ -1773,8 +1773,8 @@ async def cache_warmup_for_trading():
         logger.info("🔥 Starting cache warmup for trading session")
 
         # Get all securities from strategies
-        strategies_df = pd.read_csv("selected_stocks_strategies.csv")
-        nifty500 = pd.read_csv("ind_nifty500list.csv")
+        strategies_df = pd.read_csv("csv/selected_stocks_strategies.csv")
+        nifty500 = pd.read_csv("csv/ind_nifty500list.csv")
 
         ticker_to_security = nifty500.set_index("ticker")["security_id"].to_dict()
         unique_tickers = strategies_df["Ticker"].unique()
@@ -2503,8 +2503,8 @@ async def main_trading_loop_with_cache():
                 )
 
         try:
-            strategies_df = pd.read_csv("selected_stocks_strategies.csv")
-            nifty500 = pd.read_csv("ind_nifty500list.csv")
+            strategies_df = pd.read_csv("csv/selected_stocks_strategies.csv")
+            nifty500 = pd.read_csv("csv/ind_nifty500list.csv")
         except Exception as e:
             logger.critical(f"Data load failed: {str(e)}")
             await send_telegram_alert(f"❌ Data load failed: {str(e)}")
@@ -2666,8 +2666,8 @@ async def main_simulation_loop():
         await position_manager.load_trade_times()
 
         try:
-            strategies_df = pd.read_csv("selected_stocks_strategies.csv")
-            nifty500 = pd.read_csv("ind_nifty500list.csv")
+            strategies_df = pd.read_csv("csv/selected_stocks_strategies.csv")
+            nifty500 = pd.read_csv("csv/ind_nifty500list.csv")
         except Exception as e:
             logger.critical(f"Data load failed: {str(e)}")
             return

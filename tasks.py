@@ -507,9 +507,7 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
             ].apply(format_params)
 
             # Save to CSV
-            top_strategies_df.to_csv(
-                "selected_stocks_strategies_with_walkforward.csv", index=False
-            )
+            top_strategies_df.to_csv("csv/selected_stocks_strategies.csv", index=False)
 
             # Log summary statistics
             param_stats = top_strategies_df["Best_Parameters"].value_counts()
@@ -533,11 +531,11 @@ def run_complete_backtests(selected_stocks: List[Dict], strategies: List[str]):
 
 
 @app.task(bind=True)
-def run_intraday_stock_filter(self, csv_file="ind_nifty50list.csv"):
+def run_intraday_stock_filter(self, csv_file="csv/ind_nifty50list.csv"):
     try:
         logging.info(f"Task started: {csv_file}")
         filter = IntradayStockFilter()
-        selected_stocks = filter.select_stocks(csv_file="ind_nifty50list.csv")
+        selected_stocks = filter.select_stocks(csv_file="csv/ind_nifty50list.csv")
         strategies = list(STRATEGY_REGISTRY.keys())
 
         # Run the complete backtests

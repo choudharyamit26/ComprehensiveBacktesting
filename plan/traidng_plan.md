@@ -3,9 +3,9 @@
 ## Phase 1: Stock Universe Selection and Screening
 
 ### 1.1 Initial Stock Universe Criteria
-- **Market Cap**: Above $500M for sufficient liquidity
+- **Market Cap**: Above 500M for sufficient liquidity
 - **Average Daily Volume**: Minimum 1M shares traded
-- **Price Range**: $10-$500 per share
+- **Price Range**: 10-500 per share
 - **Sector Diversification**: Include major sectors (Tech, Finance, Healthcare, Energy, Consumer)
 - **Volatility**: Average True Range (ATR) > 1% for profit opportunities
 - **Spread**: Bid-ask spread < 0.1% of stock price

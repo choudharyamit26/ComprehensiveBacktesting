@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 dhan = init_dhan_client()
 
 
-def fetch_tickers_from_csv(csv_path="ind_nifty50list.csv"):
+def fetch_tickers_from_csv(csv_path="csv/ind_nifty50list.csv"):
     """Fetch ticker security IDs from a CSV file."""
     if not os.path.exists(csv_path):
         logger.error(f"CSV file {csv_path} not found")
@@ -45,7 +45,7 @@ def fetch_tickers_from_csv(csv_path="ind_nifty50list.csv"):
         return []
 
 
-def get_security_symbol_map(security_id, csv_path="Dhan-Tickers/ind_nifty50list.csv"):
+def get_security_symbol_map(security_id, csv_path="csv/ind_nifty50list.csv"):
     """
     Create a mapping of security IDs to tickers from the CSV file.
     """
@@ -78,8 +78,8 @@ CONFIG = {
     "MARKET_CLOSE": time(15, 30),
     "HISTORICAL_DATA_END": time(15, 55),
     "EXIT_BUFFER_MINUTES": 15,
-    "CSV_FILE": "trading_signals.csv",
-    "LIVE_DATA_CSV": "live_data.csv",
+    "CSV_FILE": "csv/trading_signals.csv",
+    "LIVE_DATA_CSV": "csv/live_data.csv",
     "COMBINED_DATA_CSV": "combined_data.csv",
     "TELEGRAM_BOT_TOKEN": os.getenv("TELEGRAM_BOT_TOKEN"),
     "TELEGRAM_CHAT_ID": os.getenv("TELEGRAM_CHAT_ID"),
