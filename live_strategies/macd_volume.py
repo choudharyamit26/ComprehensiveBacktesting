@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -28,7 +30,7 @@ class MACDVolume:
         "slow_period": 26,
         "signal_period": 9,
         "volume_period": 20,
-        "volume_spike": 1.5,
+        "volume_spike": COMMON_PARAMS["volume_surge_threshold"],  # Use common value
         "volume_dry": 1.0,
         "verbose": False,
     }
@@ -62,7 +64,7 @@ class MACDVolume:
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
-
+        self.entry_signals = []
         # Indicators: MACD line, signal line, histogram
         macd = ta.macd(
             self.data["close"],
@@ -168,6 +170,10 @@ class MACDVolume:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"BUY SIGNAL (MACD Bullish + Volume Spike) | Time: {bar_time_ist} | "
@@ -186,6 +192,10 @@ class MACDVolume:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL (MACD Bearish + Volume Spike) | Time: {bar_time_ist} | "

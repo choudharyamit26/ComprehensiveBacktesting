@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -93,11 +95,11 @@ class SRRSIVolume:
     params = {
         "sr_period": 20,
         "sr_tolerance": 0.002,
-        "rsi_period": 14,
-        "rsi_oversold": 30,
+        "rsi_oversold": COMMON_PARAMS["rsi_oversold"],  # Use common value
+        "rsi_overbought": COMMON_PARAMS["rsi_overbought"],  # Use common value
         "rsi_overbought": 70,
         "volume_period": 20,
-        "volume_surge": 1.5,
+        "volume_surge": COMMON_PARAMS["volume_surge_threshold"],  # Use common value
         "verbose": False,
     }
 
@@ -143,7 +145,7 @@ class SRRSIVolume:
 
         # Calculate RSI
         self.data["rsi"] = ta.rsi(self.data["close"], length=self.params["rsi_period"])
-
+        self.entry_signals = []
         logger.debug(f"Initialized SRRSIVolume with params: {self.params}")
 
     def run(self):
@@ -235,6 +237,10 @@ class SRRSIVolume:
                     }
                     self.last_signal = "buy"
                     self._notify_order(idx)
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (S/R + RSI + Volume) | Time: {bar_time_ist} | "
                         f"Price: {self.data.iloc[idx]['close']:.2f} | "
@@ -253,6 +259,10 @@ class SRRSIVolume:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL (S/R + RSI + Volume) | Time: {bar_time_ist} | "

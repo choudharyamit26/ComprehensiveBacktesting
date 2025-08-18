@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 from cachetools import TTLCache
 from comprehensive_backtesting.data import init_dhan_client
+from get_llm_signal import get_llm_signal
 from live_data import (
     get_combined_data_with_persistent_live,
     read_live_data_from_csv,
@@ -179,7 +180,7 @@ FORCE_CLOSE_TIME = time.fromisoformat(os.getenv("FORCE_CLOSE", "15:15:00"))
 SQUARE_OFF_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
 
 # Trading configuration
-MIN_VOTES = int(os.getenv("MIN_VOTES", 1))
+MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
 MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
@@ -900,7 +901,7 @@ async def execute_strategy_signal(
 
         message = (
             f"*{ticker} ENTRY SIGNAL* {direction_emoji}\n"
-            f"Strategy: `{strategy_name}`\n"
+            f"Strategies: `{params["strategy_names"]}`\n"
             f"Direction: {position_type}\n"
             f"Entry: ₹{rounded_entry_price:.2f} | VWAP: ₹{vwap:.2f}\n"
             f"Current: ₹{current_price:.2f}\n"
@@ -973,7 +974,7 @@ async def execute_strategy_signal(
 async def process_stock_with_exit_monitoring(
     ticker: str, security_id: int, strategies: List[Dict]
 ) -> None:
-    """Separate entry and exit signal processing"""
+    """Separate entry and exit signal processing with LLM confirmation"""
     async with adaptive_semaphore:
         try:
             logger.debug(f"Processing {ticker} (ID: {security_id})")
@@ -1042,6 +1043,7 @@ async def process_stock_with_exit_monitoring(
             # Process entry signals from strategies
             signals = []
             strategy_instances = []
+            strategy_names = []  # Collect all strategy names
 
             for strat in strategies:
                 strategy_name = strat["Strategy"]
@@ -1057,8 +1059,8 @@ async def process_stock_with_exit_monitoring(
                     strategy_instance = strategy_class(combined_data, **params)
                     signal = strategy_instance.run()
 
-                    if signal in ["BUY", "SELL"]:
-                        signals.append(signal)
+                    if signal in ["BUY", "SELL", "buy", "sell"]:
+                        signals.append(signal.upper())
                         strategy_instances.append(
                             {
                                 "instance": strategy_instance,
@@ -1067,6 +1069,7 @@ async def process_stock_with_exit_monitoring(
                                 "params": params,
                             }
                         )
+                        strategy_names.append(strategy_name)
                         logger.debug(
                             f"{ticker} - {strategy_name} generated {signal} signal"
                         )
@@ -1081,44 +1084,73 @@ async def process_stock_with_exit_monitoring(
             buy_votes = signals.count("BUY")
             sell_votes = signals.count("SELL")
             min_vote_diff = int(os.getenv("MIN_VOTE_DIFF", 1))
-            logger.info(f"{ticker} - Buy votes: {buy_votes}, Sell votes: {sell_votes}")
-            executed = False
+            logger.info(
+                f"{ticker} - Buy votes: {buy_votes}, Sell votes: {sell_votes}, Stratgies:{strategy_names}"
+            )
+
+            strategy_signal = None
+            primary_strategy = None
+
+            # Determine the strategy consensus signal
             if buy_votes >= MIN_VOTES and (buy_votes - sell_votes) >= min_vote_diff:
+                strategy_signal = "BUY"
                 primary_strategy = next(
                     s for s in strategy_instances if s["signal"] == "BUY"
                 )
-                executed = await execute_strategy_signal(
-                    ticker,
-                    security_id,
-                    "BUY",
-                    regime,
-                    adx_value,
-                    atr_value,
-                    combined_data,
-                    primary_strategy["name"],
-                    primary_strategy["instance"],
-                    **primary_strategy["params"],
-                )
-
             elif sell_votes >= MIN_VOTES and (sell_votes - buy_votes) >= min_vote_diff:
+                strategy_signal = "SELL"
                 primary_strategy = next(
                     s for s in strategy_instances if s["signal"] == "SELL"
                 )
-                executed = await execute_strategy_signal(
-                    ticker,
-                    security_id,
-                    "SELL",
-                    regime,
-                    adx_value,
-                    atr_value,
-                    combined_data,
-                    primary_strategy["name"],
-                    primary_strategy["instance"],
-                    **primary_strategy["params"],
+
+            # If we have a strategy signal, get LLM confirmation
+            if strategy_signal and primary_strategy:
+                logger.info(
+                    f"{ticker} - Strategy consensus: {strategy_signal}, getting LLM confirmation..."
                 )
 
-            if executed:
-                await position_manager.update_last_trade_time(ticker, current_time)
+                # Get LLM signal (only BUY/SELL, no HOLD)
+                llm_signal = await get_llm_signal(ticker, combined_data)
+                logger.info(f"{ticker} - LLM signal: {llm_signal}")
+
+                # Only proceed if LLM gives a clear BUY/SELL signal
+                if llm_signal in ["BUY", "SELL"]:
+                    # Compare signals and execute only if they match
+                    if strategy_signal == llm_signal:
+                        logger.info(
+                            f"{ticker} - SIGNAL CONFIRMATION: Both strategy and LLM agree on {strategy_signal}"
+                        )
+                        executed = await execute_strategy_signal(
+                            ticker,
+                            security_id,
+                            strategy_signal,
+                            regime,
+                            adx_value,
+                            atr_value,
+                            combined_data,
+                            primary_strategy["name"],
+                            primary_strategy["instance"],
+                            strategy_names=strategy_names,  # Pass the list of strategy names
+                            **primary_strategy["params"],
+                        )
+
+                        if executed:
+                            await position_manager.update_last_trade_time(
+                                ticker, current_time
+                            )
+                            logger.info(
+                                f"{ticker} - Order executed with dual confirmation"
+                            )
+                    else:
+                        logger.info(
+                            f"{ticker} - SIGNAL MISMATCH: Strategy={strategy_signal}, LLM={llm_signal}. No order placed."
+                        )
+                else:
+                    logger.info(
+                        f"{ticker} - LLM provided no actionable signal ({llm_signal}). No order placed."
+                    )
+            else:
+                logger.debug(f"{ticker} - No qualifying strategy signal generated")
 
         except Exception as e:
             logger.error(f"{ticker} - Processing failed: {str(e)}")

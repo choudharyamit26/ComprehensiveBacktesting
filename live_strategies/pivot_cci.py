@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -20,8 +22,8 @@ class PivotCCI:
     params = {
         "cci_period": 14,
         "pivot_proximity": 0.5,
-        "cci_oversold": -100,
-        "cci_overbought": 100,
+        "cci_oversold": COMMON_PARAMS["cci_oversold"],  # Use common value
+        "cci_overbought": COMMON_PARAMS["cci_overbought"],  # Use common value,
         "cci_exit": 0,
         "verbose": False,
     }
@@ -47,7 +49,7 @@ class PivotCCI:
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
-
+        self.entry_signals = []
         # Initialize indicators using pandas_ta
         self.data["cci"] = ta.cci(
             self.data["high"],
@@ -196,6 +198,10 @@ class PivotCCI:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
@@ -213,6 +219,10 @@ class PivotCCI:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "

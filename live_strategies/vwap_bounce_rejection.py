@@ -67,7 +67,7 @@ class VWAPBounceRejection:
         self.open_positions = []
         self.session_open_price = None
         self.current_date = None
-
+        self.entry_signals = []
         try:
             # Initialize indicators using pandas_ta with DatetimeIndex
             logger.debug("Calculating VWAP with DatetimeIndex...")
@@ -339,6 +339,10 @@ class VWAPBounceRejection:
                         + profit_target_level,
                     }
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
@@ -360,6 +364,10 @@ class VWAPBounceRejection:
                         - profit_target_level,
                     }
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "

@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -19,13 +21,13 @@ class BSAV:
 
     params = {
         "bb_period": 20,
-        "bb_stddev": 2.0,
+        "bb_stddev": COMMON_PARAMS["bb_stddev"],  # Use common value
         "stoch_period": 14,
         "stoch_k": 3,
         "stoch_d": 3,
         "adx_period": 14,
         "vol_sma_period": 14,
-        "vol_threshold": 1.5,
+        "vol_threshold": COMMON_PARAMS["volume_surge_threshold"],  # Use common value
         "verbose": False,
     }
 
@@ -61,7 +63,7 @@ class BSAV:
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
-
+        self.entry_signals = []
         # Calculate indicators using pandas_ta
         bbands = ta.bbands(
             self.data["close"],
@@ -188,6 +190,10 @@ class BSAV:
                 ):
                     self._place_order(idx, "buy", "enter_long")
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Enter Long - BSAV) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
                     )
@@ -199,6 +205,10 @@ class BSAV:
                 ):
                     self._place_order(idx, "sell", "enter_short")
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     trade_logger.info(
                         f"SELL SIGNAL (Enter Short - BSAV) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
                     )

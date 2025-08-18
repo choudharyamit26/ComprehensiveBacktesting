@@ -170,7 +170,7 @@ class EMAADXTrend:
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
-
+        self.entry_signals = []
         # Initialize indicators using pandas_ta
         self.data["ema"] = ta.ema(self.data["close"], length=self.params["ema_period"])
 
@@ -402,7 +402,10 @@ class EMAADXTrend:
                 ):
                     self._place_order(idx, "buy", "enter_long")
                     last_signal = "BUY"
-
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Enter Long - EMA+ADX Trend) | Row: {idx} | "
                         f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
@@ -419,7 +422,10 @@ class EMAADXTrend:
                 ):
                     self._place_order(idx, "sell", "enter_short")
                     last_signal = "SELL"
-
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     trade_logger.info(
                         f"SELL SIGNAL (Enter Short - EMA+ADX Trend) | Row: {idx} | "
                         f"Time: {bar_time_ist} | Price: {current_price:.2f} | "

@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -19,7 +21,7 @@ class BBVWAPStrategy:
 
     params = {
         "bb_period": 20,
-        "bb_dev": 2.0,
+        "bb_dev": COMMON_PARAMS["bb_stddev"],  # Standardized BB deviation
         "vwap_dev": 0.5,
         "verbose": False,
     }
@@ -89,7 +91,12 @@ class BBVWAPStrategy:
         self.data["bearish_exit"] = (self.data["close"] <= self.data["vwap"]) | (
             self.data["close"] <= self.data["bb_bot"]
         )
-
+        self.data["volume_sma"] = ta.sma(self.data["volume"], length=20)
+        self.data["volume_surge"] = (
+            self.data["volume"]
+            > self.data["volume_sma"] * COMMON_PARAMS["volume_surge_threshold"]
+        )
+        self.entry_signals = []
         logger.debug(f"Initialized BBVWAPStrategy with params: {self.params}")
         logger.info(
             f"BBVWAPStrategy initialized with bb_period={self.params['bb_period']}, "
@@ -149,7 +156,10 @@ class BBVWAPStrategy:
 
             # Check for trading signals
             if not self.open_positions:
-                if self.data.iloc[idx]["bullish_entry"]:
+                if (
+                    self.data.iloc[idx]["bullish_entry"]
+                    and self.data.iloc[idx]["volume_surge"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
@@ -161,12 +171,19 @@ class BBVWAPStrategy:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
                         f"Below Lower BB: {self.data.iloc[idx]['price_below_lower_bb']} | Below VWAP: {self.data.iloc[idx]['price_below_vwap']}"
                     )
-                elif self.data.iloc[idx]["bearish_entry"]:
+                elif (
+                    self.data.iloc[idx]["bearish_entry"]
+                    and self.data.iloc[idx]["volume_surge"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
@@ -178,6 +195,10 @@ class BBVWAPStrategy:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "

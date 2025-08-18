@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -19,7 +21,7 @@ class BBPivotPointsStrategy:
 
     params = {
         "bb_period": 20,
-        "bb_dev": 2.0,
+        "bb_dev": COMMON_PARAMS["bb_stddev"],  # Standardized BB deviation
         "pivot_proximity": 0.5,
         "verbose": False,
     }
@@ -74,7 +76,12 @@ class BBPivotPointsStrategy:
         self.data["s2"] = self.data["pivot"] - (
             self.data["prev_high"] - self.data["prev_low"]
         )
-
+        self.data["volume_sma"] = ta.sma(self.data["volume"], length=20)
+        self.data["volume_surge"] = (
+            self.data["volume"]
+            > self.data["volume_sma"] * COMMON_PARAMS["volume_surge_threshold"]
+        )
+        self.entry_signals = []
         logger.debug(f"Initialized BBPivotPointsStrategy with params: {self.params}")
 
     def run(self):
@@ -176,15 +183,23 @@ class BBPivotPointsStrategy:
             )
 
             if not self.open_positions:
-                if bullish_entry:
+                if bullish_entry and self.data.iloc[idx]["volume_surge"]:
                     self._place_order(idx, "buy", "enter_long")
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
                     )
-                elif bearish_entry:
+                elif bearish_entry and self.data.iloc[idx]["volume_surge"]:
                     self._place_order(idx, "sell", "enter_short")
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     trade_logger.info(
                         f"SELL SIGNAL | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
                     )

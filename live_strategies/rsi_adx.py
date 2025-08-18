@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -77,7 +79,12 @@ class RSIADX:
             self.data["rsi_bearish_signal"] & self.data["strong_trend_signal"]
         )
         self.data["weak_trend"] = self.data["adx"] < self.params["adx_strength"]
-
+        self.data["volume_sma"] = ta.sma(self.data["volume"], length=20)
+        self.data["volume_surge"] = (
+            self.data["volume"]
+            > self.data["volume_sma"] * COMMON_PARAMS["volume_surge_threshold"]
+        )
+        self.entry_signals = []
         logger.debug(f"Initialized RSIADX with params: {self.params}")
 
     def run(self):
@@ -133,7 +140,10 @@ class RSIADX:
             # Trading logic
             if not self.open_positions:
                 # Long Entry
-                if self.data.iloc[idx]["strong_bullish"]:
+                if (
+                    self.data.iloc[idx]["strong_bullish"]
+                    and self.data.iloc[idx]["volume_surge"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
@@ -146,6 +156,10 @@ class RSIADX:
                     }
                     self.last_signal = "buy"
                     self._notify_order(idx)
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Strong Bullish) | Time: {bar_time_ist} | "
                         f"Price: {self.data.iloc[idx]['close']:.2f} | "
@@ -153,7 +167,10 @@ class RSIADX:
                         f"ADX: {self.data.iloc[idx]['adx']:.2f}"
                     )
                 # Short Entry
-                elif self.data.iloc[idx]["strong_bearish"]:
+                elif (
+                    self.data.iloc[idx]["strong_bearish"]
+                    and self.data.iloc[idx]["volume_surge"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
@@ -166,6 +183,10 @@ class RSIADX:
                     }
                     self.last_signal = "sell"
                     self._notify_order(idx)
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     trade_logger.info(
                         f"SELL SIGNAL (Strong Bearish) | Time: {bar_time_ist} | "
                         f"Price: {self.data.iloc[idx]['close']:.2f} | "

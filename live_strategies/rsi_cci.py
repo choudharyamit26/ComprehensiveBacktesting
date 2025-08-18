@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -20,8 +22,8 @@ class RSICCI:
     params = {
         "rsi_period": 14,
         "cci_period": 14,
-        "rsi_bullish": 55,
-        "rsi_bearish": 45,
+        "rsi_bullish": COMMON_PARAMS["rsi_overbought"],  # Use common value for bullish
+        "rsi_bearish": COMMON_PARAMS["rsi_oversold"],  # Use common value for bearish
         "cci_bullish": 100,
         "cci_bearish": -100,
         "verbose": False,
@@ -82,7 +84,7 @@ class RSICCI:
         self.data["short_exit_signal"] = (
             self.data["rsi_bullish_signal"] | self.data["cci_bullish_signal"]
         )
-
+        self.entry_signals = []
         logger.debug(f"Initialized RSICCI with params: {self.params}")
 
     def run(self):
@@ -152,6 +154,10 @@ class RSICCI:
                     }
                     self.last_signal = "buy"
                     self._notify_order(idx)
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Double Bullish) | Time: {bar_time_ist} | "
                         f"Price: {self.data.iloc[idx]['close']:.2f} | "
@@ -172,6 +178,10 @@ class RSICCI:
                     }
                     self.last_signal = "sell"
                     self._notify_order(idx)
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     trade_logger.info(
                         f"SELL SIGNAL (Double Bearish) | Time: {bar_time_ist} | "
                         f"Price: {self.data.iloc[idx]['close']:.2f} | "

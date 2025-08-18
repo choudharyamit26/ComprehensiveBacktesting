@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -22,7 +24,7 @@ class ATRVolumeExpansion:
         "volume_period": 20,
         "expansion_factor": 1.1,
         "contraction_factor": 0.9,
-        "volume_factor": 1.5,
+        "volume_factor": COMMON_PARAMS["volume_surge_threshold"],  # Use common value
         "normal_factor": 1.2,
         "trailing_atr_mult": 2.0,
         "min_atr_threshold": 0.5,
@@ -54,7 +56,7 @@ class ATRVolumeExpansion:
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
-
+        self.entry_signals = []
         # Calculate indicators
         self.data["atr"] = ta.atr(
             self.data["high"],
@@ -183,6 +185,10 @@ class ATRVolumeExpansion:
                         current_row["close"]
                         - (current_row["atr"] * self.params["trailing_atr_mult"])
                     )
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Enter Long - ATR+Volume Expansion) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
                     )
@@ -196,6 +202,10 @@ class ATRVolumeExpansion:
                     self.data.loc[self.data.index[idx], "trailing_stop_short"] = (
                         current_row["close"]
                         + (current_row["atr"] * self.params["trailing_atr_mult"])
+                    )
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
                     )
                     trade_logger.info(
                         f"SELL SIGNAL (Enter Short - ATR+Volume Expansion) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"

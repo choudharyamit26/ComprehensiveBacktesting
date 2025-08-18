@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -53,14 +55,16 @@ class HeadShouldersConfirmation:
         self.completed_trades = []
         self.open_positions = []
         self.target_price = None
-
+        self.entry_signals = []
         # Calculate indicators
         self.data["rsi"] = ta.rsi(self.data["close"], length=self.params["rsi_period"])
         self.data["volume_sma"] = ta.sma(
             self.data["volume"], length=self.params["volume_sma_period"]
         )
-        self.data["volume_surge"] = self.data["volume"] > self.data["volume_sma"] * 1.5
-
+        self.data["volume_surge"] = (
+            self.data["volume"]
+            > self.data["volume_sma"] * COMMON_PARAMS["volume_surge_threshold"]
+        )
         logger.debug(
             f"Initialized HeadShouldersConfirmation with params: {self.params}"
         )
@@ -175,6 +179,10 @@ class HeadShouldersConfirmation:
                     self.target_price = target
                     self.last_signal = "buy"
                     self._notify_order(idx)
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Head & Shoulders) | Time: {bar_time_ist} | "
                         f"Price: {self.data.iloc[idx]['close']:.2f} | "
@@ -197,6 +205,10 @@ class HeadShouldersConfirmation:
                     }
                     self.target_price = target
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL (Head & Shoulders) | Time: {bar_time_ist} | "

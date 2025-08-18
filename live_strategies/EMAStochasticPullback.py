@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -22,8 +24,8 @@ class EMAStochasticPullback:
         "stoch_k_period": 14,
         "stoch_d_period": 3,
         "stoch_slowing": 3,
-        "stoch_oversold": 20,
-        "stoch_overbought": 80,
+        "stoch_oversold": COMMON_PARAMS["stoch_oversold"],
+        "stoch_overbought": COMMON_PARAMS["stoch_overbought"],
         "verbose": False,
     }
 
@@ -52,7 +54,7 @@ class EMAStochasticPullback:
         self.indicator_data = []
         self.completed_trades = []
         self.open_positions = []
-
+        self.entry_signals = []
         # Calculate EMA
         self.data["ema"] = ta.ema(self.data["close"], length=self.params["ema_period"])
 
@@ -152,6 +154,10 @@ class EMAStochasticPullback:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "buy"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"BUY SIGNAL (Enter Long) | Time: {bar_time_ist} | "
@@ -174,6 +180,10 @@ class EMAStochasticPullback:
                         "executed_time": self.data.iloc[idx]["datetime"],
                     }
                     self.last_signal = "sell"
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL (Enter Short) | Time: {bar_time_ist} | "

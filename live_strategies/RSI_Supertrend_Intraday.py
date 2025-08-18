@@ -6,6 +6,8 @@ import datetime
 import logging
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # Set up loggers
 logger = logging.getLogger(__name__)
 trade_logger = logging.getLogger("trade_logger")
@@ -22,8 +24,8 @@ class RSISupertrendIntraday:
         "supertrend_period": 10,
         "supertrend_mult": 3.0,
         "target_percent": 2.0,
-        "rsi_overbought": 80,
-        "rsi_oversold": 20,
+        "rsi_overbought": COMMON_PARAMS["rsi_overbought"],
+        "rsi_oversold": COMMON_PARAMS["rsi_oversold"],
         "verbose": False,
     }
 
@@ -68,7 +70,12 @@ class RSISupertrendIntraday:
         self.data["bearish_entry"] = (self.data["rsi"] < 50) & (
             self.data["close"] < self.data["supertrend"]
         )
-
+        self.data["volume_sma"] = ta.sma(self.data["volume"], length=20)
+        self.data["volume_surge"] = (
+            self.data["volume"]
+            > self.data["volume_sma"] * COMMON_PARAMS["volume_surge_threshold"]
+        )
+        self.entry_signals = []
         logger.debug(f"Initialized RSISupertrendIntraday with params: {self.params}")
 
     def run(self):
@@ -121,7 +128,10 @@ class RSISupertrendIntraday:
             # Trading logic
             if not self.open_positions:
                 # Long Entry
-                if self.data.iloc[idx]["bullish_entry"]:
+                if (
+                    self.data.iloc[idx]["bullish_entry"]
+                    and self.data.iloc[idx]["volume_surge"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "buy",
@@ -138,8 +148,15 @@ class RSISupertrendIntraday:
                     trade_logger.info(
                         f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f}"
                     )
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                 # Short Entry
-                elif self.data.iloc[idx]["bearish_entry"]:
+                elif (
+                    self.data.iloc[idx]["bearish_entry"]
+                    and self.data.iloc[idx]["volume_surge"]
+                ):
                     self.order = {
                         "ref": str(uuid4()),
                         "action": "sell",
@@ -155,6 +172,10 @@ class RSISupertrendIntraday:
                     self._notify_order(idx)
                     trade_logger.info(
                         f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f}"
+                    )
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
                     )
             else:
                 # Check if we have a valid open position and entry price

@@ -6,6 +6,8 @@ import logging
 import os
 from uuid import uuid4
 
+from live_strategies.common import COMMON_PARAMS
+
 # from vwap_bounce_rejection import VWAPBounceRejection
 # from pivot_cci import PivotCCI
 # from BB_PivotPoints_Strategy import BBPivotPointsStrategy
@@ -131,8 +133,8 @@ class TrendlineWilliams:
         "williams_period": 14,
         "trend_lookback": 20,
         "trend_tolerance": 0.5,  # 0.5% tolerance for trendline proximity
-        "williams_oversold": -80,
-        "williams_overbought": -20,
+        "williams_oversold": COMMON_PARAMS["williams_oversold"],
+        "williams_overbought": COMMON_PARAMS["williams_overbought"],
         "williams_exit": -50,
         "verbose": False,
     }
@@ -183,7 +185,12 @@ class TrendlineWilliams:
         self.data["swing_low"] = (
             self.data["low"].rolling(window=self.params["trend_lookback"]).min()
         )
-
+        self.data["volume_sma"] = ta.sma(self.data["volume"], length=20)
+        self.data["volume_surge"] = (
+            self.data["volume"]
+            > self.data["volume_sma"] * COMMON_PARAMS["volume_surge_threshold"]
+        )
+        self.entry_signals = []
         logger.debug(f"Initialized TrendlineWilliams with params: {self.params}")
         logger.info(
             f"TrendlineWilliams initialized with williams_period={self.params['williams_period']}, "
@@ -271,9 +278,14 @@ class TrendlineWilliams:
                     support_touch
                     and self.data.iloc[idx]["williams"]
                     < self.params["williams_oversold"]
+                    and self.data.iloc[idx]["volume_surge"]
                 ):
                     self._place_order(idx, "buy", "enter_long")
                     last_signal = "BUY"  # Set the signal
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "BUY"}
+                    )
                     trade_logger.info(
                         f"BUY SIGNAL (Enter Long - Trendline + Williams %R) | Row: {idx} | "
                         f"Time: {bar_time_ist} | "
@@ -286,9 +298,14 @@ class TrendlineWilliams:
                     resistance_touch
                     and self.data.iloc[idx]["williams"]
                     > self.params["williams_overbought"]
+                    and self.data.iloc[idx]["volume_surge"]
                 ):
                     self._place_order(idx, "sell", "enter_short")
                     last_signal = "SELL"  # Set the signal
+                    bar_time_ist = bar_time.astimezone(pytz.timezone("Asia/Kolkata"))
+                    self.entry_signals.append(
+                        {"datetime": bar_time_ist, "signal": "SELL"}
+                    )
                     trade_logger.info(
                         f"SELL SIGNAL (Enter Short - Trendline + Williams %R) | Row: {idx} | "
                         f"Time: {bar_time_ist} | "
