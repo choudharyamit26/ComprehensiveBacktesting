@@ -17,7 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 from cachetools import TTLCache
 from comprehensive_backtesting.data import init_dhan_client
-from get_llm_signal import get_llm_signal
+from get_llm_signal import get_llm_signal, get_openrouter_llm_signal
+from intraday.utils import get_index_signal_dhan_api, get_sector_security_id
 from live_data import (
     get_combined_data_with_persistent_live,
     read_live_data_from_csv,
@@ -32,11 +33,25 @@ from tenacity import (
     wait_exponential,
     retry_if_exception_type,
 )
+import sqlite3
+import asyncio
+import aiofiles
+import json
+from datetime import datetime
+from typing import Optional, Dict
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+)
+import aiohttp
 
+# Database setup
+DB_PATH = "orders.db"
 
 # CLI and simulation mode configuration
 import argparse
-import requests
 
 # Detect simulation mode early based on argv to gate env checks and client init
 parser = argparse.ArgumentParser(add_help=False)
@@ -60,14 +75,27 @@ else:
         def get_fund_limits(self):
             return {"data": {"availabelBalance": 1e9}}
 
-        def quote_data(self, payload):
-            # Not used in simulation; fetch_realtime_quote will read from files
-            return {"status": "failure", "message": "simulation mode"}
-
         def get_positions(self):
             return {"status": "success", "data": []}
 
     dhan = _MockDhan()
+
+IST = pytz.timezone("Asia/Kolkata")
+import asyncio
+import json
+import struct
+import threading
+from typing import Dict, List, Optional, Callable
+from datetime import datetime
+import logging
+import pandas as pd
+import websocket
+import os
+from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
+# Global WebSocket client instance
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -109,14 +137,14 @@ def setup_logging_inline():
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
     except PermissionError:
-        print("Permission denied for logs directory, using current directory")
+        logger.error("Permission denied for logs directory, using current directory")
         file_handler = logging.FileHandler(
             "trading_system.log", mode="a", encoding="utf-8"
         )
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
     except Exception as e:
-        print(f"File handler creation failed: {e}")
+        logger.error(f"File handler creation failed: {e}")
         file_handler = None
 
     root_logger.setLevel(logging.INFO)
@@ -144,7 +172,7 @@ def setup_logging_inline():
         trade_logger.addHandler(trade_file_handler)
         trade_logger.propagate = False
     except Exception as e:
-        print(f"Trade log handler failed: {e}")
+        logger.error(f"Trade log handler failed: {e}")
         trade_logger.propagate = True
 
     return logger, trade_logger
@@ -180,7 +208,7 @@ FORCE_CLOSE_TIME = time.fromisoformat(os.getenv("FORCE_CLOSE", "15:15:00"))
 SQUARE_OFF_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
 
 # Trading configuration
-MIN_VOTES = int(os.getenv("MIN_VOTES", 2))
+MIN_VOTES = int(os.getenv("MIN_VOTES", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
 MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
@@ -362,444 +390,740 @@ cache_manager = CacheManager(max_size=1000, ttl=3600)
 
 
 class PositionManager:
-    def __init__(self):
-        self.open_positions = {}  # order_id -> position_data
-        self.positions_by_security = {}  # security_id -> order_id
-        self.strategy_instances = {}  # order_id -> strategy_instance
-        self.max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", 10))
+
+    def __init__(self, db_path: str):
+        self.db_path = db_path
         self.position_lock = asyncio.Lock()
-        self.last_trade_times = {}
-        self.last_trade_lock = asyncio.Lock()
-        self.cooldown_minutes = int(os.getenv("COOLDOWN_MINUTES", 30))
+        self.max_open_positions = int(os.getenv("MAX_OPEN_POSITIONS", 10))
 
-    async def get_last_trade_time(self, ticker: str) -> Optional[datetime]:
-        """Get last trade time for a ticker with thread safety"""
-        async with self.last_trade_lock:
-            return self.last_trade_times.get(ticker)
+        # Track daily traded securities to prevent multiple trades per day
+        self.daily_traded_securities = set()
+        self.last_reset_date = datetime.now().date()
 
-    async def update_last_trade_time(self, ticker: str, trade_time: datetime):
-        """Update last trade time for a ticker with thread safety"""
-        async with self.last_trade_lock:
-            self.last_trade_times[ticker] = trade_time
-            logger.debug(f"Updated last trade time for {ticker}: {trade_time}")
-            await self.save_trade_times()
+        # Simulation-specific attributes
+        self.simulated_pnl = 0.0
+        self.simulated_trades = []
 
-    async def save_trade_times(self):
-        """Persist trade times to disk for restart resilience"""
+        # Initialize database tables if needed
+        self._init_db()
+
+    def _init_db(self):
+        """Initialize position tracking tables in database"""
         try:
-            with open("last_trades.pkl", "wb") as f:
-                pickle.dump(self.last_trade_times, f)
-        except Exception as e:
-            logger.error(f"Failed to save trade times: {e}")
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
 
-    async def load_trade_times(self):
-        """Load trade times from disk on startup"""
+            # Create positions table if it doesn't exist
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS active_positions (
+                    order_id TEXT PRIMARY KEY,
+                    security_id INTEGER NOT NULL,
+                    ticker TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    original_quantity INTEGER NOT NULL,
+                    entry_price REAL NOT NULL,
+                    current_stop_loss REAL NOT NULL,
+                    take_profit REAL NOT NULL,
+                    strategy_name TEXT NOT NULL,
+                    entry_time TEXT NOT NULL,
+                    breakeven_moved INTEGER DEFAULT 0,
+                    partial_profit_taken INTEGER DEFAULT 0,
+                    last_updated TEXT NOT NULL,
+                    status TEXT DEFAULT 'ACTIVE'
+                )
+            """
+            )
+            # Main super orders table
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS super_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id TEXT UNIQUE NOT NULL,
+                    dhan_client_id TEXT,
+                    correlation_id TEXT,
+                    order_status TEXT,
+                    transaction_type TEXT,
+                    exchange_segment TEXT,
+                    product_type TEXT,
+                    order_type TEXT,
+                    validity TEXT,
+                    trading_symbol TEXT,
+                    security_id TEXT,
+                    quantity INTEGER,
+                    remaining_quantity INTEGER,
+                    ltp REAL,
+                    price REAL,
+                    after_market_order BOOLEAN,
+                    leg_name TEXT,
+                    exchange_order_id TEXT,
+                    create_time TEXT,
+                    update_time TEXT,
+                    exchange_time TEXT,
+                    oms_error_description TEXT,
+                    average_traded_price REAL,
+                    filled_qty INTEGER,
+                    target_price REAL,
+                    stop_loss_price REAL,
+                    trailing_jump REAL,
+                    request_payload TEXT,
+                    response_data TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """
+            )
+
+            # Order legs table for target and stop loss details
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS order_legs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    parent_order_id TEXT,
+                    order_id TEXT,
+                    leg_name TEXT,
+                    transaction_type TEXT,
+                    total_quantity INTEGER,
+                    remaining_quantity INTEGER,
+                    triggered_quantity INTEGER,
+                    price REAL,
+                    order_status TEXT,
+                    trailing_jump REAL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (parent_order_id) REFERENCES super_orders (order_id)
+                )
+            """
+            )
+
+            # Create indexes for better performance
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_id ON super_orders (order_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_security_id ON super_orders (security_id)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_order_status ON super_orders (order_status)"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_parent_order ON order_legs (parent_order_id)"
+            )
+
+            conn.commit()
+            conn.close()
+            logger.info("Database initialized")
+
+        except Exception as e:
+            logger.error(f"Failed to initialize position database: {e}")
+
+    async def get_order_id_by_security_id(self, security_id: int) -> str:
+        """Fetch order_id using security_id from super_orders table"""
         try:
-            if os.path.exists("last_trades.pkl"):
-                with open("last_trades.pkl", "rb") as f:
-                    self.last_trade_times = pickle.load(f)
-                    logger.info(
-                        f"Loaded {len(self.last_trade_times)} trade times from disk"
-                    )
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT order_id FROM super_orders WHERE security_id = ? ORDER BY created_at DESC LIMIT 1",
+                (str(security_id),),
+            )
+            result = cursor.fetchone()
+            conn.close()
+            if result:
+                return result[0]
+            return None
         except Exception as e:
-            logger.error(f"Failed to load trade times: {e}")
+            trade_logger.error(
+                f"Failed to fetch order_id for security_id {security_id}: {str(e)}"
+            )
+            return None
 
-    async def has_position(self, security_id: int) -> bool:
-        """Check if we have an open position for this security"""
-        async with self.position_lock:
-            return security_id in self.positions_by_security
+    async def get_order_from_db(self, order_id: str) -> Optional[Dict]:
+        """Fetch order details from super_orders table"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
 
-    async def get_position_direction(self, security_id: int) -> Optional[str]:
-        """Get the direction of an open position"""
-        async with self.position_lock:
-            order_id = self.positions_by_security.get(security_id)
-            if order_id and order_id in self.open_positions:
-                return self.open_positions[order_id]["direction"]
+            cursor.execute(
+                """
+                SELECT order_id, security_id, quantity, price, target_price, 
+                       stop_loss_price, transaction_type, order_status
+                FROM super_orders 
+                WHERE order_id = ?
+            """,
+                (order_id,),
+            )
+
+            result = cursor.fetchone()
+            conn.close()
+
+            if result:
+                return {
+                    "order_id": result[0],
+                    "security_id": int(result[1]),
+                    "quantity": result[2],
+                    "entry_price": result[3],
+                    "take_profit": result[4],
+                    "stop_loss": result[5],
+                    "direction": result[6],
+                    "status": result[7],
+                }
+            return None
+
+        except Exception as e:
+            logger.error(f"Error fetching order from DB: {e}")
             return None
 
     async def add_position(
-        self,
-        order_id: str,
-        security_id: int,
-        ticker: str,
-        entry_price: float,
-        quantity: int,
-        stop_loss: float,
-        take_profit: float,
-        direction: str,
-        strategy_name: str,
-        strategy_instance=None,
-    ):
-        """Add a new position to the manager"""
+        self, order_id: str, ticker: str, strategy_name: str, **kwargs
+    ) -> bool:
+        """Add position to tracking using order details from database"""
         async with self.position_lock:
-            # Check for existing position
-            if await self.has_position(security_id):
-                existing_direction = await self.get_position_direction(security_id)
-                logger.warning(
-                    f"Position already exists for {ticker} (security_id: {security_id}, direction: {existing_direction})"
-                )
-                return False
-
-            # Enforce max positions limit
-            if len(self.open_positions) >= self.max_open_positions:
-                logger.warning(
-                    f"Max open positions reached ({self.max_open_positions})"
-                )
-                return False
-
-            # Create new position
-            position_data = {
-                "security_id": security_id,
-                "ticker": ticker,
-                "entry_price": entry_price,
-                "quantity": quantity,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "direction": direction,  # BUY = LONG position, SELL = SHORT position
-                "strategy_name": strategy_name,
-                "entry_time": datetime.now(IST),
-                "last_updated": datetime.now(IST),
-            }
-
-            self.open_positions[order_id] = position_data
-            self.positions_by_security[security_id] = order_id
-
-            # Store strategy instance for exit monitoring
-            if strategy_instance:
-                self.strategy_instances[order_id] = strategy_instance
-
-            trade_logger.info(
-                f"{'[SIM] ' if SIMULATION_MODE else ''}NEW POSITION | {ticker} | "
-                f"{direction} | Qty: {quantity} | Entry: ₹{entry_price:.2f} | "
-                f"SL: ₹{stop_loss:.2f} | TP: ₹{take_profit:.2f} | Strategy: {strategy_name}"
-            )
-
-            logger.info(
-                f"Added position {order_id} for {ticker}: {direction} @ ₹{entry_price:.2f}"
-            )
-            return True
-
-    async def update_position(self, order_id: str, **updates):
-        """Update position parameters (e.g., trailing stop)"""
-        async with self.position_lock:
-            if order_id in self.open_positions:
-                position = self.open_positions[order_id]
-                old_values = {k: position.get(k) for k in updates.keys()}
-                position.update(updates)
-                position["last_updated"] = datetime.now(IST)
-
-                # Log meaningful updates
-                if "stop_loss" in updates:
-                    logger.info(
-                        f"Updated stop loss for {position['ticker']}: "
-                        f"₹{old_values.get('stop_loss', 0):.2f} -> ₹{updates['stop_loss']:.2f}"
-                    )
-
-    async def close_position(
-        self, order_id: str, exit_price: float = None, reason: str = "Manual"
-    ):
-        """Remove a position from the manager"""
-        async with self.position_lock:
-            if order_id not in self.open_positions:
-                logger.warning(f"Attempted to close non-existent position: {order_id}")
-                return False
-
-            position = self.open_positions[order_id]
-            security_id = position["security_id"]
-            ticker = position["ticker"]
-            direction = position["direction"]
-
-            # Calculate P&L if exit price is provided
-            pnl_msg = ""
-            pnl = 0.0
-            if exit_price:
-                entry = position["entry_price"]
-                qty = position["quantity"]
-
-                # Correct P&L calculation based on position direction
-                if direction == "BUY":  # LONG position
-                    pnl = (exit_price - entry) * qty
-                else:  # SHORT position
-                    pnl = (entry - exit_price) * qty
-
-                pnl_msg = f" | Exit: ₹{exit_price:.2f} | P&L: ₹{pnl:.2f}"
-
-            # Enhanced trade logging
-            hold_time = datetime.now(IST) - position["entry_time"]
-            hold_minutes = int(hold_time.total_seconds() / 60)
-
-            trade_logger.info(
-                f"{'[SIM] ' if SIMULATION_MODE else ''}CLOSED POSITION | {ticker} | "
-                f"{direction} | Qty: {position['quantity']} | "
-                f"Entry: ₹{position['entry_price']:.2f}{pnl_msg} | "
-                f"Hold: {hold_minutes}min | Reason: {reason}"
-            )
-
-            # Remove from indexes
-            if security_id in self.positions_by_security:
-                del self.positions_by_security[security_id]
-
-            if order_id in self.strategy_instances:
-                del self.strategy_instances[order_id]
-
-            del self.open_positions[order_id]
-
-            logger.info(f"Closed position {order_id} for {ticker} (P&L: ₹{pnl:.2f})")
-            return True
-
-    async def check_strategy_exit_signals(
-        self, security_id: int, current_data: pd.DataFrame
-    ):
-        """Check for exit signals from strategy instances"""
-        async with self.position_lock:
-            order_id = self.positions_by_security.get(security_id)
-            if not order_id or order_id not in self.open_positions:
-                return None
-
-            position = self.open_positions[order_id]
-            strategy_instance = self.strategy_instances.get(order_id)
-
-            if not strategy_instance:
-                return None
-
             try:
-                # Update strategy with new data
-                strategy_instance.data = current_data
+                # Get order details from database
+                order_data = await self.get_order_from_db(order_id)
+                if not order_data:
+                    logger.error(f"Order {order_id} not found in database")
+                    return False
 
-                # Check strategy-specific exit conditions
-                if hasattr(strategy_instance, "should_exit"):
-                    exit_signal = strategy_instance.should_exit()
-                    if exit_signal:
-                        return {
-                            "action": "exit",
-                            "reason": exit_signal.get("reason", "Strategy exit"),
-                            "price": current_data.iloc[-1]["close"],
-                        }
+                # Add to active positions table
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
 
-                # Check if strategy automatically closed position
-                if hasattr(strategy_instance, "open_positions") and hasattr(
-                    strategy_instance, "completed_trades"
-                ):
-                    if (
-                        not strategy_instance.open_positions
-                        and strategy_instance.completed_trades
-                    ):
-                        last_trade = strategy_instance.completed_trades[-1]
-                        return {
-                            "action": "exit",
-                            "reason": "Strategy closed position",
-                            "price": last_trade.get(
-                                "exit_price", current_data.iloc[-1]["close"]
-                            ),
-                        }
+                cursor.execute(
+                    """
+                    INSERT INTO active_positions (
+                        order_id, security_id, ticker, direction, quantity, 
+                        original_quantity, entry_price, current_stop_loss, 
+                        take_profit, strategy_name, entry_time, last_updated
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        order_id,
+                        order_data["security_id"],
+                        ticker,
+                        order_data["direction"],
+                        order_data["quantity"],
+                        order_data["quantity"],
+                        order_data["entry_price"],
+                        order_data["stop_loss"],
+                        order_data["take_profit"],
+                        strategy_name,
+                        datetime.now().isoformat(),
+                        datetime.now().isoformat(),
+                    ),
+                )
+
+                conn.commit()
+                conn.close()
+
+                # Mark as traded today
+                # await self.mark_as_traded_today(order_data["security_id"])
+
+                trade_logger.info(
+                    f"NEW POSITION | {ticker} | {order_data['direction']} | "
+                    f"Qty: {order_data['quantity']} | Entry: ₹{order_data['entry_price']:.2f} | "
+                    f"SL: ₹{order_data['stop_loss']:.2f} | TP: ₹{order_data['take_profit']:.2f}"
+                )
+
+                return True
 
             except Exception as e:
-                logger.error(f"Exit signal check error for {position['ticker']}: {e}")
+                import traceback
 
-            return None
-
-    async def execute_strategy_exit(self, order_id: str, exit_info: dict):
-        """Execute exit based on strategy signal"""
-        async with self.position_lock:
-            if order_id not in self.open_positions:
-                logger.warning(f"Cannot exit non-existent position: {order_id}")
+                traceback.print_exc()
+                logger.error(
+                    f"Error adding position: {e}. Tracebak:{str(traceback.print_exc())}"
+                )
                 return False
 
-            position = self.open_positions[order_id]
-            ticker = position["ticker"]
+    async def get_active_positions(self) -> List[Dict]:
+        """Get all active positions from database"""
+        try:
+            results = dhan.get_positions()
+            positions = []
+            for pos in results:
+                # If response is dict-like and has 'positionType', filter out CLOSED
+                if isinstance(pos, dict):
+                    if pos.get("positionType") != "CLOSED":
+                        positions.append(pos)
+                # If response is row/tuple, fallback to old logic (for backward compatibility)
+                elif isinstance(pos, (list, tuple)):
+                    # If positionType is present and not CLOSED, add
+                    position_type = None
+                    if len(pos) > 3 and isinstance(pos[3], str):
+                        position_type = pos[3]
+                    if position_type != "CLOSED":
+                        positions.append(
+                            {
+                                "order_id": self.get_order_id_by_security_id(pos[1]),
+                                "security_id": pos[1],
+                                "ticker": pos[2],
+                                "direction": pos[3],
+                                "quantity": pos[4],
+                                "original_quantity": pos[5],
+                                "entry_price": pos[6],
+                                "current_stop_loss": pos[7],
+                                "take_profit": pos[8],
+                                "strategy_name": pos[9],
+                                "entry_time": datetime.fromisoformat(pos[10]),
+                                "breakeven_moved": bool(pos[11]),
+                                "partial_profit_taken": bool(pos[12]),
+                                "last_updated": datetime.fromisoformat(pos[13]),
+                            }
+                        )
+            return positions
+        except Exception as e:
+            logger.error(f"Error getting active positions: {e}")
+            return []
 
-            # Correct exit direction logic
-            # LONG position (BUY) requires SELL to exit
-            # SHORT position (SELL) requires BUY to exit
-            exit_direction = "SELL" if position["direction"] == "BUY" else "BUY"
+    async def calculate_profit_percentage(
+        self, position: Dict, current_price: float
+    ) -> float:
+        """Calculate profit percentage for a position"""
+        logger.info(f"Calculating profit percentage for {position,current_price}")
+        entry_price = position["entry_price"]
+        if position["direction"] == "BUY":
+            return ((current_price - entry_price) / entry_price) * 100
+        else:  # SHORT position
+            return ((entry_price - current_price) / entry_price) * 100
 
-            logger.info(
-                f"Executing exit for {ticker}: "
-                f"Position direction: {position['direction']}, Exit direction: {exit_direction}"
+    async def update_position_to_breakeven(self, order_id: str, position: Dict) -> bool:
+        """Update stop loss to breakeven (entry price)"""
+        try:
+            new_stop_loss = position["entry_price"]
+
+            # Update in database
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                UPDATE active_positions 
+                SET current_stop_loss = ?, breakeven_moved = 1, last_updated = ?
+                WHERE order_id = ?
+            """,
+                (new_stop_loss, datetime.now().isoformat(), order_id),
             )
 
-            # Place market order for exit
+            conn.commit()
+            conn.close()
+
+            # Update actual order via Dhan API (if not simulation)
+            if not SIMULATION_MODE:
+                try:
+                    modify_response = dhan.modify_order(
+                        order_id=order_id,
+                        order_type="STOP_LOSS",
+                        price=new_stop_loss,
+                        quantity=position["quantity"],
+                    )
+                    logger.info(
+                        f"Modified order {order_id} stop loss to breakeven: ₹{new_stop_loss:.2f}. Response:{modify_response}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to modify order {order_id}: {e}")
+                    return False
+
+            # Send Telegram notification
+            await send_telegram_alert(
+                f"*{position['ticker']} BREAKEVEN MOVED* 🛡️\n"
+                f"Stop Loss moved to Entry Price: ₹{new_stop_loss:.2f}\n"
+                f"Position is now risk-free!\n"
+                f"Time: {datetime.now().strftime('%H:%M:%S')}"
+            )
+
+            logger.info(
+                f"{position['ticker']} moved to breakeven @ ₹{new_stop_loss:.2f}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Error updating position to breakeven: {e}")
+            return False
+
+    async def take_partial_profit(
+        self, order_id: str, position: Dict, current_price: float
+    ) -> bool:
+        """Sell half the quantity and lock in partial profit"""
+        try:
+            # Calculate half quantity (minimum 1 share)
+            half_quantity = max(1, position["quantity"] // 2)
+            remaining_quantity = position["quantity"] - half_quantity
+
+            if remaining_quantity <= 0:
+                logger.warning(
+                    f"Cannot take partial profit for {position['ticker']}: insufficient quantity"
+                )
+                return False
+
+            # Determine exit direction
+            exit_direction = "SELL" if position["direction"] == "BUY" else "BUY"
+
+            # Place market order for partial exit
             exit_order = await place_market_order(
-                position["security_id"], exit_direction, position["quantity"]
+                position["security_id"], exit_direction, half_quantity
             )
 
             if exit_order and exit_order.get("orderId"):
-                # Calculate P&L
-                current_price = exit_info["price"]
+                # Calculate partial profit
                 entry_price = position["entry_price"]
-                quantity = position["quantity"]
+                if position["direction"] == "BUY":
+                    partial_pnl = (current_price - entry_price) * half_quantity
+                else:
+                    partial_pnl = (entry_price - current_price) * half_quantity
 
-                # Correct P&L calculation based on position direction
-                if position["direction"] == "BUY":  # LONG position
-                    pnl = (current_price - entry_price) * quantity
-                else:  # SHORT position
-                    pnl = (entry_price - current_price) * quantity
+                # Update position in database
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
 
-                # Send exit notification
-                await self.send_exit_notification(
-                    position, exit_info, pnl, current_price
+                cursor.execute(
+                    """
+                    UPDATE active_positions 
+                    SET quantity = ?, partial_profit_taken = 1, last_updated = ?
+                    WHERE order_id = ?
+                """,
+                    (remaining_quantity, datetime.now().isoformat(), order_id),
                 )
 
-                # Remove position
-                await self.close_position(order_id, current_price, exit_info["reason"])
+                conn.commit()
+                conn.close()
+
+                # Track for simulation
+                if SIMULATION_MODE:
+                    self.simulated_pnl += partial_pnl
+                    self.simulated_trades.append(
+                        {
+                            "ticker": position["ticker"],
+                            "direction": exit_direction,
+                            "entry_price": entry_price,
+                            "exit_price": current_price,
+                            "quantity": half_quantity,
+                            "pnl": partial_pnl,
+                            "reason": "Partial Profit",
+                            "timestamp": datetime.now(),
+                        }
+                    )
+
+                # Send Telegram notification
+                await send_telegram_alert(
+                    f"*{position['ticker']} PARTIAL PROFIT TAKEN* 💰\n"
+                    f"Sold {half_quantity} shares @ ₹{current_price:.2f}\n"
+                    f"Profit: ₹{partial_pnl:.2f}\n"
+                    f"Remaining: {remaining_quantity} shares\n"
+                    f"Time: {datetime.now().strftime('%H:%M:%S')}"
+                )
+
+                trade_logger.info(
+                    f"PARTIAL PROFIT | {position['ticker']} | {exit_direction} | "
+                    f"Qty: {half_quantity} | Price: ₹{current_price:.2f} | P&L: ₹{partial_pnl:.2f}"
+                )
+
+                logger.info(
+                    f"{position['ticker']} partial profit: {half_quantity} shares @ ₹{current_price:.2f}, "
+                    f"P&L: ₹{partial_pnl:.2f}, Remaining: {remaining_quantity}"
+                )
+
                 return True
+
             else:
-                logger.error(f"Exit order failed for {ticker}: {exit_order}")
+                logger.error(f"Partial profit order failed for {position['ticker']}")
                 return False
 
-    async def send_exit_notification(
-        self, position: dict, exit_info: dict, pnl: float, exit_price: float
-    ):
-        """Send detailed exit notification"""
-        pnl_emoji = "📈" if pnl > 0 else "📉"
-        status_emoji = "✅" if pnl > 0 else "❌"
-        hold_time = datetime.now(IST) - position["entry_time"]
-        hold_minutes = int(hold_time.total_seconds() / 60)
-        hold_seconds = int(hold_time.total_seconds() % 60)
-        position_type = "Long" if position["direction"] == "BUY" else "Short"
+        except Exception as e:
+            logger.error(f"Error taking partial profit: {e}")
+            return False
 
-        message = (
-            f"*{position['ticker']} EXIT SIGNAL* {status_emoji}\n"
-            f"Strategy: `{position['strategy_name']}`\n"
-            f"Position: {position_type} (Qty: {position['quantity']})\n"
-            f"Entry: ₹{position['entry_price']:.2f} → Exit: ₹{exit_price:.2f}\n"
-            f"P&L: *₹{pnl:.2f}* {pnl_emoji}\n"
-            f"Hold Time: {hold_minutes}m {hold_seconds}s\n"
-            f"Reason: `{exit_info['reason']}`\n"
-            f"Time: {datetime.now(IST).strftime('%H:%M:%S')}"
-        )
+    async def close_position(
+        self, order_id: str, exit_price: float = None, reason: str = "Manual"
+    ) -> bool:
+        """Close position and remove from tracking"""
+        try:
+            # Get position details
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
 
-        await send_telegram_alert(message)
+            cursor.execute(
+                """
+                SELECT ticker, direction, quantity, entry_price, strategy_name
+                FROM active_positions WHERE order_id = ?
+            """,
+                (order_id,),
+            )
+
+            result = cursor.fetchone()
+            if not result:
+                logger.warning(f"Position {order_id} not found")
+                return False
+
+            ticker, direction, quantity, entry_price, strategy_name = result
+
+            # Mark as closed in database
+            cursor.execute(
+                """
+                UPDATE active_positions 
+                SET status = 'CLOSED', last_updated = ?
+                WHERE order_id = ?
+            """,
+                (datetime.now().isoformat(), order_id),
+            )
+
+            conn.commit()
+            conn.close()
+
+            # Calculate P&L if exit price provided
+            pnl = 0.0
+            if exit_price:
+                if direction == "BUY":
+                    pnl = (exit_price - entry_price) * quantity
+                else:
+                    pnl = (entry_price - exit_price) * quantity
+
+                if SIMULATION_MODE:
+                    self.simulated_pnl += pnl
+                    self.simulated_trades.append(
+                        {
+                            "ticker": ticker,
+                            "direction": direction,
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "quantity": quantity,
+                            "pnl": pnl,
+                            "reason": reason,
+                            "timestamp": datetime.now(),
+                        }
+                    )
+
+            trade_logger.info(
+                f"CLOSED POSITION | {ticker} | {direction} | Qty: {quantity} | "
+                f"Entry: ₹{entry_price:.2f} | Exit: ₹{exit_price:.2f} | "
+                f"P&L: ₹{pnl:.2f} | Reason: {reason}"
+            )
+
+            logger.info(f"Closed position {order_id} for {ticker}, P&L: ₹{pnl:.2f}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error closing position: {e}")
+            return False
 
     async def monitor_positions(self):
-        """Enhanced position monitoring with proper exit logic"""
-        logger.info("Starting position monitoring task")
+        """Main position monitoring loop with breakeven and partial profit logic"""
+        logger.info("Starting position monitoring with profit management")
 
         while True:
             try:
-                if SIMULATION_MODE and not self.open_positions:
-                    await asyncio.sleep(5)
+                positions = await self.get_active_positions()
+                if not positions:
+                    await asyncio.sleep(30)
                     continue
 
-                async with self.position_lock:
-                    if not self.open_positions:
-                        await asyncio.sleep(30)
-                        continue
-
-                    # Process each position
-                    positions_to_close = []
-                    for order_id, position in list(self.open_positions.items()):
-                        security_id = position["security_id"]
-                        ticker = position["ticker"]
-                        direction = position["direction"]
-
-                        try:
-                            # Get current market data
-                            combined_data = await get_combined_data(security_id)
-                            if combined_data is None or len(combined_data) < 10:
-                                continue
-
-                            # Get current quote
-                            quotes = await fetch_realtime_quote([security_id])
-                            quote = quotes.get(security_id)
-                            if not quote:
-                                continue
-                            current_price = quote["price"]
-
-                            # 1. Check strategy exit signals first
-                            exit_signal = await self.check_strategy_exit_signals(
-                                security_id, combined_data
-                            )
-                            if exit_signal:
-                                logger.info(
-                                    f"{ticker} strategy exit signal: {exit_signal['reason']}"
-                                )
-                                positions_to_close.append((order_id, exit_signal))
-                                continue
-
-                            # 2. Check stop-loss/take-profit
-                            exit_triggered = None
-
-                            if direction == "BUY":  # LONG position
-                                if current_price <= position["stop_loss"]:
-                                    exit_triggered = {
-                                        "reason": "Stop-loss hit",
-                                        "price": current_price,
-                                    }
-                                elif current_price >= position["take_profit"]:
-                                    exit_triggered = {
-                                        "reason": "Take-profit hit",
-                                        "price": current_price,
-                                    }
-                            else:  # SHORT position (direction == "SELL")
-                                if current_price >= position["stop_loss"]:
-                                    exit_triggered = {
-                                        "reason": "Stop-loss hit",
-                                        "price": current_price,
-                                    }
-                                elif current_price <= position["take_profit"]:
-                                    exit_triggered = {
-                                        "reason": "Take-profit hit",
-                                        "price": current_price,
-                                    }
-
-                            if exit_triggered:
-                                logger.info(
-                                    f"{ticker} SL/TP triggered: {exit_triggered['reason']}"
-                                )
-                                positions_to_close.append((order_id, exit_triggered))
-                                continue
-
-                            # 3. Update trailing stops every 5 minutes
-                            now = datetime.now(IST)
-                            if (now - position["last_updated"]).total_seconds() > 300:
-                                regime, adx_value, atr_value = calculate_regime(
-                                    combined_data
-                                )
-                                if atr_value > 0:
-                                    if direction == "BUY":  # LONG position
-                                        new_sl = max(
-                                            position["stop_loss"],
-                                            current_price - atr_value * 1.5,
-                                        )
-                                        if new_sl > position["stop_loss"]:
-                                            await self.update_position(
-                                                order_id, stop_loss=new_sl
-                                            )
-                                    else:  # SHORT position
-                                        new_sl = min(
-                                            position["stop_loss"],
-                                            current_price + atr_value * 1.5,
-                                        )
-                                        if new_sl < position["stop_loss"]:
-                                            await self.update_position(
-                                                order_id, stop_loss=new_sl
-                                            )
-
-                        except Exception as e:
-                            logger.error(f"Error monitoring position {ticker}: {e}")
-
-                # Execute exits outside the position lock to avoid deadlocks
-                for order_id, exit_info in positions_to_close:
+                for position in positions:
+                    print("FROM monitor position:", position)
+                    logger.info(f"Monitoring position: {position}")
                     try:
-                        await self.execute_strategy_exit(order_id, exit_info)
-                    except Exception as e:
-                        logger.error(f"Error executing exit for {order_id}: {e}")
 
-                # Shorter sleep in simulation
-                await asyncio.sleep(5 if SIMULATION_MODE else 30)
+                        current_price = fetch_realtime_quote(position["security_id"])[
+                            position["security_id"]
+                        ]["price"]
+
+                        # Calculate profit percentage
+                        profit_pct = await self.calculate_profit_percentage(
+                            position, current_price
+                        )
+
+                        # 1. Move to breakeven at 0.5% profit
+                        if (
+                            profit_pct >= 0.15
+                            and not position["breakeven_moved"]
+                            and not position["partial_profit_taken"]
+                        ):
+                            await self.update_position_to_breakeven(
+                                position["order_id"], position
+                            )
+                            await self.take_partial_profit(
+                                position["order_id"], position, current_price
+                            )
+                            continue
+
+                        # 3. Check stop-loss/take-profit triggers
+                        exit_triggered = False
+                        reason = ""
+
+                        if position["direction"] == "BUY":
+                            if current_price <= position["current_stop_loss"]:
+                                exit_triggered = True
+                                reason = "Stop-loss hit"
+                            elif current_price >= position["take_profit"]:
+                                exit_triggered = True
+                                reason = "Take-profit hit"
+                        else:  # SHORT
+                            if current_price >= position["current_stop_loss"]:
+                                exit_triggered = True
+                                reason = "Stop-loss hit"
+                            elif current_price <= position["take_profit"]:
+                                exit_triggered = True
+                                reason = "Take-profit hit"
+
+                        if exit_triggered:
+                            # Place exit order
+                            exit_direction = (
+                                "SELL" if position["direction"] == "BUY" else "BUY"
+                            )
+                            exit_order = await place_market_order(
+                                position["security_id"],
+                                exit_direction,
+                                position["quantity"],
+                            )
+
+                            if exit_order:
+                                await self.close_position(
+                                    position["order_id"], current_price, reason
+                                )
+
+                    except Exception as e:
+                        logger.error(
+                            f"Error monitoring position {position['ticker']}: {e}"
+                        )
+
+                await asyncio.sleep(5)  # Check every 5 seconds
 
             except Exception as e:
-                logger.error(f"Position monitor error: {e}")
-                await asyncio.sleep(5 if SIMULATION_MODE else 60)
+                logger.error(f"Position monitoring error: {e}")
+                await asyncio.sleep(60)
+
+    async def get_simulation_report(self) -> Dict:
+        """Generate simulation performance report"""
+        if not self.simulated_trades:
+            return {"message": "No trades recorded"}
+
+        winning_trades = [t for t in self.simulated_trades if t["pnl"] > 0]
+        losing_trades = [t for t in self.simulated_trades if t["pnl"] <= 0]
+
+        return {
+            "total_pnl": self.simulated_pnl,
+            "total_trades": len(self.simulated_trades),
+            "winning_trades": len(winning_trades),
+            "losing_trades": len(losing_trades),
+            "win_rate": (
+                len(winning_trades) / len(self.simulated_trades)
+                if self.simulated_trades
+                else 0
+            ),
+            "average_pnl_per_trade": (
+                self.simulated_pnl / len(self.simulated_trades)
+                if self.simulated_trades
+                else 0
+            ),
+            "largest_win": (
+                max([t["pnl"] for t in winning_trades]) if winning_trades else 0
+            ),
+            "largest_loss": (
+                min([t["pnl"] for t in losing_trades]) if losing_trades else 0
+            ),
+            "trades": self.simulated_trades,
+        }
 
 
-position_manager = PositionManager()
+position_manager = PositionManager(DB_PATH)
 
 
 def round_to_tick_size(price: float, tick_size: float) -> float:
     """Round a price to the nearest multiple of the tick size."""
     return round(price / tick_size) * tick_size
+
+
+async def check_ticker_traded_today(security_id: int) -> dict:
+    """
+    Check if ticker has been traded today using SQLite database
+    Returns dict with trade status and details
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        # Get today's date in the same format as stored in DB
+        today = date.today().isoformat()
+
+        # Check for any orders placed today for this security
+        cursor.execute(
+            """
+            SELECT 
+                order_id, 
+                order_status, 
+                transaction_type, 
+                quantity, 
+                price,
+                create_time,
+                trading_symbol
+            FROM super_orders 
+            WHERE security_id = ? 
+            AND DATE(created_at) = DATE(?)
+            ORDER BY created_at DESC
+        """,
+            (str(security_id), today),
+        )
+
+        orders_today = cursor.fetchall()
+
+        if orders_today:
+            # Convert to list of dicts for easier handling
+            orders = [dict(order) for order in orders_today]
+
+            # Check if any order is still active (not cancelled/rejected)
+            active_orders = [
+                order
+                for order in orders
+                if order["order_status"] not in ["CANCELLED", "REJECTED"]
+            ]
+
+            conn.close()
+
+            return {
+                "traded_today": True,
+                "total_orders": len(orders),
+                "active_orders": len(active_orders),
+                "orders": orders,
+                "latest_order": orders[0] if orders else None,
+            }
+        else:
+            conn.close()
+            return {
+                "traded_today": False,
+                "total_orders": 0,
+                "active_orders": 0,
+                "orders": [],
+                "latest_order": None,
+            }
+
+    except Exception as e:
+        trade_logger.error(f"Failed to check ticker trading status from DB: {str(e)}")
+        return {
+            "traded_today": False,
+            "total_orders": 0,
+            "active_orders": 0,
+            "orders": [],
+            "latest_order": None,
+            "error": str(e),
+        }
+
+
+def is_security_id_in_positions(security_id: int, positions: list[dict]) -> bool:
+    """Check if the given security_id exists in the list of positions."""
+    positions = (pos for pos in positions["data"])
+    is_today_trade = False
+    active_orders = 0
+    total_orders = 0
+    for pos in positions:
+        for k, v in pos.items():
+            if k == "securityId" and v == str(security_id):
+                is_today_trade = True
+            if k == "positionType" and v != "CLOSED":
+                active_orders += 1
+        total_orders += 1
+    logger.info(f"Today's positions :{[positions]}")
+
+    return is_today_trade, total_orders, active_orders
 
 
 async def execute_strategy_signal(
@@ -814,18 +1138,39 @@ async def execute_strategy_signal(
     strategy_instance=None,
     **params,
 ) -> bool:
-    """Enhanced signal execution with proper position direction handling."""
+    """Enhanced signal execution with SQLite-based trading check and proper position direction handling."""
+    current_price = None
     try:
-        # Check if we already have a position for this security
-        if await position_manager.has_position(security_id):
-            existing_direction = await position_manager.get_position_direction(
-                security_id
-            )
+        todays_positions = dhan.get_positions()
+        is_today_trade, total_orders, active_orders = is_security_id_in_positions(
+            security_id, todays_positions
+        )
+
+        if is_today_trade:
             logger.info(
-                f"{ticker} - Already have {existing_direction} position, skipping new {signal} signal"
+                f"{ticker} - Already traded today. "
+                f"Total orders: {total_orders}, "
+                f"Active orders: {active_orders}"
+            )
+        if total_orders >= 10:
+            dhan.kill_switch()
+
+            # Skip if we already have active orders for this security today
+            if is_today_trade:
+                logger.info(
+                    f"{ticker} - Skipping new {signal} signal due to existing active orders"
+                )
+                return False
+
+            return False  # No new action needed if already traded today
+        # if current is before 9:30 AM and after 15:00PM do not place a new trade
+        if datetime.now(IST).time() < time(9, 30) or datetime.now(IST).time() > time(
+            15, 0
+        ):
+            logger.info(
+                f"{ticker} - Current time {datetime.now(IST).time()} is outside suitable trading hours"
             )
             return False
-
         # Add volatility filter
         volatility = await calculate_stock_volatility(security_id)
         if volatility > VOLATILITY_THRESHOLD:
@@ -854,18 +1199,32 @@ async def execute_strategy_signal(
         # Get current quote
         quotes = await fetch_realtime_quote([security_id])
         quote = quotes.get(security_id)
-        if not quote:
+        if not quote and not hist_data.iloc[-1]["close"]:
             logger.warning(f"Price unavailable for {ticker}")
             return False
-
-        current_price = quote["price"]
+        current_price = quote or hist_data.iloc[-1]["close"]
         vwap = await calculate_vwap(hist_data)
+        logger.info(f"Current price for {ticker}: ₹{current_price}")
 
         # Improved entry price logic
         entry_price = (
-            min(current_price, vwap * 0.998)
+            min(
+                (
+                    current_price["price"]
+                    if isinstance(current_price, dict)
+                    else current_price
+                ),
+                vwap * 0.998,
+            )
             if signal == "BUY"
-            else max(current_price, vwap * 1.002)
+            else max(
+                (
+                    current_price["price"]
+                    if isinstance(current_price, dict)
+                    else current_price
+                ),
+                vwap * 1.002,
+            )
         )
 
         # Calculate risk parameters
@@ -881,36 +1240,40 @@ async def execute_strategy_signal(
 
         # Check available funds
         funds = dhan.get_fund_limits().get("data", {}).get("availabelBalance", 0)
-        required_margin = rounded_entry_price * risk_params["position_size"]
+        required_margin = (rounded_entry_price * risk_params["position_size"]) / 5
 
         if funds < required_margin:
             logger.warning(
                 f"{ticker} - Insufficient funds: ₹{funds:.2f} < ₹{required_margin:.2f}"
             )
+
             await send_telegram_alert(
                 f"*{ticker} Order Failed* ❌\n"
                 f"Signal: {signal} at ₹{rounded_entry_price:.2f}\n"
-                f"Insufficient funds: ₹{funds:.2f} < ₹{required_margin:.2f}"
+                f"Insufficient funds: ₹{funds:.2f} < ₹{required_margin:.2f}\n"
             )
             return False
 
+        # Proceed with order placement since ticker hasn't been traded today
         # Prepare entry notification
         direction_emoji = "🟢" if signal == "BUY" else "🔴"
         position_size = risk_params["position_size"]
         position_type = "Long" if signal == "BUY" else "Short"
 
+        # Get today's trading summary for context
+
         message = (
             f"*{ticker} ENTRY SIGNAL* {direction_emoji}\n"
-            f"Strategies: `{params["strategy_names"]}`\n"
+            f"Strategies: `{params.get('strategy_names', 'N/A')}`\n"
             f"Direction: {position_type}\n"
             f"Entry: ₹{rounded_entry_price:.2f} | VWAP: ₹{vwap:.2f}\n"
-            f"Current: ₹{current_price:.2f}\n"
+            f"Current: ₹{current_price["price"] if isinstance(current_price, dict) else current_price:.2f}\n"
             f"Regime: {regime} (ADX: {adx_value:.2f})\n"
             f"Volatility: {volatility:.4f}\n"
             f"Size: {position_size} | SL: ₹{rounded_stop_loss:.2f}\n"
             f"TP: ₹{rounded_take_profit:.2f}\n"
             f"Risk: ₹{abs(rounded_entry_price - rounded_stop_loss) * position_size:.2f}\n"
-            f"Time: {now.strftime('%H:%M:%S')}"
+            f"Time: {now.strftime('%H:%M:%S')}\n"
         )
 
         logger.info(f"Executing {signal} signal for {ticker}")
@@ -926,6 +1289,7 @@ async def execute_strategy_signal(
                 rounded_take_profit,
                 position_size,
             )
+
         except Exception as e:
             logger.error(f"Order placement failed for {ticker}: {str(e)}")
             await send_telegram_alert(
@@ -940,20 +1304,22 @@ async def execute_strategy_signal(
             success = await position_manager.add_position(
                 order_response["orderId"],
                 security_id,
-                ticker,
-                rounded_entry_price,
-                position_size,
-                rounded_stop_loss,
-                rounded_take_profit,
-                signal,  # This is the position direction (BUY = LONG, SELL = SHORT)
+                # ticker,
+                # rounded_entry_price,
+                # position_size,
+                # rounded_stop_loss,
+                # rounded_take_profit,
+                # signal,  # This is the position direction (BUY = LONG, SELL = SHORT)
                 strategy_name,
-                strategy_instance,
+                # strategy_instance,
             )
             if success:
                 trade_logger.info(
                     f"{'[SIM] ' if SIMULATION_MODE else ''}ORDER EXECUTED | {ticker} | "
-                    f"{signal} | Qty: {position_size} | Price: ₹{rounded_entry_price:.2f}"
+                    f"{signal} | Qty: {position_size} | Price: ₹{rounded_entry_price:.2f} | "
+                    f"OrderID: {order_response['orderId']}"
                 )
+
             return success
         else:
             logger.error(f"Order failed for {ticker}: {order_response}")
@@ -967,8 +1333,52 @@ async def execute_strategy_signal(
     except Exception as e:
         logger.error(f"Signal execution failed for {ticker}: {str(e)}")
         logger.error(traceback.format_exc())
-        await send_telegram_alert(f"*{ticker} Execution Failed* ❌\nError: {str(e)}")
+        await send_telegram_alert(
+            f"*{ticker} Execution Failed* ❌\n"
+            f"Error: {str(e)}\n"
+            f"Current Price: ₹{current_price if current_price else 'N/A'}"
+        )
         return False
+
+
+# Function to clean up old database entries (optional)
+async def cleanup_old_orders(days_to_keep: int = 30):
+    """Clean up old order entries from database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Delete orders older than specified days
+        cursor.execute(
+            """
+            DELETE FROM order_legs 
+            WHERE parent_order_id IN (
+                SELECT order_id FROM super_orders 
+                WHERE DATE(created_at) < DATE('now', '-{} days')
+            )
+        """.format(
+                days_to_keep
+            )
+        )
+
+        cursor.execute(
+            """
+            DELETE FROM super_orders 
+            WHERE DATE(created_at) < DATE('now', '-{} days')
+        """.format(
+                days_to_keep
+            )
+        )
+
+        deleted_orders = cursor.rowcount
+        conn.commit()
+        conn.close()
+
+        if deleted_orders > 0:
+            logger.info(f"Cleaned up {deleted_orders} old order records")
+
+    except Exception as e:
+        logger.error(f"Failed to cleanup old orders: {str(e)}")
 
 
 async def process_stock_with_exit_monitoring(
@@ -985,33 +1395,6 @@ async def process_stock_with_exit_monitoring(
             if combined_data is None:
                 logger.warning(f"{ticker} - No data available")
                 return
-
-            # Check for existing position FIRST
-            if await position_manager.has_position(security_id):
-                # We have an existing position - only check for exit signals
-                logger.debug(
-                    f"{ticker} - Has existing position, checking exit signals only"
-                )
-
-                exit_signal = await position_manager.check_strategy_exit_signals(
-                    security_id, combined_data
-                )
-                if exit_signal:
-                    order_id = position_manager.positions_by_security[security_id]
-                    logger.info(
-                        f"{ticker} - Exit signal detected: {exit_signal['reason']}"
-                    )
-                    await position_manager.execute_strategy_exit(order_id, exit_signal)
-                return  # IMPORTANT: Return here to avoid processing entry signals
-
-            # No existing position - check cooldown for new entries
-            if not SIMULATION_MODE:
-                last_trade_time = await position_manager.get_last_trade_time(ticker)
-                if last_trade_time and current_time < last_trade_time + timedelta(
-                    minutes=position_manager.cooldown_minutes
-                ):
-                    logger.debug(f"{ticker} - Skipping due to cooldown")
-                    return
 
             # Check minimum data requirements
             data_length = len(combined_data)
@@ -1094,64 +1477,79 @@ async def process_stock_with_exit_monitoring(
             # Determine the strategy consensus signal
             if buy_votes >= MIN_VOTES and (buy_votes - sell_votes) >= min_vote_diff:
                 strategy_signal = "BUY"
-                primary_strategy = next(
-                    s for s in strategy_instances if s["signal"] == "BUY"
-                )
+                # primary_strategy = next(
+                #     s for s in strategy_instances if s["signal"] == "BUY"
+                # )
             elif sell_votes >= MIN_VOTES and (sell_votes - buy_votes) >= min_vote_diff:
                 strategy_signal = "SELL"
-                primary_strategy = next(
-                    s for s in strategy_instances if s["signal"] == "SELL"
-                )
+                # primary_strategy = next(
+                #     s for s in strategy_instances if s["signal"] == "SELL"
+                # )
 
             # If we have a strategy signal, get LLM confirmation
-            if strategy_signal and primary_strategy:
+            nifty_signal = get_index_signal_dhan_api("13", "Nifty 50", 0.6)
+            sector_security_id, index_name = get_sector_security_id(security_id)
+            sector_signal = get_index_signal_dhan_api(
+                sector_security_id, index_name, 0.6
+            )
+            if strategy_signal and (
+                (
+                    strategy_signal.upper() == "BUY"
+                    and (
+                        nifty_signal["signal"].upper() in ["BUY", "BOTH"]
+                        or sector_signal["signal"].upper() in ["BUY", "BOTH"]
+                    )
+                )
+                or (
+                    strategy_signal.upper() == "SELL"
+                    and (
+                        nifty_signal["signal"].upper() in ["BUY", "BOTH"]
+                        or sector_signal["signal"].upper() in ["BUY", "BOTH"]
+                    )
+                )
+            ):
                 logger.info(
-                    f"{ticker} - Strategy consensus: {strategy_signal}, getting LLM confirmation..."
+                    f"{ticker} - Strategy consensus: {strategy_signal} Nifty signal: {nifty_signal["signal"].upper()} Sector signal: {sector_signal["signal"].upper()}"
                 )
 
                 # Get LLM signal (only BUY/SELL, no HOLD)
-                llm_signal = await get_llm_signal(ticker, combined_data)
-                logger.info(f"{ticker} - LLM signal: {llm_signal}")
+                # llm_signal = await get_openrouter_llm_signal(ticker, combined_data)
+                # logger.info(f"{ticker} - LLM signal: {llm_signal}")
 
                 # Only proceed if LLM gives a clear BUY/SELL signal
-                if llm_signal in ["BUY", "SELL"]:
-                    # Compare signals and execute only if they match
-                    if strategy_signal == llm_signal:
-                        logger.info(
-                            f"{ticker} - SIGNAL CONFIRMATION: Both strategy and LLM agree on {strategy_signal}"
-                        )
-                        executed = await execute_strategy_signal(
-                            ticker,
-                            security_id,
-                            strategy_signal,
-                            regime,
-                            adx_value,
-                            atr_value,
-                            combined_data,
-                            primary_strategy["name"],
-                            primary_strategy["instance"],
-                            strategy_names=strategy_names,  # Pass the list of strategy names
-                            **primary_strategy["params"],
-                        )
+                # if llm_signal in ["BUY", "SELL"]:
+                # Compare signals and execute only if they match
+                # if strategy_signal == llm_signal:
+                #     logger.info(
+                #         f"{ticker} - SIGNAL CONFIRMATION: Both strategy and LLM agree on {strategy_signal}"
+                #     )
+                executed = await execute_strategy_signal(
+                    ticker,
+                    security_id,
+                    strategy_signal,
+                    regime,
+                    adx_value,
+                    atr_value,
+                    combined_data,
+                    strategy_names[0],
+                    # primary_strategy["instance"],
+                    strategy_names=strategy_names,  # Pass the list of strategy names
+                    # **primary_strategy["params"],
+                )
 
-                        if executed:
-                            await position_manager.update_last_trade_time(
-                                ticker, current_time
-                            )
-                            logger.info(
-                                f"{ticker} - Order executed with dual confirmation"
-                            )
-                    else:
-                        logger.info(
-                            f"{ticker} - SIGNAL MISMATCH: Strategy={strategy_signal}, LLM={llm_signal}. No order placed."
-                        )
-                else:
-                    logger.info(
-                        f"{ticker} - LLM provided no actionable signal ({llm_signal}). No order placed."
-                    )
+                if executed:
+                    # await position_manager.update_last_trade_time(ticker, current_time)
+                    logger.info(f"{ticker} - Order executed with dual confirmation")
+                #     else:
+                #         logger.info(
+                #             f"{ticker} - SIGNAL MISMATCH: Strategy={strategy_signal}, LLM={llm_signal}. No order placed."
+                #         )
+                # else:
+                #     logger.info(
+                #         f"{ticker} - LLM provided no actionable signal ({llm_signal}). No order placed."
+                # )
             else:
                 logger.debug(f"{ticker} - No qualifying strategy signal generated")
-
         except Exception as e:
             logger.error(f"{ticker} - Processing failed: {str(e)}")
             logger.error(traceback.format_exc())
@@ -1321,7 +1719,7 @@ class TelegramQueue:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
+                "text": message.replace("*", r"\*"),
                 "parse_mode": "Markdown",
             }
 
@@ -1396,6 +1794,152 @@ class APIClient:
 api_client = APIClient()
 
 
+async def save_super_order_to_db(
+    request_payload: dict,
+    response_data: dict,
+    security_id: int,
+    transaction_type: str,
+    current_price: float,
+    stop_loss: float,
+    take_profit: float,
+    quantity: int,
+):
+    """Save super order response to SQLite database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        # Extract data from response (for simple place order response)
+        order_id = response_data.get("orderId", "")
+        order_status = response_data.get("orderStatus", "UNKNOWN")
+
+        # Insert main order record
+        cursor.execute(
+            """
+            INSERT INTO super_orders (
+                order_id, dhan_client_id, correlation_id, order_status,
+                transaction_type, exchange_segment, product_type, order_type,
+                security_id, quantity, price, target_price, stop_loss_price,
+                trailing_jump, request_payload, response_data, update_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+            (
+                order_id,
+                request_payload.get("dhanClientId", ""),
+                request_payload.get("correlationId", ""),
+                order_status,
+                transaction_type,
+                request_payload.get("exchangeSegment", ""),
+                request_payload.get("productType", ""),
+                request_payload.get("orderType", ""),
+                str(security_id),
+                quantity,
+                current_price,
+                take_profit,
+                stop_loss,
+                request_payload.get("trailingJump", 0),
+                json.dumps(request_payload),
+                json.dumps(response_data),
+                datetime.now().isoformat(),
+            ),
+        )
+
+        conn.commit()
+        conn.close()
+
+        trade_logger.info(f"Super order saved to DB | OrderID: {order_id}")
+
+    except Exception as e:
+        trade_logger.error(f"Failed to save super order to DB: {str(e)}")
+
+
+async def update_super_order_from_list_response(order_data: dict):
+    """Update super order with detailed data from list API response"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        order_id = order_data.get("orderId", "")
+
+        # Update main order with complete details
+        cursor.execute(
+            """
+            UPDATE super_orders SET
+                dhan_client_id = ?, correlation_id = ?, order_status = ?,
+                transaction_type = ?, exchange_segment = ?, product_type = ?,
+                order_type = ?, validity = ?, trading_symbol = ?, security_id = ?,
+                quantity = ?, remaining_quantity = ?, ltp = ?, price = ?,
+                after_market_order = ?, leg_name = ?, exchange_order_id = ?,
+                create_time = ?, update_time = ?, exchange_time = ?,
+                oms_error_description = ?, average_traded_price = ?, filled_qty = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE order_id = ?
+        """,
+            (
+                order_data.get("dhanClientId", ""),
+                order_data.get("correlationId", ""),
+                order_data.get("orderStatus", ""),
+                order_data.get("transactionType", ""),
+                order_data.get("exchangeSegment", ""),
+                order_data.get("productType", ""),
+                order_data.get("orderType", ""),
+                order_data.get("validity", ""),
+                order_data.get("tradingSymbol", ""),
+                order_data.get("securityId", ""),
+                order_data.get("quantity", 0),
+                order_data.get("remainingQuantity", 0),
+                order_data.get("ltp", 0.0),
+                order_data.get("price", 0.0),
+                order_data.get("afterMarketOrder", False),
+                order_data.get("legName", ""),
+                order_data.get("exchangeOrderId", ""),
+                order_data.get("createTime", ""),
+                order_data.get("updateTime", ""),
+                order_data.get("exchangeTime", ""),
+                order_data.get("omsErrorDescription", ""),
+                order_data.get("averageTradedPrice", 0.0),
+                order_data.get("filledQty", 0),
+                order_id,
+            ),
+        )
+
+        # Delete existing legs for this order
+        cursor.execute("DELETE FROM order_legs WHERE parent_order_id = ?", (order_id,))
+
+        # Insert leg details
+        leg_details = order_data.get("legDetails", [])
+        for leg in leg_details:
+            cursor.execute(
+                """
+                INSERT INTO order_legs (
+                    parent_order_id, order_id, leg_name, transaction_type,
+                    total_quantity, remaining_quantity, triggered_quantity,
+                    price, order_status, trailing_jump
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    order_id,
+                    leg.get("orderId", ""),
+                    leg.get("legName", ""),
+                    leg.get("transactionType", ""),
+                    leg.get("totalQuatity", 0),  # Note: API has typo "Quatity"
+                    leg.get("remainingQuantity", 0),
+                    leg.get("triggeredQuantity", 0),
+                    leg.get("price", 0.0),
+                    leg.get("orderStatus", ""),
+                    leg.get("trailingJump", 0.0),
+                ),
+            )
+
+        conn.commit()
+        conn.close()
+
+        trade_logger.info(f"Super order updated in DB | OrderID: {order_id}")
+
+    except Exception as e:
+        trade_logger.error(f"Failed to update super order in DB: {str(e)}")
+
+
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=1, max=10),
@@ -1411,21 +1955,14 @@ async def place_super_order(
     take_profit: float,
     quantity: int = MAX_QUANTITY,
 ) -> Optional[Dict]:
-    """Enhanced order placement with proper logging"""
+    """Enhanced order placement with proper logging and SQLite storage"""
+
     if SIMULATION_MODE:
         # Simulate successful order placement
         order_id = f"SIM-{security_id}-{int(datetime.now(IST).timestamp())}"
-        trade_logger.info(
-            f"[SIM] SUPER ORDER | {security_id} | {transaction_type} | "
-            f"Qty: {quantity} | Price: ₹{current_price:.2f} | "
-            f"SL: ₹{stop_loss:.2f} | TP: ₹{take_profit:.2f}"
-        )
-        return {"orderId": order_id, "status": "success"}
 
-    try:
-        await rate_limiter.acquire()
-        url = "https://api.dhan.co/v2/super/orders"
-        payload = {
+        # Create simulated request and response
+        simulated_request = {
             "dhanClientId": DHAN_CLIENT_ID,
             "correlationId": f"{security_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "transactionType": transaction_type,
@@ -1440,12 +1977,68 @@ async def place_super_order(
             "trailingJump": 0.1,
         }
 
+        simulated_response = {"orderId": order_id, "orderStatus": "PENDING"}
+
+        # Save to database
+        await save_super_order_to_db(
+            simulated_request,
+            simulated_response,
+            security_id,
+            transaction_type,
+            current_price,
+            stop_loss,
+            take_profit,
+            quantity,
+        )
+
+        trade_logger.info(
+            f"[SIM] SUPER ORDER | {security_id} | {transaction_type} | "
+            f"Qty: {quantity} | Price: ₹{current_price:.2f} | "
+            f"SL: ₹{stop_loss:.2f} | TP: ₹{take_profit:.2f} | OrderID: {order_id}"
+        )
+        return simulated_response
+
+    try:
+        # await rate_limiter.acquire()
+        url = "https://api.dhan.co/v2/super/orders"
+        payload = {
+            "dhanClientId": DHAN_CLIENT_ID,
+            "correlationId": f"{security_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "transactionType": transaction_type,
+            "exchangeSegment": "NSE_EQ",
+            "productType": "INTRADAY",
+            "orderType": "LIMIT",
+            "securityId": str(security_id),
+            "quantity": quantity,
+            "price": round(current_price, 2),
+            "targetPrice": round(take_profit, 2),
+            "stopLossPrice": round(stop_loss, 2),
+            "trailingJump": 1 if current_price > 1000 else 0.1,
+        }
+
         session = await api_client.get_session()
         async with session.post(url, json=payload) as response:
             if response.status == 200:
                 data = await response.json()
                 order_id = data.get("orderId")
+                await send_telegram_alert(
+                    f"*{security_id} Order Placed\n"
+                    f"Signal: {transaction_type} at ₹{current_price:.2f}\n"
+                    f"Reposne: {response}"
+                )
                 if order_id:
+                    # Save to database
+                    await save_super_order_to_db(
+                        payload,
+                        data,
+                        security_id,
+                        transaction_type,
+                        current_price,
+                        stop_loss,
+                        take_profit,
+                        quantity,
+                    )
+
                     trade_logger.info(
                         f"SUPER ORDER PLACED | {security_id} | {transaction_type} | "
                         f"Qty: {quantity} | Price: ₹{current_price:.2f} | "
@@ -1461,6 +2054,88 @@ async def place_super_order(
     except Exception as e:
         trade_logger.error(f"Super order exception: {str(e)}")
         return None
+
+
+# Helper functions for database operations
+async def get_super_order_by_id(order_id: str) -> Optional[Dict]:
+    """Retrieve super order by ID from database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM super_orders WHERE order_id = ?
+        """,
+            (order_id,),
+        )
+
+        row = cursor.fetchone()
+        if row:
+            order_data = dict(row)
+
+            # Get leg details
+            cursor.execute(
+                """
+                SELECT * FROM order_legs WHERE parent_order_id = ?
+            """,
+                (order_id,),
+            )
+
+            legs = cursor.fetchall()
+            order_data["leg_details"] = [dict(leg) for leg in legs]
+
+            conn.close()
+            return order_data
+
+        conn.close()
+        return None
+
+    except Exception as e:
+        trade_logger.error(f"Failed to get super order from DB: {str(e)}")
+        return None
+
+
+async def get_pending_super_orders() -> list:
+    """Get all pending super orders from database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT * FROM super_orders 
+            WHERE order_status IN ('PENDING', 'TRANSIT', 'PART_TRADED')
+            ORDER BY create_time DESC
+        """
+        )
+
+        rows = cursor.fetchall()
+        orders = []
+
+        for row in rows:
+            order_data = dict(row)
+
+            # Get leg details for each order
+            cursor.execute(
+                """
+                SELECT * FROM order_legs WHERE parent_order_id = ?
+            """,
+                (order_data["order_id"],),
+            )
+
+            legs = cursor.fetchall()
+            order_data["leg_details"] = [dict(leg) for leg in legs]
+            orders.append(order_data)
+
+        conn.close()
+        return orders
+
+    except Exception as e:
+        trade_logger.error(f"Failed to get pending orders from DB: {str(e)}")
+        return []
 
 
 @retry(
@@ -1552,7 +2227,7 @@ async def fetch_realtime_quote(security_ids: List[int]) -> Dict[int, Optional[Di
     results = {}
 
     for i in range(0, len(security_ids), batch_size):
-        batch = security_ids[i : i + batch_size]
+        batch = security_ids[int(i) : i + batch_size]
         await rate_limiter.acquire()
         batch_results = await _fetch_quote_batch(batch)
         results.update(batch_results)
@@ -1563,7 +2238,7 @@ async def fetch_realtime_quote(security_ids: List[int]) -> Dict[int, Optional[Di
 async def _fetch_quote_batch(security_ids: List[int]) -> Dict[int, Optional[Dict]]:
     """Fetch quotes for a batch of securities"""
     try:
-        await asyncio.sleep(1)  # Rate limiting
+        await asyncio.sleep(5)  # Rate limiting
         payload = {"NSE_EQ": [int(sid) for sid in security_ids]}
 
         # Use thread pool for synchronous dhan call
@@ -1596,9 +2271,7 @@ async def _fetch_quote_batch(security_ids: List[int]) -> Dict[int, Optional[Dict
             return result
 
         elif response.get("status") == "failure":
-            logger.warning(
-                f"Quote API failed for {security_ids}: {response.get('remarks', 'Unknown error')}"
-            )
+            logger.warning(f"Quote API failed for {security_ids}: {response}")
             return {sec_id: None for sec_id in security_ids}
         else:
             logger.error(f"Unexpected quote API response: {response}")
@@ -1751,7 +2424,6 @@ async def get_combined_data(security_id: int) -> Optional[pd.DataFrame]:
             security_id=int(security_id),
             exchange_segment="NSE_EQ",
             auto_start_live_collection=True,
-            use_cache=True,
         )
 
         if combined_data is None:
@@ -1995,10 +2667,10 @@ def calculate_risk_params_cached(
     )
     if direction == "BUY":
         stop_loss = current_price - stop_loss_distance
-        take_profit = current_price + (atr * cfg["tp_mult"])
+        take_profit = current_price + (atr * cfg["tp_mult"] * 1.75)
     else:
         stop_loss = current_price + stop_loss_distance
-        take_profit = current_price - (atr * cfg["tp_mult"])
+        take_profit = current_price - (atr * cfg["tp_mult"] * 1.75)
     return {
         "position_size": position_size,
         "stop_loss": stop_loss,
@@ -2044,7 +2716,6 @@ class PnLTracker:
                 await rate_limiter.acquire()
                 # Run synchronous dhan.get_positions() in a separate thread
                 response = await asyncio.to_thread(dhan.get_positions)
-
                 if response.get("status") == "success" and response.get("data"):
                     realized_pnl = 0.0
                     unrealized_pnl = 0.0
@@ -2514,6 +3185,7 @@ async def main_trading_loop_with_cache():
     try:
         await telegram_queue.start()
         await send_telegram_alert("🚀 Bot started with enhanced caching")
+        asyncio.create_task(position_manager.monitor_positions())
 
         # Initialize live data system
         await initialize_live_data_from_config()
@@ -2564,17 +3236,14 @@ async def main_trading_loop_with_cache():
             asyncio.create_task(schedule_square_off()),
             asyncio.create_task(send_enhanced_heartbeat()),  # Enhanced version
             asyncio.create_task(cache_maintenance()),  # New task
-            asyncio.create_task(position_manager.monitor_positions()),
-            asyncio.create_task(position_manager.load_trade_times()),
         ]
 
         logger.info(f"Started {len(background_tasks)} background tasks")
 
         batch_size = 3
         loop_count = 0
-        INDIVIDUAL_TASK_TIMEOUT = 45  # Seconds per stock
-        BATCH_TIMEOUT = 120  # Seconds per batch (up from 50)
-        print("==================", await market_hours_check())
+        INDIVIDUAL_TASK_TIMEOUT = 180  # Seconds per stock
+        BATCH_TIMEOUT = 300  # Seconds per batch (up from 50)
         while await market_hours_check():
             loop_count += 1
             start_time = datetime.now(IST)
@@ -2695,7 +3364,7 @@ async def main_simulation_loop():
         logger.info("Starting continuous simulation mode")
 
         # Initialize position manager
-        await position_manager.load_trade_times()
+        asyncio.create_task(position_manager.monitor_positions())
 
         try:
             strategies_df = pd.read_csv("csv/selected_stocks_strategies.csv")
@@ -2720,10 +3389,9 @@ async def main_simulation_loop():
         logger.info(f"Prepared {len(stock_universe)} stocks for simulation")
 
         # Start background tasks
-        background_tasks = [
-            asyncio.create_task(position_manager.monitor_positions()),
-            asyncio.create_task(send_enhanced_heartbeat()),
-        ]
+
+        asyncio.create_task(position_manager.monitor_positions()),
+        asyncio.create_task(send_enhanced_heartbeat()),
 
         # Continuous processing loop
         batch_size = 5
@@ -2766,25 +3434,6 @@ async def main_simulation_loop():
     except Exception as e:
         logger.critical(f"Simulation failure: {str(e)}")
         logger.error(traceback.format_exc())
-    finally:
-        # Close all positions at end
-        closed_positions = 0
-        async with position_manager.position_lock:
-            for order_id, position in list(position_manager.open_positions.items()):
-                await position_manager.close_position(
-                    order_id, exit_price=position["entry_price"]  # For logging
-                )
-                closed_positions += 1
-
-        # Generate summary
-        summary = (
-            f"📊 SIMULATION COMPLETE\n"
-            f"Stocks: {len(stock_universe)}\n"
-            f"Positions Opened: {opened_positions}\n"
-            f"Positions Closed: {closed_positions}"
-        )
-        logger.info(summary)
-        await send_telegram_alert(summary)
 
 
 if __name__ == "__main__":
@@ -2813,6 +3462,7 @@ if __name__ == "__main__":
             asyncio.run(main_simulation_loop())
         else:
             logger.info("Starting LIVE TRADING MODE")
+            # logger.info(f"Starting main trading loop with cache: Monitoring positions:{monitor_task}")
             asyncio.run(main_trading_loop_with_cache())
 
     except KeyboardInterrupt:

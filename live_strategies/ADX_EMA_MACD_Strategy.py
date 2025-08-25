@@ -179,30 +179,30 @@ class ADXEMAMACDStrategy(bt.Strategy):
             if self.bullish_entry[0]:
                 self.order = self.buy()
                 self.order_type = "enter_long"
-                trade_logger.info(
-                    f"BUY SIGNAL (High ADX + Above EMA + MACD Bullish) | Time: {bar_time_ist} | "
-                    f"Price: {self.data.close[0]:.2f}"
-                )
+                # trade_logger.info(
+                #     f"BUY SIGNAL (High ADX + Above EMA + MACD Bullish) | Time: {bar_time_ist} | "
+                #     f"Price: {self.data.close[0]:.2f}"
+                # )
             elif self.bearish_entry[0]:
                 self.order = self.sell()
                 self.order_type = "enter_short"
-                trade_logger.info(
-                    f"SELL SIGNAL (High ADX + Below EMA + MACD Bearish) | Time: {bar_time_ist} | "
-                    f"Price: {self.data.close[0]:.2f}"
-                )
+                # trade_logger.info(
+                #     f"SELL SIGNAL (High ADX + Below EMA + MACD Bearish) | Time: {bar_time_ist} | "
+                #     f"Price: {self.data.close[0]:.2f}"
+                # )
         else:
             if self.position.size > 0 and self.bullish_exit[0]:
                 self.order = self.sell()
                 self.order_type = "exit_long"
-                trade_logger.info(
-                    f"SELL SIGNAL (Exit Long) | Time: {bar_time_ist} | Price: {self.data.close[0]:.2f}"
-                )
+                # trade_logger.info(
+                #     f"SELL SIGNAL (Exit Long) | Time: {bar_time_ist} | Price: {self.data.close[0]:.2f}"
+                # )
             elif self.position.size < 0 and self.bearish_exit[0]:
                 self.order = self.buy()
                 self.order_type = "exit_short"
-                trade_logger.info(
-                    f"BUY SIGNAL (Exit Short) | Time: {bar_time_ist} | Price: {self.data.close[0]:.2f}"
-                )
+                # trade_logger.info(
+                #     f"BUY SIGNAL (Exit Short) | Time: {bar_time_ist} | Price: {self.data.close[0]:.2f}"
+                # )
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
@@ -219,9 +219,9 @@ class ADXEMAMACDStrategy(bt.Strategy):
                     "direction": "long",
                 }
                 self.open_positions.append(position_info)
-                trade_logger.info(
-                    f"BUY EXECUTED (Enter Long) | Ref: {order.ref} | Price: {order.executed.price:.2f}"
-                )
+                # trade_logger.info(
+                #     f"BUY EXECUTED (Enter Long) | Ref: {order.ref} | Price: {order.executed.price:.2f}"
+                # )
             elif self.order_type == "enter_short" and order.issell():
                 position_info = {
                     "entry_time": exec_dt,
@@ -232,9 +232,9 @@ class ADXEMAMACDStrategy(bt.Strategy):
                     "direction": "short",
                 }
                 self.open_positions.append(position_info)
-                trade_logger.info(
-                    f"SELL EXECUTED (Enter Short) | Ref: {order.ref} | Price: {order.executed.price:.2f}"
-                )
+                # trade_logger.info(
+                #     f"SELL EXECUTED (Enter Short) | Ref: {order.ref} | Price: {order.executed.price:.2f}"
+                # )
             elif self.order_type == "exit_long" and order.issell():
                 if self.open_positions:
                     entry_info = self.open_positions.pop(0)
@@ -259,9 +259,9 @@ class ADXEMAMACDStrategy(bt.Strategy):
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
-                    trade_logger.info(
-                        f"SELL EXECUTED (Exit Long) | Ref: {order.ref} | PnL: {pnl:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL EXECUTED (Exit Long) | Ref: {order.ref} | PnL: {pnl:.2f}"
+                    # )
             elif self.order_type == "exit_short" and order.isbuy():
                 if self.open_positions:
                     entry_info = self.open_positions.pop(0)
@@ -286,9 +286,9 @@ class ADXEMAMACDStrategy(bt.Strategy):
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
-                    trade_logger.info(
-                        f"BUY EXECUTED (Exit Short) | Ref: {order.ref} | PnL: {pnl:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY EXECUTED (Exit Short) | Ref: {order.ref} | PnL: {pnl:.2f}"
+                    # )
         if order.status in [
             order.Completed,
             order.Canceled,

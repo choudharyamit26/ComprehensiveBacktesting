@@ -8,6 +8,7 @@ import logging
 import pytz
 
 from comprehensive_backtesting.data import init_dhan_client
+from intraday.utils import get_current_time_ist
 
 logger = logging.getLogger(__name__)
 dhan = init_dhan_client()
@@ -18,7 +19,9 @@ CONFIG = {
     "TIMEFRAME": 5,
     "MARKET_OPEN": time(9, 15),
     "MARKET_CLOSE": time(15, 30),
-    "HISTORICAL_DATA_END": time(15, 55),
+    "HISTORICAL_DATA_END": time(
+        16, 5
+    ),  # This is the key - data available until 4:05 PM
     "EXIT_BUFFER_MINUTES": 15,
     "CSV_FILE": "csv/trading_signals.csv",
     "LIVE_DATA_CSV": "csv/live_data.csv",
@@ -88,7 +91,7 @@ class HistoricalDataCache:
 
                 if cache_date < cutoff_date:
                     # Remove from metadata
-                    del self.cache_metadata[cache_date]
+                    del self.cache_metadata[cache_key]
 
                     # Remove cache file
                     cache_file = os.path.join(self.cache_dir, f"{cache_key}.pkl")
@@ -130,16 +133,16 @@ class HistoricalDataCache:
             return True
 
         # For today's data, check if it's after market hours
-        market_close = time(15, 30)
+        market_close = CONFIG["HISTORICAL_DATA_END"]  # Use 4:05 PM as the cutoff
         if request_date == date.today() and now.time() > market_close:
-            # Market is closed, today's data is complete and valid
+            # Market data collection is complete, today's data is valid
             return True
 
-        # For ongoing trading day, cache is valid for 5 minutes
+        # For ongoing trading day, cache is valid for 2 minutes (more aggressive refresh)
         cache_age = (
             now - datetime.fromisoformat(metadata["timestamp"])
         ).total_seconds()
-        return cache_age < 300  # 5 minutes
+        return cache_age < 120  # 2 minutes
 
     def get_cached_data(
         self, security_ids: List[int], from_date: str, to_date: str
@@ -272,9 +275,11 @@ class HistoricalDataCache:
 historical_cache = HistoricalDataCache()
 
 
-async def fetch_historical_data_with_cache(tickers, exchange_segment):
+async def fetch_historical_data_with_cache(
+    tickers, exchange_segment, use_cache: bool = True
+):
     """
-    Enhanced version of fetch_historical_data with intelligent caching.
+    Fetch historical data with caching support and extended hours (until 4:05 PM).
     """
     if not dhan:
         logger.error("Cannot fetch historical data: Dhan client not initialized")
@@ -282,44 +287,69 @@ async def fetch_historical_data_with_cache(tickers, exchange_segment):
 
     try:
         ist_tz = pytz.timezone("Asia/Kolkata")
-        today = datetime.now(ist_tz)
+        today = get_current_time_ist()
 
-        # Prepare date range (same logic as original)
-        current_date = today - timedelta(days=1)
-        trading_sessions = {sec_id: [] for sec_id in tickers[exchange_segment]}
-        days_checked = 0
-        max_days_to_check = 10
-        NSE_HOLIDAYS_2025 = ["2025-01-26", "2025-03-14"]
-
-        security_ids = tickers[exchange_segment]
-
-        # Check cache first for recent data
-        # Generate cache request for the last 3 trading days
         cache_from_date = (today - timedelta(days=5)).strftime("%Y-%m-%d %H:%M:%S")
         cache_to_date = today.strftime("%Y-%m-%d %H:%M:%S")
 
-        cached_data = historical_cache.get_cached_data(
-            security_ids, cache_from_date, cache_to_date
-        )
+        security_ids = tickers[exchange_segment]
+
+        # Check cache if use_cache is True
+        cached_data = None
+        if use_cache:
+            cached_data = historical_cache.get_cached_data(
+                security_ids, cache_from_date, cache_to_date
+            )
 
         if cached_data:
             logger.info(
                 f"Using cached historical data for {len(cached_data)} securities"
             )
-            # Verify cached data meets the 2-session requirement
             valid_cached_data = {}
             for sec_id, df in cached_data.items():
-                if (
-                    df is not None and len(df) >= 100
-                ):  # Reasonable minimum for 2 sessions
-                    valid_cached_data[sec_id] = df
+                if df is not None and len(df) >= 100:
+                    # Check if cached data includes post-3PM data
+                    post_3pm_data = df[df["datetime"].dt.time > time(15, 0)]
+                    if len(post_3pm_data) > 0:
+                        valid_cached_data[sec_id] = df
+                    else:
+                        logger.info(
+                            f"Cached data for {sec_id} missing post-3PM data, will refresh"
+                        )
 
             if len(valid_cached_data) == len(security_ids):
                 return valid_cached_data
             else:
-                logger.info(f"Cached data incomplete, fetching fresh data")
+                logger.info(
+                    f"Cached data incomplete or missing extended hours, fetching fresh data"
+                )
 
-        # Original fetching logic (unchanged)
+        current_date = today - timedelta(days=1)
+        trading_sessions = {sec_id: [] for sec_id in security_ids}
+        days_checked = 0
+        max_days_to_check = 10
+        NSE_HOLIDAYS_2025 = [
+            "2025-01-01",
+            "2025-01-26",
+            "2025-02-26",
+            "2025-03-14",
+            "2025-03-31",
+            "2025-04-06",
+            "2025-04-10",
+            "2025-04-14",
+            "2025-04-18",
+            "2025-05-01",
+            "2025-06-07",
+            "2025-07-06",
+            "2025-08-15",
+            "2025-08-27",
+            "2025-10-02",
+            "2025-10-21",
+            "2025-10-22",
+            "2025-11-05",
+            "2025-12-25",
+        ]
+
         while (
             any(len(sessions) < 2 for sessions in trading_sessions.values())
             and days_checked < max_days_to_check
@@ -333,16 +363,24 @@ async def fetch_historical_data_with_cache(tickers, exchange_segment):
                 days_checked += 1
                 continue
 
+            # FIXED: Use proper date range with extended hours
             from_date = datetime.combine(
                 current_date.date(), CONFIG["MARKET_OPEN"]
             ).replace(tzinfo=ist_tz)
+
+            # CRITICAL FIX: Use HISTORICAL_DATA_END (4:05 PM) instead of 3:25 PM
             to_date = datetime.combine(
                 current_date.date(), CONFIG["HISTORICAL_DATA_END"]
             ).replace(tzinfo=ist_tz)
+
             from_date_str = from_date.strftime("%Y-%m-%d %H:%M:%S")
             to_date_str = to_date.strftime("%Y-%m-%d %H:%M:%S")
 
-            for security_id in tickers[exchange_segment]:
+            logger.info(
+                f"Fetching data for {current_date.date()} from {from_date_str} to {to_date_str}"
+            )
+
+            for security_id in security_ids:
                 if len(trading_sessions[security_id]) >= 2:
                     continue
 
@@ -350,17 +388,18 @@ async def fetch_historical_data_with_cache(tickers, exchange_segment):
                     f"Fetching historical data for {security_id} from {from_date_str} to {to_date_str}"
                 )
 
-                import time
+                import time as time_module
 
-                time.sleep(1)  # Rate limiting
+                time_module.sleep(1)  # Rate limiting
 
+                # CRITICAL FIX: Remove hardcoded dates and use dynamic date calculation
                 data = dhan.intraday_minute_data(
                     security_id=security_id,
                     exchange_segment=exchange_segment,
                     instrument_type="EQUITY",
                     interval=CONFIG["TIMEFRAME"],
-                    from_date=from_date_str,
-                    to_date=to_date_str,
+                    from_date=from_date_str,  # Use dynamic from_date_str
+                    to_date=to_date_str,  # Use dynamic to_date_str with 4:05 PM
                 )
 
                 if (
@@ -396,10 +435,17 @@ async def fetch_historical_data_with_cache(tickers, exchange_segment):
                     df_chunk["datetime"] = df_chunk["datetime"].dt.tz_convert(ist_tz)
                     df_chunk = df_chunk.dropna(subset=["datetime"])
 
+                    # Validate date range
                     valid_date_range = (df_chunk["datetime"] >= from_date) & (
                         df_chunk["datetime"] <= to_date
                     )
                     df_chunk = df_chunk[valid_date_range]
+
+                    # Check for post-3PM data
+                    post_3pm_data = df_chunk[df_chunk["datetime"].dt.time > time(15, 0)]
+                    logger.info(
+                        f"Found {len(post_3pm_data)} records after 3:00 PM for {security_id}"
+                    )
 
                     if len(df_chunk) < 50:
                         logger.info(
@@ -411,7 +457,9 @@ async def fetch_historical_data_with_cache(tickers, exchange_segment):
                         ["datetime", "open", "high", "low", "close", "volume"]
                     ]
                     trading_sessions[security_id].append(df_chunk)
-                    logger.info(f"Fetched {len(df_chunk)} rows for {security_id}")
+                    logger.info(
+                        f"Fetched {len(df_chunk)} rows for {security_id} (including {len(post_3pm_data)} after 3PM)"
+                    )
 
                 else:
                     logger.warning(f"No data for {security_id} from {from_date_str}")
@@ -419,35 +467,47 @@ async def fetch_historical_data_with_cache(tickers, exchange_segment):
             current_date -= timedelta(days=1)
             days_checked += 1
 
-        # Process and combine data
         result = {}
-        for security_id in tickers[exchange_segment]:
+        for security_id in security_ids:
             sessions = trading_sessions[security_id]
             if len(sessions) >= 2:
                 df = pd.concat(sessions, ignore_index=True)
                 df = df.drop_duplicates(subset=["datetime"], keep="last")
                 df = df.sort_values("datetime").reset_index(drop=True)
+
+                # Final check for post-3PM data
+                post_3pm_final = df[df["datetime"].dt.time > time(15, 0)]
                 logger.info(
-                    f"Combined {len(df)} rows for {security_id} across {len(sessions)} sessions"
+                    f"Final combined data for {security_id}: {len(df)} rows total, {len(post_3pm_final)} after 3:00 PM"
                 )
                 result[security_id] = df
             else:
                 logger.error(f"Failed to fetch 2 sessions for {security_id}")
                 result[security_id] = None
 
-        # Cache the successful results
-        if result and any(df is not None for df in result.values()):
-            # Cache with current timestamp range
-            actual_from_date = min(
-                df["datetime"].min() for df in result.values() if df is not None
-            ).strftime("%Y-%m-%d %H:%M:%S")
-            actual_to_date = max(
-                df["datetime"].max() for df in result.values() if df is not None
-            ).strftime("%Y-%m-%d %H:%M:%S")
-
-            historical_cache.cache_data(
-                security_ids, actual_from_date, actual_to_date, result
+        # Cache the result if successful and contains extended hours data
+        if result and any(df is not None for df in result.values()) and use_cache:
+            # Only cache if we have post-3PM data
+            has_extended_data = any(
+                len(df[df["datetime"].dt.time > time(15, 0)]) > 0
+                for df in result.values()
+                if df is not None
             )
+
+            if has_extended_data:
+                actual_from_date = min(
+                    df["datetime"].min() for df in result.values() if df is not None
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                actual_to_date = max(
+                    df["datetime"].max() for df in result.values() if df is not None
+                ).strftime("%Y-%m-%d %H:%M:%S")
+
+                historical_cache.cache_data(
+                    security_ids, actual_from_date, actual_to_date, result
+                )
+                logger.info("Cached historical data with extended hours")
+            else:
+                logger.warning("Not caching data as it lacks extended hours")
 
         return result
 
@@ -489,7 +549,7 @@ def clear_all_cache():
 # Example usage and testing functions
 async def test_cache_performance():
     """Test the performance improvement from caching."""
-    import time
+    import time as time_module
 
     # Mock tickers for testing
     test_tickers = {"NSE_EQ": [11536, 1333]}  # Replace with actual security IDs
@@ -497,17 +557,21 @@ async def test_cache_performance():
     print("=== Testing Historical Data Caching Performance ===")
 
     # First fetch (should hit API)
-    start_time = time.time()
+    start_time = time_module.time()
     print("First fetch (no cache)...")
-    data1 = await fetch_historical_data_with_cache(test_tickers, "NSE_EQ")
-    first_fetch_time = time.time() - start_time
+    data1 = await fetch_historical_data_with_cache(
+        test_tickers, "NSE_EQ", use_cache=False
+    )
+    first_fetch_time = time_module.time() - start_time
     print(f"First fetch took: {first_fetch_time:.2f} seconds")
 
     # Second fetch (should hit cache)
-    start_time = time.time()
+    start_time = time_module.time()
     print("Second fetch (cached)...")
-    data2 = await fetch_historical_data_with_cache(test_tickers, "NSE_EQ")
-    second_fetch_time = time.time() - start_time
+    data2 = await fetch_historical_data_with_cache(
+        test_tickers, "NSE_EQ", use_cache=True
+    )
+    second_fetch_time = time_module.time() - start_time
     print(f"Second fetch took: {second_fetch_time:.2f} seconds")
 
     # Performance improvement
@@ -520,3 +584,52 @@ async def test_cache_performance():
     print(f"Cache stats: {stats}")
 
     return data1, data2
+
+
+# Test function to verify extended hours data
+async def test_extended_hours_fetch(security_id: int = 2475):
+    """
+    Test function specifically to verify that we can fetch data until 4:05 PM.
+    """
+    print(f"=== Testing Extended Hours Data Fetch for Security {security_id} ===")
+
+    # Clear any existing cache to force fresh fetch
+    clear_cache_for_today()
+
+    # Fetch with extended hours
+    tickers = {"NSE_EQ": [security_id]}
+    data = await fetch_historical_data_with_cache(tickers, "NSE_EQ", use_cache=False)
+
+    if data and security_id in data and data[security_id] is not None:
+        df = data[security_id]
+        print(f"✅ Successfully fetched {len(df)} records")
+
+        # Check time range
+        min_time = df["datetime"].dt.time.min()
+        max_time = df["datetime"].dt.time.max()
+        print(f"📅 Time range: {min_time} to {max_time}")
+
+        # Check for post-3PM data
+        post_3pm = df[df["datetime"].dt.time > time(15, 0)]
+        post_330pm = df[df["datetime"].dt.time > time(15, 30)]
+        post_4pm = df[df["datetime"].dt.time > time(16, 0)]
+
+        print(f"📊 Records after 3:00 PM: {len(post_3pm)}")
+        print(f"📊 Records after 3:30 PM: {len(post_330pm)}")
+        print(f"📊 Records after 4:00 PM: {len(post_4pm)}")
+
+        if len(post_3pm) > 0:
+            print("🎉 SUCCESS: Found extended hours data!")
+            print("Latest records:")
+            print(
+                df.tail(10)[
+                    ["datetime", "open", "high", "low", "close", "volume"]
+                ].to_string()
+            )
+            return True
+        else:
+            print("❌ FAILED: No extended hours data found")
+            return False
+    else:
+        print("❌ FAILED: No data returned")
+        return False

@@ -171,26 +171,26 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
             if atr_increasing and self.bb_upper_touch[0] and vol_vol_high:
                 self.order = self.buy()
                 self.order_type = "enter_long"
-                trade_logger.info(
-                    f"BUY SIGNAL (Enter Long - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
-                    f"Time: {bar_time_ist} | "
-                    f"Price: {self.data.close[0]:.2f} | "
-                    f"ATR: {self.atr[0]:.2f} (Increasing) | "
-                    f"BB Top: {self.bb.lines.top[0]:.2f} (Touch) | "
-                    f"Volume Volatility: {self.vol_vol[0]:.2f} (High)"
-                )
+                # trade_logger.info(
+                #     f"BUY SIGNAL (Enter Long - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
+                #     f"Time: {bar_time_ist} | "
+                #     f"Price: {self.data.close[0]:.2f} | "
+                #     f"ATR: {self.atr[0]:.2f} (Increasing) | "
+                #     f"BB Top: {self.bb.lines.top[0]:.2f} (Touch) | "
+                #     f"Volume Volatility: {self.vol_vol[0]:.2f} (High)"
+                # )
             # Short Entry: ATR increasing + Price at/below lower BB + Volume volatility high
             elif atr_increasing and self.bb_lower_touch[0] and vol_vol_high:
                 self.order = self.sell()
                 self.order_type = "enter_short"
-                trade_logger.info(
-                    f"SELL SIGNAL (Enter Short - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
-                    f"Time: {bar_time_ist} | "
-                    f"Price: {self.data.close[0]:.2f} | "
-                    f"ATR: {self.atr[0]:.2f} (Increasing) | "
-                    f"BB Bottom: {self.bb.lines.bot[0]:.2f} (Touch) | "
-                    f"Volume Volatility: {self.vol_vol[0]:.2f} (High)"
-                )
+                # trade_logger.info(
+                #     f"SELL SIGNAL (Enter Short - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
+                #     f"Time: {bar_time_ist} | "
+                #     f"Price: {self.data.close[0]:.2f} | "
+                #     f"ATR: {self.atr[0]:.2f} (Increasing) | "
+                #     f"BB Bottom: {self.bb.lines.bot[0]:.2f} (Touch) | "
+                #     f"Volume Volatility: {self.vol_vol[0]:.2f} (High)"
+                # )
         elif self.position.size > 0:  # Long position
             # Exit: Volatility contraction or price returns to BB middle
             if volatility_contraction or vol_vol_decreasing or price_near_mid:
@@ -205,15 +205,15 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
                         else "Price near BB middle"
                     )
                 )
-                trade_logger.info(
-                    f"SELL SIGNAL (Exit Long - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
-                    f"Time: {bar_time_ist} | "
-                    f"Price: {self.data.close[0]:.2f} | "
-                    f"Reason: {exit_reason} | "
-                    f"ATR: {self.atr[0]:.2f} | "
-                    f"BB Mid: {self.bb.lines.mid[0]:.2f} | "
-                    f"Volume Volatility: {self.vol_vol[0]:.2f}"
-                )
+                # trade_logger.info(
+                #     f"SELL SIGNAL (Exit Long - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
+                #     f"Time: {bar_time_ist} | "
+                #     f"Price: {self.data.close[0]:.2f} | "
+                #     f"Reason: {exit_reason} | "
+                #     f"ATR: {self.atr[0]:.2f} | "
+                #     f"BB Mid: {self.bb.lines.mid[0]:.2f} | "
+                #     f"Volume Volatility: {self.vol_vol[0]:.2f}"
+                # )
         elif self.position.size < 0:  # Short position
             # Exit: Volatility contraction or price returns to BB middle
             if volatility_contraction or vol_vol_decreasing or price_near_mid:
@@ -228,15 +228,15 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
                         else "Price near BB middle"
                     )
                 )
-                trade_logger.info(
-                    f"BUY SIGNAL (Exit Short - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
-                    f"Time: {bar_time_ist} | "
-                    f"Price: {self.data.close[0]:.2f} | "
-                    f"Reason: {exit_reason} | "
-                    f"ATR: {self.atr[0]:.2f} | "
-                    f"BB Mid: {self.bb.lines.mid[0]:.2f} | "
-                    f"Volume Volatility: {self.vol_vol[0]:.2f}"
-                )
+                # trade_logger.info(
+                #     f"BUY SIGNAL (Exit Short - ATR + BB + Volume Volatility) | Bar: {len(self)} | "
+                #     f"Time: {bar_time_ist} | "
+                #     f"Price: {self.data.close[0]:.2f} | "
+                #     f"Reason: {exit_reason} | "
+                #     f"ATR: {self.atr[0]:.2f} | "
+                #     f"BB Mid: {self.bb.lines.mid[0]:.2f} | "
+                #     f"Volume Volatility: {self.vol_vol[0]:.2f}"
+                # )
 
     def notify_order(self, order):
         if order.status in [order.Completed]:
@@ -255,13 +255,13 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
                     "direction": "long",
                 }
                 self.open_positions.append(position_info)
-                trade_logger.info(
-                    f"BUY EXECUTED (Enter Long) | Ref: {order.ref} | "
-                    f"Price: {order.executed.price:.2f} | "
-                    f"Size: {order.executed.size} | "
-                    f"Cost: {order.executed.value:.2f} | "
-                    f"Comm: {order.executed.comm:.2f}"
-                )
+                # trade_logger.info(
+                #     f"BUY EXECUTED (Enter Long) | Ref: {order.ref} | "
+                #     f"Price: {order.executed.price:.2f} | "
+                #     f"Size: {order.executed.size} | "
+                #     f"Cost: {order.executed.value:.2f} | "
+                #     f"Comm: {order.executed.comm:.2f}"
+                # )
             elif self.order_type == "enter_short" and order.issell():
                 position_info = {
                     "entry_time": exec_dt,
@@ -272,13 +272,13 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
                     "direction": "short",
                 }
                 self.open_positions.append(position_info)
-                trade_logger.info(
-                    f"SELL EXECUTED (Enter Short) | Ref: {order.ref} | "
-                    f"Price: {order.executed.price:.2f} | "
-                    f"Size: {order.executed.size} | "
-                    f"Cost: {order.executed.value:.2f} | "
-                    f"Comm: {order.executed.comm:.2f}"
-                )
+                # trade_logger.info(
+                #     f"SELL EXECUTED (Enter Short) | Ref: {order.ref} | "
+                #     f"Price: {order.executed.price:.2f} | "
+                #     f"Size: {order.executed.size} | "
+                #     f"Cost: {order.executed.value:.2f} | "
+                #     f"Comm: {order.executed.comm:.2f}"
+                # )
             elif self.order_type == "exit_long" and order.issell():
                 if self.open_positions:
                     entry_info = self.open_positions.pop(0)
@@ -305,14 +305,14 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
-                    trade_logger.info(
-                        f"SELL EXECUTED (Exit Long) | Ref: {order.ref} | "
-                        f"Price: {order.executed.price:.2f} | "
-                        f"Size: {order.executed.size} | "
-                        f"Cost: {order.executed.value:.2f} | "
-                        f"Comm: {order.executed.comm:.2f} | "
-                        f"PnL: {pnl:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL EXECUTED (Exit Long) | Ref: {order.ref} | "
+                    #     f"Price: {order.executed.price:.2f} | "
+                    #     f"Size: {order.executed.size} | "
+                    #     f"Cost: {order.executed.value:.2f} | "
+                    #     f"Comm: {order.executed.comm:.2f} | "
+                    #     f"PnL: {pnl:.2f}"
+                    # )
             elif self.order_type == "exit_short" and order.isbuy():
                 if self.open_positions:
                     entry_info = self.open_positions.pop(0)
@@ -339,14 +339,14 @@ class ATR_BB_VolumeVolatility(bt.Strategy):
                     }
                     self.completed_trades.append(trade_info)
                     self.trade_count += 1
-                    trade_logger.info(
-                        f"BUY EXECUTED (Exit Short) | Ref: {order.ref} | "
-                        f"Price: {order.executed.price:.2f} | "
-                        f"Size: {order.executed.size} | "
-                        f"Cost: {order.executed.value:.2f} | "
-                        f"Comm: {order.executed.comm:.2f} | "
-                        f"PnL: {pnl:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY EXECUTED (Exit Short) | Ref: {order.ref} | "
+                    #     f"Price: {order.executed.price:.2f} | "
+                    #     f"Size: {order.executed.size} | "
+                    #     f"Cost: {order.executed.value:.2f} | "
+                    #     f"Comm: {order.executed.comm:.2f} | "
+                    #     f"PnL: {pnl:.2f}"
+                    # )
 
         if order.status in [
             order.Completed,

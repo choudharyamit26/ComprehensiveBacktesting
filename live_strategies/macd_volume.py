@@ -72,15 +72,9 @@ class MACDVolume:
             slow=self.params["slow_period"],
             signal=self.params["signal_period"],
         )
-        self.data["macd_line"] = macd[
-            f"MACD_{self.params['fast_period']}_{self.params['slow_period']}_{self.params['signal_period']}"
-        ]
-        self.data["macd_signal"] = macd[
-            f"MACDs_{self.params['fast_period']}_{self.params['slow_period']}_{self.params['signal_period']}"
-        ]
-        self.data["macd_hist"] = macd[
-            f"MACDh_{self.params['fast_period']}_{self.params['slow_period']}_{self.params['signal_period']}"
-        ]
+        self.data["macd_line"] = macd.iloc[:, 0]
+        self.data["macd_hist"] = macd.iloc[:, 1]
+        self.data["macd_signal"] = macd.iloc[:, 2]
 
         # Volume indicators
         self.data["volume_sma"] = ta.sma(
