@@ -190,9 +190,9 @@ class BBPivotPointsStrategy:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
-                    trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
+                    # )
                 elif bearish_entry and self.data.iloc[idx]["volume_surge"]:
                     self._place_order(idx, "sell", "enter_short")
                     self.last_signal = "sell"
@@ -200,9 +200,9 @@ class BBPivotPointsStrategy:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
-                    trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
+                    # )
             else:
                 if self.open_positions[-1]["direction"] == "long" and bullish_exit:
                     self._close_position(
@@ -248,9 +248,9 @@ class BBPivotPointsStrategy:
                     "direction": "long",
                 }
             )
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short":
             self.open_positions.append(
                 {
@@ -262,9 +262,9 @@ class BBPivotPointsStrategy:
                     "direction": "short",
                 }
             )
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
 
@@ -302,9 +302,9 @@ class BBPivotPointsStrategy:
         }
         self.completed_trades.append(trade_info)
         self.trade_count += 1
-        trade_logger.info(
-            f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
-        )
+        # trade_logger.info(
+        #     f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
+        # )
 
         self.order = None
         self.order_type = None

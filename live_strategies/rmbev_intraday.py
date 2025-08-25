@@ -203,9 +203,9 @@ class RMBEV:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
-                    trade_logger.info(
-                        f"BUY SIGNAL (Enter Long - RMBEV) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Enter Long - RMBEV) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
+                    # )
                 elif (
                     rsi_falling
                     and macd_bearish
@@ -219,9 +219,9 @@ class RMBEV:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
-                    trade_logger.info(
-                        f"SELL SIGNAL (Enter Short - RMBEV) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Enter Short - RMBEV) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
+                    # )
             else:
                 if self.open_positions[-1]["direction"] == "long":
                     rsi_reversal = current_row["rsi"] < prev_row["rsi"]
@@ -303,9 +303,9 @@ class RMBEV:
                     "direction": "long",
                 }
             )
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f" BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short":
             self.open_positions.append(
                 {
@@ -317,9 +317,9 @@ class RMBEV:
                     "direction": "short",
                 }
             )
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"# SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
 
@@ -357,9 +357,9 @@ class RMBEV:
         }
         self.completed_trades.append(trade_info)
         self.trade_count += 1
-        trade_logger.info(
-            f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
-        )
+        # trade_logger.info(
+        #     f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
+        # )
 
         self.order = None
         self.order_type = None

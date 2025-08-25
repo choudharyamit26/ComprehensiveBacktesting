@@ -226,9 +226,9 @@ class EMAMultiStrategy:
                 if bullish_ema and price_above_vwap and stochrsi_up and cmf_bullish:
                     self._place_order(idx, "buy", "enter_long")
                     self.last_signal = "buy"
-                    trade_logger.info(
-                        f"BUY SIGNAL (EMAMulti Pullback) | Time: {bar_time_ist} | Price: {price:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (EMAMulti Pullback) | Time: {bar_time_ist} | Price: {price:.2f}"
+                    # )
                 # Long: Breakout scenario
                 elif (
                     bullish_ema
@@ -238,16 +238,16 @@ class EMAMultiStrategy:
                 ):
                     self._place_order(idx, "buy", "enter_long")
                     self.last_signal = "buy"
-                    trade_logger.info(
-                        f"BUY SIGNAL (EMAMulti Breakout) | Time: {bar_time_ist} | Price: {price:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (EMAMulti Breakout) | Time: {bar_time_ist} | Price: {price:.2f}"
+                    # )
                 # Short: Bounce scenario
                 elif bearish_ema and price_below_vwap and stochrsi_down and cmf_bearish:
                     self._place_order(idx, "sell", "enter_short")
                     self.last_signal = "sell"
-                    trade_logger.info(
-                        f"SELL SIGNAL (EMAMulti Bounce) | Time: {bar_time_ist} | Price: {price:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (EMAMulti Bounce) | Time: {bar_time_ist} | Price: {price:.2f}"
+                    # )
                 # Short: Breakdown scenario
                 elif (
                     bearish_ema
@@ -257,9 +257,9 @@ class EMAMultiStrategy:
                 ):
                     self._place_order(idx, "sell", "enter_short")
                     self.last_signal = "sell"
-                    trade_logger.info(
-                        f"SELL SIGNAL (EMAMulti Breakdown) | Time: {bar_time_ist} | Price: {price:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (EMAMulti Breakdown) | Time: {bar_time_ist} | Price: {price:.2f}"
+                    # )
             else:
                 # Exits: EMA reversal or VWAP side flip or StochRSI extremes
                 if self.open_positions[-1]["direction"] == "long":
@@ -320,7 +320,6 @@ class EMAMultiStrategy:
         if exec_dt.tzinfo is None:
             exec_dt = exec_dt.replace(tzinfo=pytz.UTC)
 
-        if order["order_type"] == "enter_long":
             self.open_positions.append(
                 {
                     "entry_time": exec_dt,
@@ -331,9 +330,9 @@ class EMAMultiStrategy:
                     "direction": "long",
                 }
             )
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short":
             self.open_positions.append(
                 {
@@ -345,9 +344,9 @@ class EMAMultiStrategy:
                     "direction": "short",
                 }
             )
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -389,9 +388,9 @@ class EMAMultiStrategy:
         }
         self.completed_trades.append(trade_info)
         self.trade_count += 1
-        trade_logger.info(
-            f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
-        )
+        # trade_logger.info(
+        #     f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
+        # )
 
         self.order = None
         self.order_type = None

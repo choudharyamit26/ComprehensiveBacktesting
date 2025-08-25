@@ -160,12 +160,12 @@ class RSIADX:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
-                    trade_logger.info(
-                        f"BUY SIGNAL (Strong Bullish) | Time: {bar_time_ist} | "
-                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"RSI: {self.data.iloc[idx]['rsi']:.2f} | "
-                        f"ADX: {self.data.iloc[idx]['adx']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Strong Bullish) | Time: {bar_time_ist} | "
+                    #     f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"RSI: {self.data.iloc[idx]['rsi']:.2f} | "
+                    #     f"ADX: {self.data.iloc[idx]['adx']:.2f}"
+                    # )
                 # Short Entry
                 elif (
                     self.data.iloc[idx]["strong_bearish"]
@@ -187,12 +187,12 @@ class RSIADX:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
-                    trade_logger.info(
-                        f"SELL SIGNAL (Strong Bearish) | Time: {bar_time_ist} | "
-                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"RSI: {self.data.iloc[idx]['rsi']:.2f} | "
-                        f"ADX: {self.data.iloc[idx]['adx']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Strong Bearish) | Time: {bar_time_ist} | "
+                    #     f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"RSI: {self.data.iloc[idx]['rsi']:.2f} | "
+                    #     f"ADX: {self.data.iloc[idx]['adx']:.2f}"
+                    # )
             else:
                 if self.data.iloc[idx]["weak_trend"]:
                     if self.open_positions[-1]["direction"] == "long":
@@ -209,7 +209,6 @@ class RSIADX:
         if exec_dt.tzinfo is None:
             exec_dt = exec_dt.replace(tzinfo=pytz.UTC)
 
-        if order["order_type"] == "enter_long" and order["action"] == "buy":
             position_info = {
                 "entry_time": exec_dt,
                 "entry_price": order["executed_price"],
@@ -219,9 +218,9 @@ class RSIADX:
                 "direction": "long",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #      f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -232,9 +231,9 @@ class RSIADX:
                 "direction": "short",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #      f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -283,9 +282,9 @@ class RSIADX:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop(0)
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -311,9 +310,9 @@ class RSIADX:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

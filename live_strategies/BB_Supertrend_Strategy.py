@@ -149,15 +149,15 @@ class BBSupertrendStrategy:
                 if bullish_entry:
                     self._place_order(idx, "buy", "enter_long")
                     self.last_signal = "buy"
-                    trade_logger.info(
-                        f"BUY SIGNAL (BB Breakout + Supertrend Bullish) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (BB Breakout + Supertrend Bullish) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
+                    # )
                 elif bearish_entry:
                     self._place_order(idx, "sell", "enter_short")
                     self.last_signal = "sell"
-                    trade_logger.info(
-                        f"SELL SIGNAL (BB Breakout + Supertrend Bearish) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (BB Breakout + Supertrend Bearish) | Time: {bar_time_ist} | Price: {current_row['close']:.2f}"
+                    # )
             else:
                 if self.open_positions[-1]["direction"] == "long" and bullish_exit:
                     self._close_position(
@@ -203,9 +203,9 @@ class BBSupertrendStrategy:
                     "direction": "long",
                 }
             )
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"# BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short":
             self.open_positions.append(
                 {
@@ -217,9 +217,9 @@ class BBSupertrendStrategy:
                     "direction": "short",
                 }
             )
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"# SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
 
@@ -257,9 +257,9 @@ class BBSupertrendStrategy:
         }
         self.completed_trades.append(trade_info)
         self.trade_count += 1
-        trade_logger.info(
-            f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
-        )
+        # trade_logger.info(
+        #     f"{action.upper()} EXECUTED (Exit {entry_info['direction'].capitalize()}) | PnL: {pnl:.2f} | Reason: {reason}"
+        # )
 
         self.order = None
         self.order_type = None

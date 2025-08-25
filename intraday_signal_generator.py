@@ -5,6 +5,7 @@ import os
 import logging
 from datetime import date, datetime, timedelta, time, timezone
 import pytz
+import requests
 from retrying import retry
 import ast
 import pandas_ta as ta
@@ -210,7 +211,7 @@ SQUARE_OFF_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
 # Trading configuration
 MIN_VOTES = int(os.getenv("MIN_VOTES", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
-MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
+MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 5))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
 VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.02))
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 100))
@@ -387,6 +388,141 @@ class CacheManager:
 
 
 cache_manager = CacheManager(max_size=1000, ttl=3600)
+
+
+def last_traded_price(security_id: int):
+    """
+    Fetch the last traded price for a given security ID from Dhan API.
+
+    Args:
+        security_id (int): The security ID to fetch the last traded price for.
+
+    Returns:
+        float: The last traded price, or None if the request fails or security ID is not found.
+    """
+    time.sleep(5)
+    # API endpoint and headers
+    url = "https://api.dhan.co/v2/marketfeed/ltp"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "access-token": os.getenv("DHAN_ACCESS_TOKEN"),  # Replace with actual JWT token
+        "client-id": os.getenv("DHAN_CLIENT_ID"),  # Replace with actual client ID
+    }
+
+    # Prepare request body (security IDs can be in NSE_EQ or NSE_FNO)
+    payload = {"NSE_EQ": [security_id]}
+
+    try:
+        # Make the POST request
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        response.raise_for_status()  # Raise an exception for bad status codes
+
+        # Parse the response
+        data = response.json()
+
+        if data.get("status") == "success":
+            # Check NSE_EQ
+            if str(security_id) in data["data"].get("NSE_EQ", {}):
+                return data["data"]["NSE_EQ"][str(security_id)]["last_price"]
+            # Check NSE_FNO
+            elif str(security_id) in data["data"].get("NSE_FNO", {}):
+                return data["data"]["NSE_FNO"][str(security_id)]["last_price"]
+            else:
+                return None  # Security ID not found
+        else:
+            return None  # API request was not successful
+
+    except (requests.RequestException, KeyError, ValueError) as e:
+        print(f"Error fetching last traded price: {e}")
+        return None
+
+
+def get_traded_orders(security_id: int) -> list[dict]:
+    """
+    Fetch orders from Dhan API and return those with orderStatus 'TRADED' for the specified security ID.
+
+    Args:
+        security_id (int): The security ID to filter orders for.
+
+    Returns:
+        list[dict]: List of order dictionaries with orderStatus 'TRADED' for the given security ID.
+    """
+    # API endpoint and headers
+    url = "https://api.dhan.co/v2/super/orders"
+    headers = {
+        "Accept": "application/json",
+        "access-token": os.getenv("DHAN_ACCESS_TOKEN"),  # Replace with actual token
+    }
+
+    try:
+        # Make the GET request
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raise an exception for bad status codes
+
+        # Parse the response
+        orders = response.json()
+
+        # Filter orders with orderStatus "TRADED" and matching securityId
+        traded_orders = [
+            order
+            for order in orders
+            if order.get("orderStatus") == "TRADED"
+            and order.get("securityId") == str(security_id)
+        ]
+
+        return traded_orders
+
+    except (requests.RequestException, ValueError) as e:
+        print(f"Error fetching traded orders for security ID {security_id}: {e}")
+        return []
+
+
+def get_order_details_by_order_id(order_id: str) -> Optional[Dict]:
+    """
+    Fetch order details from the super_orders table for a given order ID.
+
+    Args:
+        order_id (str): The order ID to fetch details for.
+
+    Returns:
+        Optional[Dict]: Dictionary containing order details with keys required for the code snippet,
+                        or None if the order is not found or an error occurs.
+    """
+    try:
+        # Connect to the database (adjust the database path as needed)
+        conn = sqlite3.connect("orders.db")  # Replace with actual database path
+        cursor = conn.cursor()
+
+        # Query the super_orders table for the given order_id
+        query = """
+        SELECT order_id, transaction_type, security_id, quantity, target_price, stop_loss_price
+        FROM super_orders
+        WHERE order_id = ?
+        """
+        cursor.execute(query, (order_id,))
+        result = cursor.fetchone()
+
+        # Close the database connection
+        conn.close()
+
+        if result:
+            # Map the database columns to the expected dictionary keys
+            return {
+                "order_id": result[0],
+                "direction": result[1],  # transaction_type (BUY or SELL)
+                "security_id": result[2],
+                "quantity": result[3],
+                "take_profit": result[4],  # target_price
+                "current_stop_loss": result[5],  # stop_loss_price
+            }
+        else:
+            print(f"No order found with order_id: {order_id}")
+            return None
+
+    except sqlite3.Error as e:
+        print(f"Database error fetching order details for order_id {order_id}: {e}")
+        return None
 
 
 class PositionManager:
@@ -641,8 +777,10 @@ class PositionManager:
         try:
             results = dhan.get_positions()
             positions = []
-            for pos in results:
+            logger.info(f"Results from get_active_positions:{results["data"]}")
+            for pos in results["data"]:
                 # If response is dict-like and has 'positionType', filter out CLOSED
+                logger.info(f"active positions values from loop: {pos}")
                 if isinstance(pos, dict):
                     if pos.get("positionType") != "CLOSED":
                         positions.append(pos)
@@ -681,7 +819,7 @@ class PositionManager:
     ) -> float:
         """Calculate profit percentage for a position"""
         logger.info(f"Calculating profit percentage for {position,current_price}")
-        entry_price = position["entry_price"]
+        entry_price = position["buyAvg"]
         if position["direction"] == "BUY":
             return ((current_price - entry_price) / entry_price) * 100
         else:  # SHORT position
@@ -690,7 +828,7 @@ class PositionManager:
     async def update_position_to_breakeven(self, order_id: str, position: Dict) -> bool:
         """Update stop loss to breakeven (entry price)"""
         try:
-            new_stop_loss = position["entry_price"]
+            new_stop_loss = position["price"]
 
             # Update in database
             conn = sqlite3.connect(self.db_path)
@@ -726,7 +864,7 @@ class PositionManager:
 
             # Send Telegram notification
             await send_telegram_alert(
-                f"*{position['ticker']} BREAKEVEN MOVED* 🛡️\n"
+                f"*{position['tradingSymbol']} BREAKEVEN MOVED* 🛡️\n"
                 f"Stop Loss moved to Entry Price: ₹{new_stop_loss:.2f}\n"
                 f"Position is now risk-free!\n"
                 f"Time: {datetime.now().strftime('%H:%M:%S')}"
@@ -761,12 +899,12 @@ class PositionManager:
 
             # Place market order for partial exit
             exit_order = await place_market_order(
-                position["security_id"], exit_direction, half_quantity
+                position["securityId"], exit_direction, half_quantity
             )
 
             if exit_order and exit_order.get("orderId"):
                 # Calculate partial profit
-                entry_price = position["entry_price"]
+                entry_price = position["price"]
                 if position["direction"] == "BUY":
                     partial_pnl = (current_price - entry_price) * half_quantity
                 else:
@@ -806,7 +944,7 @@ class PositionManager:
 
                 # Send Telegram notification
                 await send_telegram_alert(
-                    f"*{position['ticker']} PARTIAL PROFIT TAKEN* 💰\n"
+                    f"*{position['tradingSymbol']} PARTIAL PROFIT TAKEN* 💰\n"
                     f"Sold {half_quantity} shares @ ₹{current_price:.2f}\n"
                     f"Profit: ₹{partial_pnl:.2f}\n"
                     f"Remaining: {remaining_quantity} shares\n"
@@ -908,87 +1046,118 @@ class PositionManager:
 
     async def monitor_positions(self):
         """Main position monitoring loop with breakeven and partial profit logic"""
+
         logger.info("Starting position monitoring with profit management")
 
         while True:
             try:
                 positions = await self.get_active_positions()
+                logger.info(f"Active positions: {positions, type(positions)}")
                 if not positions:
                     await asyncio.sleep(30)
                     continue
-
+                order_details = ""
                 for position in positions:
                     print("FROM monitor position:", position)
                     logger.info(f"Monitoring position: {position}")
                     try:
+                        # current_price =  last_traded_price(position["securityId"])
+                        order_details = get_traded_orders(position["securityId"])[0]
+                        current_price = order_details["ltp"]
 
-                        current_price = fetch_realtime_quote(position["security_id"])[
-                            position["security_id"]
-                        ]["price"]
+                        logger.info(
+                            f"current price from position monitoring: {current_price}"
+                        )
 
                         # Calculate profit percentage
                         profit_pct = await self.calculate_profit_percentage(
                             position, current_price
                         )
 
-                        # 1. Move to breakeven at 0.5% profit
-                        if (
-                            profit_pct >= 0.15
-                            and not position["breakeven_moved"]
-                            and not position["partial_profit_taken"]
-                        ):
+                        # Determine condition for breakeven based on transaction type
+                        stop_loss_price = order_details["legDetails"][0]["price"]
+                        entry_price = order_details["price"]
+                        transaction_type = order_details["transactionType"]
+
+                        breakeven_condition = (
+                            transaction_type == "BUY" and stop_loss_price < entry_price
+                        ) or (
+                            transaction_type == "SELL" and stop_loss_price > entry_price
+                        )
+
+                        # Move to breakeven at 0.15% profit if condition is met
+                        if profit_pct >= 0.15 and breakeven_condition:
                             await self.update_position_to_breakeven(
-                                position["order_id"], position
+                                order_details["orderId"], order_details
                             )
                             await self.take_partial_profit(
-                                position["order_id"], position, current_price
+                                order_details["orderId"],
+                                order_details,
+                                order_details["ltp"],
                             )
                             continue
 
                         # 3. Check stop-loss/take-profit triggers
                         exit_triggered = False
                         reason = ""
+                        super_order_details = get_order_details_by_order_id(
+                            order_details["orderId"]
+                        )
 
-                        if position["direction"] == "BUY":
-                            if current_price <= position["current_stop_loss"]:
+                        if super_order_details["direction"] == "BUY":
+                            if (
+                                current_price
+                                <= super_order_details["current_stop_loss"]
+                            ):
                                 exit_triggered = True
                                 reason = "Stop-loss hit"
-                            elif current_price >= position["take_profit"]:
+                            elif current_price >= super_order_details["take_profit"]:
                                 exit_triggered = True
                                 reason = "Take-profit hit"
                         else:  # SHORT
-                            if current_price >= position["current_stop_loss"]:
+                            if (
+                                current_price
+                                >= super_order_details["current_stop_loss"]
+                            ):
                                 exit_triggered = True
                                 reason = "Stop-loss hit"
-                            elif current_price <= position["take_profit"]:
+                            elif current_price <= super_order_details["take_profit"]:
                                 exit_triggered = True
                                 reason = "Take-profit hit"
 
                         if exit_triggered:
                             # Place exit order
                             exit_direction = (
-                                "SELL" if position["direction"] == "BUY" else "BUY"
+                                "SELL"
+                                if super_order_details["direction"] == "BUY"
+                                else "BUY"
                             )
                             exit_order = await place_market_order(
-                                position["security_id"],
+                                super_order_details["security_id"],
                                 exit_direction,
-                                position["quantity"],
+                                super_order_details["quantity"],
                             )
 
                             if exit_order:
                                 await self.close_position(
-                                    position["order_id"], current_price, reason
+                                    super_order_details["order_id"],
+                                    current_price,
+                                    reason,
                                 )
 
                     except Exception as e:
                         logger.error(
-                            f"Error monitoring position {position['ticker']}: {e}"
+                            f"Error monitoring position {position['security_id']}: {e}"
                         )
 
                 await asyncio.sleep(5)  # Check every 5 seconds
 
             except Exception as e:
+                import traceback
+
+                traceback.print_exc()
                 logger.error(f"Position monitoring error: {e}")
+
                 await asyncio.sleep(60)
 
     async def get_simulation_report(self) -> Dict:
@@ -1108,20 +1277,52 @@ async def check_ticker_traded_today(security_id: int) -> dict:
         }
 
 
-def is_security_id_in_positions(security_id: int, positions: list[dict]) -> bool:
-    """Check if the given security_id exists in the list of positions."""
-    positions = (pos for pos in positions["data"])
+# def is_security_id_in_positions(security_id: int, positions: list[dict]) -> bool:
+#     """Check if the given security_id exists in the list of positions."""
+#     positions = (pos for pos in positions["data"])
+#     is_today_trade = False
+#     active_orders = 0
+#     total_orders = 0
+#     for pos in positions:
+#         for k, v in pos.items():
+#             if k == "securityId" and v == str(security_id):
+#                 is_today_trade = True
+#             if k == "positionType" and v != "CLOSED":
+#                 active_orders += 1
+#         total_orders += 1
+#     logger.info(f"Today's positions :{[positions]}")
+
+#     return is_today_trade, total_orders, active_orders
+
+
+def is_security_id_in_positions(
+    security_id: int, positions: dict
+) -> Tuple[bool, int, int]:
+    """Check if the given security_id exists in the list of positions.
+
+    Args:
+        security_id (int): The security ID to check for.
+        positions (dict): Positions data from Dhan API.
+
+    Returns:
+        Tuple[bool, int, int]: (is_today_trade, total_orders, active_orders)
+            - is_today_trade: True if security_id is found in positions.
+            - total_orders: Total number of positions.
+            - active_orders: Number of non-closed positions.
+    """
+    positions_list = positions.get("data", [])
     is_today_trade = False
     active_orders = 0
     total_orders = 0
-    for pos in positions:
-        for k, v in pos.items():
-            if k == "securityId" and v == str(security_id):
-                is_today_trade = True
-            if k == "positionType" and v != "CLOSED":
-                active_orders += 1
+
+    for pos in positions_list:
+        if pos.get("securityId") == str(security_id):
+            is_today_trade = True
+        if pos.get("positionType") != "CLOSED":
+            active_orders += 1
         total_orders += 1
-    logger.info(f"Today's positions :{[positions]}")
+
+    logger.info(f"Today's positions: {positions_list}")
 
     return is_today_trade, total_orders, active_orders
 
@@ -1523,23 +1724,28 @@ async def process_stock_with_exit_monitoring(
                 #     logger.info(
                 #         f"{ticker} - SIGNAL CONFIRMATION: Both strategy and LLM agree on {strategy_signal}"
                 #     )
-                executed = await execute_strategy_signal(
-                    ticker,
-                    security_id,
-                    strategy_signal,
-                    regime,
-                    adx_value,
-                    atr_value,
-                    combined_data,
-                    strategy_names[0],
-                    # primary_strategy["instance"],
-                    strategy_names=strategy_names,  # Pass the list of strategy names
-                    # **primary_strategy["params"],
+                todays_positions = dhan.get_positions()
+                is_today_trade, total_orders, active_orders = (
+                    is_security_id_in_positions(security_id, todays_positions)
                 )
+                if not is_today_trade:
+                    executed = await execute_strategy_signal(
+                        ticker,
+                        security_id,
+                        strategy_signal,
+                        regime,
+                        adx_value,
+                        atr_value,
+                        combined_data,
+                        strategy_names[0],
+                        # primary_strategy["instance"],
+                        strategy_names=strategy_names,  # Pass the list of strategy names
+                        # **primary_strategy["params"],
+                    )
 
-                if executed:
-                    # await position_manager.update_last_trade_time(ticker, current_time)
-                    logger.info(f"{ticker} - Order executed with dual confirmation")
+                    if executed:
+                        # await position_manager.update_last_trade_time(ticker, current_time)
+                        logger.info(f"{ticker} - Order executed with dual confirmation")
                 #     else:
                 #         logger.info(
                 #             f"{ticker} - SIGNAL MISMATCH: Strategy={strategy_signal}, LLM={llm_signal}. No order placed."
@@ -3470,3 +3676,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"System failure: {str(e)}")
         logger.error(traceback.format_exc())
+    # positions_data = {'status': 'success', 'remarks': '', 'data': [{'dhanClientId': '1102459011', 'tradingSymbol': 'INDUSINDBK', 'securityId': '5258', 'positionType': 'CLOSED', 'exchangeSegment': 'NSE_EQ', 'productType': 'INTRADAY', 'buyAvg': 764.35, 'costPrice': 764.35, 'buyQty': 6, 'sellAvg': 764.8333, 'sellQty': 6, 'netQty': 0, 'realizedProfit': 2.9, 'unrealizedProfit': 0.0, 'rbiReferenceRate': 1.0, 'multiplier': 1, 'carryForwardBuyQty': 0, 'carryForwardSellQty': 0, 'carryForwardBuyValue': 0.0, 'carryForwardSellValue': 0.0, 'dayBuyQty': 6, 'daySellQty': 6, 'dayBuyValue': 4586.1, 'daySellValue': 4589.0, 'drvExpiryDate': '0001-01-01', 'drvOptionType': 'NA', 'drvStrikePrice': 0.0, 'crossCurrency': False}, {'dhanClientId': '1102459011', 'tradingSymbol': 'ONGC', 'securityId': '2475', 'positionType': 'LONG', 'exchangeSegment': 'NSE_EQ', 'productType': 'INTRADAY', 'buyAvg': 236.145, 'costPrice': 236.145, 'buyQty': 8, 'sellAvg': 236.44, 'sellQty': 6, 'netQty': 2, 'realizedProfit': 1.77, 'unrealizedProfit': 0.93, 'rbiReferenceRate': 1.0, 'multiplier': 1, 'carryForwardBuyQty': 0, 'carryForwardSellQty': 0, 'carryForwardBuyValue': 0.0, 'carryForwardSellValue': 0.0, 'dayBuyQty': 8, 'daySellQty': 6, 'dayBuyValue': 1889.16, 'daySellValue': 1418.64, 'drvExpiryDate': '0001-01-01', 'drvOptionType': 'NA', 'drvStrikePrice': 0.0, 'crossCurrency': False}, {'dhanClientId': '1102459011', 'tradingSymbol': 'TECHM', 'securityId': '13538', 'positionType': 'CLOSED', 'exchangeSegment': 'NSE_EQ', 'productType': 'INTRADAY', 'buyAvg': 1531.8, 'costPrice': 1531.8, 'buyQty': 4, 'sellAvg': 1534.6, 'sellQty': 4, 'netQty': 0, 'realizedProfit': 11.2, 'unrealizedProfit': 0.0, 'rbiReferenceRate': 1.0, 'multiplier': 1, 'carryForwardBuyQty': 0, 'carryForwardSellQty': 0, 'carryForwardBuyValue': 0.0, 'carryForwardSellValue': 0.0, 'dayBuyQty': 4, 'daySellQty': 4, 'dayBuyValue': 6127.2, 'daySellValue': 6138.4, 'drvExpiryDate': '0001-01-01', 'drvOptionType': 'NA', 'drvStrikePrice': 0.0, 'crossCurrency': False}, {'dhanClientId': '1102459011', 'tradingSymbol': 'HDFCBANK', 'securityId': '1333', 'positionType': 'CLOSED', 'exchangeSegment': 'NSE_EQ', 'productType': 'INTRADAY', 'buyAvg': 1969.7, 'costPrice': 1969.7, 'buyQty': 2, 'sellAvg': 1967.5, 'sellQty': 2, 'netQty': 0, 'realizedProfit': -4.4, 'unrealizedProfit': 0.0, 'rbiReferenceRate': 1.0, 'multiplier': 1, 'carryForwardBuyQty': 0, 'carryForwardSellQty': 0, 'carryForwardBuyValue': 0.0, 'carryForwardSellValue': 0.0, 'dayBuyQty': 2, 'daySellQty': 2, 'dayBuyValue': 3939.4, 'daySellValue': 3935.0, 'drvExpiryDate': '0001-01-01', 'drvOptionType': 'NA', 'drvStrikePrice': 0.0, 'crossCurrency': False}, {'dhanClientId': '1102459011', 'tradingSymbol': 'TATASTEEL', 'securityId': '3499', 'positionType': 'LONG', 'exchangeSegment': 'NSE_EQ', 'productType': 'INTRADAY', 'buyAvg': 159.9744, 'costPrice': 159.97444, 'buyQty': 9, 'sellAvg': 159.8857, 'sellQty': 7, 'netQty': 2, 'realizedProfit': -0.62, 'unrealizedProfit': 0.09, 'rbiReferenceRate': 1.0, 'multiplier': 1, 'carryForwardBuyQty': 0, 'carryForwardSellQty': 0, 'carryForwardBuyValue': 0.0, 'carryForwardSellValue': 0.0, 'dayBuyQty': 9, 'daySellQty': 7, 'dayBuyValue': 1439.77, 'daySellValue': 1119.2, 'drvExpiryDate': '0001-01-01', 'drvOptionType': 'NA', 'drvStrikePrice': 0.0, 'crossCurrency': False}, {'dhanClientId': '1102459011', 'tradingSymbol': 'AXISBANK', 'securityId': '5900', 'positionType': 'LONG', 'exchangeSegment': 'NSE_EQ', 'productType': 'INTRADAY', 'buyAvg': 1070.0, 'costPrice': 1070.0, 'buyQty': 5, 'sellAvg': 0.0, 'sellQty': 0, 'netQty': 5, 'realizedProfit': 0.0, 'unrealizedProfit': 5.0, 'rbiReferenceRate': 1.0, 'multiplier': 1, 'carryForwardBuyQty': 0, 'carryForwardSellQty': 0, 'carryForwardBuyValue': 0.0, 'carryForwardSellValue': 0.0, 'dayBuyQty': 5, 'daySellQty': 0, 'dayBuyValue': 5350.0, 'daySellValue': 0.0, 'drvExpiryDate': '0001-01-01', 'drvOptionType': 'NA', 'drvStrikePrice': 0.0, 'crossCurrency': False}]}
+    # x,y,z = is_security_id_in_positions(5258,positions_data)
+    # print(x,y,z)

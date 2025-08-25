@@ -406,12 +406,12 @@ class EMAADXTrend:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
-                    trade_logger.info(
-                        f"BUY SIGNAL (Enter Long - EMA+ADX Trend) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
-                        f"EMA: {current_row['ema']:.2f} | ADX: {current_row['adx']:.2f} (Rising) | "
-                        f"DI+: {current_row['di_plus']:.2f} > DI-: {current_row['di_minus']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Enter Long - EMA+ADX Trend) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
+                    #     f"EMA: {current_row['ema']:.2f} | ADX: {current_row['adx']:.2f} (Rising) | "
+                    #     f"DI+: {current_row['di_plus']:.2f} > DI-: {current_row['di_minus']:.2f}"
+                    # )
 
                 # Short Entry: Price below EMA + Strong ADX + Rising ADX + Bearish DI
                 elif (
@@ -426,12 +426,12 @@ class EMAADXTrend:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
-                    trade_logger.info(
-                        f"SELL SIGNAL (Enter Short - EMA+ADX Trend) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
-                        f"EMA: {current_row['ema']:.2f} | ADX: {current_row['adx']:.2f} (Rising) | "
-                        f"DI-: {current_row['di_minus']:.2f} > DI+: {current_row['di_plus']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Enter Short - EMA+ADX Trend) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
+                    #     f"EMA: {current_row['ema']:.2f} | ADX: {current_row['adx']:.2f} (Rising) | "
+                    #     f"DI-: {current_row['di_minus']:.2f} > DI+: {current_row['di_plus']:.2f}"
+                    # )
 
             elif self.open_positions[-1]["direction"] == "long":
                 # Long Exit: Price below EMA OR Weak ADX OR Falling ADX
@@ -453,12 +453,12 @@ class EMAADXTrend:
                     self._close_position(idx, exit_reason, "sell", "exit_long")
                     last_signal = "SELL"
 
-                    trade_logger.info(
-                        f"SELL SIGNAL (Exit Long - EMA+ADX Trend) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
-                        f"Reason: {exit_reason} | EMA: {current_row['ema']:.2f} | "
-                        f"ADX: {current_row['adx']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Exit Long - EMA+ADX Trend) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
+                    #     f"Reason: {exit_reason} | EMA: {current_row['ema']:.2f} | "
+                    #     f"ADX: {current_row['adx']:.2f}"
+                    # )
 
             elif self.open_positions[-1]["direction"] == "short":
                 # Short Exit: Price above EMA OR Weak ADX OR Falling ADX
@@ -480,12 +480,12 @@ class EMAADXTrend:
                     self._close_position(idx, exit_reason, "buy", "exit_short")
                     last_signal = "BUY"
 
-                    trade_logger.info(
-                        f"BUY SIGNAL (Exit Short - EMA+ADX Trend) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
-                        f"Reason: {exit_reason} | EMA: {current_row['ema']:.2f} | "
-                        f"ADX: {current_row['adx']:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Exit Short - EMA+ADX Trend) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | Price: {current_price:.2f} | "
+                    #     f"Reason: {exit_reason} | EMA: {current_row['ema']:.2f} | "
+                    #     f"ADX: {current_row['adx']:.2f}"
+                    # )
 
         return last_signal
 
@@ -534,12 +534,12 @@ class EMAADXTrend:
                 "direction": "long",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | Size: {order['size']} | "
-                f"Cost: {order['executed_price'] * order['size']:.2f} | "
-                f"Comm: {order['commission']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | Size: {order['size']} | "
+            #     f"Cost: {order['executed_price'] * order['size']:.2f} | "
+            #     f"Comm: {order['commission']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -550,12 +550,12 @@ class EMAADXTrend:
                 "direction": "short",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | Size: {order['size']} | "
-                f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
-                f"Comm: {order['commission']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | Size: {order['size']} | "
+            #     f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
+            #     f"Comm: {order['commission']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -623,10 +623,10 @@ class EMAADXTrend:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop()
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -651,10 +651,10 @@ class EMAADXTrend:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

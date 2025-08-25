@@ -176,10 +176,10 @@ class BBVWAPStrategy:
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Below Lower BB: {self.data.iloc[idx]['price_below_lower_bb']} | Below VWAP: {self.data.iloc[idx]['price_below_vwap']}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Below Lower BB: {self.data.iloc[idx]['price_below_lower_bb']} | Below VWAP: {self.data.iloc[idx]['price_below_vwap']}"
+                    # )
                 elif (
                     self.data.iloc[idx]["bearish_entry"]
                     and self.data.iloc[idx]["volume_surge"]
@@ -200,10 +200,10 @@ class BBVWAPStrategy:
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Above Upper BB: {self.data.iloc[idx]['price_above_upper_bb']} | Above VWAP: {self.data.iloc[idx]['price_above_vwap']}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Above Upper BB: {self.data.iloc[idx]['price_above_upper_bb']} | Above VWAP: {self.data.iloc[idx]['price_above_vwap']}"
+                    # )
                 else:
                     self.last_signal = None
             else:
@@ -215,11 +215,11 @@ class BBVWAPStrategy:
                         idx, "Bullish exit condition", "sell", "exit_long"
                     )
                     self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached VWAP: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['vwap']} | "
-                        f"Reached Upper BB: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['bb_top']}"
-                    )
+                    # trade_logger.info(
+                    #     f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Reached VWAP: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['vwap']} | "
+                    #     f"Reached Upper BB: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['bb_top']}"
+                    # )
                 elif (
                     self.open_positions[-1]["direction"] == "short"
                     and self.data.iloc[idx]["bearish_exit"]
@@ -228,11 +228,11 @@ class BBVWAPStrategy:
                         idx, "Bearish exit condition", "buy", "exit_short"
                     )
                     self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Reached VWAP: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['vwap']} | "
-                        f"Reached Lower BB: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['bb_bot']}"
-                    )
+                    # trade_logger.info(
+                    #     f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Reached VWAP: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['vwap']} | "
+                    #     f"Reached Lower BB: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['bb_bot']}"
+                    # )
         return self.last_signal
 
     def _notify_order(self, idx):
@@ -251,9 +251,9 @@ class BBVWAPStrategy:
                 "direction": "long",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -264,9 +264,9 @@ class BBVWAPStrategy:
                 "direction": "short",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
