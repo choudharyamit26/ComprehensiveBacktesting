@@ -286,13 +286,13 @@ class TrendlineWilliams:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
-                    trade_logger.info(
-                        f"BUY SIGNAL (Enter Long - Trendline + Williams %R) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | "
-                        f"Price: {current_price:.2f} | "
-                        f"Williams %R: {self.data.iloc[idx]['williams']:.2f} < {self.params['williams_oversold']} (Oversold) | "
-                        f"Trendline Support: {support_trendline:.2f} (Touch)"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Enter Long - Trendline + Williams %R) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | "
+                    #     f"Price: {current_price:.2f} | "
+                    #     f"Williams %R: {self.data.iloc[idx]['williams']:.2f} < {self.params['williams_oversold']} (Oversold) | "
+                    #     f"Trendline Support: {support_trendline:.2f} (Touch)"
+                    # )
                 # Short Entry
                 elif (
                     resistance_touch
@@ -306,13 +306,13 @@ class TrendlineWilliams:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
-                    trade_logger.info(
-                        f"SELL SIGNAL (Enter Short - Trendline + Williams %R) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | "
-                        f"Price: {current_price:.2f} | "
-                        f"Williams %R: {self.data.iloc[idx]['williams']:.2f} > {self.params['williams_overbought']} (Overbought) | "
-                        f"Trendline Resistance: {resistance_trendline:.2f} (Touch)"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Enter Short - Trendline + Williams %R) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | "
+                    #     f"Price: {current_price:.2f} | "
+                    #     f"Williams %R: {self.data.iloc[idx]['williams']:.2f} > {self.params['williams_overbought']} (Overbought) | "
+                    #     f"Trendline Resistance: {resistance_trendline:.2f} (Touch)"
+                    # )
             elif self.open_positions[-1]["direction"] == "long":
                 # Long Exit
                 if (
@@ -326,14 +326,14 @@ class TrendlineWilliams:
                     )
                     self._close_position(idx, exit_reason, "sell", "exit_long")
                     last_signal = "SELL"  # Set the signal for exit
-                    trade_logger.info(
-                        f"SELL SIGNAL (Exit Long - Trendline + Williams %R) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | "
-                        f"Price: {current_price:.2f} | "
-                        f"Reason: {exit_reason} | "
-                        f"Williams %R: {self.data.iloc[idx]['williams']:.2f} | "
-                        f"Trendline Support: {support_trendline:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Exit Long - Trendline + Williams %R) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | "
+                    #     f"Price: {current_price:.2f} | "
+                    #     f"Reason: {exit_reason} | "
+                    #     f"Williams %R: {self.data.iloc[idx]['williams']:.2f} | "
+                    #     f"Trendline Support: {support_trendline:.2f}"
+                    # )
             elif self.open_positions[-1]["direction"] == "short":
                 # Short Exit
                 if (
@@ -347,14 +347,14 @@ class TrendlineWilliams:
                     )
                     self._close_position(idx, exit_reason, "buy", "exit_short")
                     last_signal = "BUY"  # Set the signal for exit
-                    trade_logger.info(
-                        f"BUY SIGNAL (Exit Short - Trendline + Williams %R) | Row: {idx} | "
-                        f"Time: {bar_time_ist} | "
-                        f"Price: {current_price:.2f} | "
-                        f"Reason: {exit_reason} | "
-                        f"Williams %R: {self.data.iloc[idx]['williams']:.2f} | "
-                        f"Trendline Resistance: {resistance_trendline:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Exit Short - Trendline + Williams %R) | Row: {idx} | "
+                    #     f"Time: {bar_time_ist} | "
+                    #     f"Price: {current_price:.2f} | "
+                    #     f"Reason: {exit_reason} | "
+                    #     f"Williams %R: {self.data.iloc[idx]['williams']:.2f} | "
+                    #     f"Trendline Resistance: {resistance_trendline:.2f}"
+                    # )
 
         return last_signal
 
@@ -403,13 +403,13 @@ class TrendlineWilliams:
                 "direction": "long",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | "
-                f"Size: {order['size']} | "
-                f"Cost: {order['executed_price'] * order['size']:.2f} | "
-                f"Comm: {order['commission']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | "
+            #     f"Size: {order['size']} | "
+            #     f"Cost: {order['executed_price'] * order['size']:.2f} | "
+            #     f"Comm: {order['commission']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -420,13 +420,13 @@ class TrendlineWilliams:
                 "direction": "short",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | "
-                f"Size: {order['size']} | "
-                f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
-                f"Comm: {order['commission']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | "
+            #     f"Size: {order['size']} | "
+            #     f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
+            #     f"Comm: {order['commission']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -485,14 +485,14 @@ class TrendlineWilliams:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | "
-                f"Size: {order['size']} | "
-                f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
-                f"Comm: {order['commission']:.2f} | "
-                f"PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | "
+            #     f"Size: {order['size']} | "
+            #     f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
+            #     f"Comm: {order['commission']:.2f} | "
+            #     f"PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop(0)
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -519,14 +519,14 @@ class TrendlineWilliams:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | "
-                f"Price: {order['executed_price']:.2f} | "
-                f"Size: {order['size']} | "
-                f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
-                f"Comm: {order['commission']:.2f} | "
-                f"PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | "
+            #     f"Price: {order['executed_price']:.2f} | "
+            #     f"Size: {order['size']} | "
+            #     f"Cost: {order['executed_price'] * abs(order['size']):.2f} | "
+            #     f"Comm: {order['commission']:.2f} | "
+            #     f"PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

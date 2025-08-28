@@ -1,9 +1,8 @@
 import asyncio
-import pickle
 import pandas as pd
 import os
 import logging
-from datetime import date, datetime, timedelta, time, timezone
+from datetime import date, datetime, timedelta, time
 import pytz
 import requests
 from retrying import retry
@@ -18,7 +17,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 from cachetools import TTLCache
 from comprehensive_backtesting.data import init_dhan_client
-from get_llm_signal import get_llm_signal, get_openrouter_llm_signal
 from intraday.utils import get_index_signal_dhan_api, get_sector_security_id
 from live_data import (
     get_combined_data_with_persistent_live,
@@ -36,7 +34,6 @@ from tenacity import (
 )
 import sqlite3
 import asyncio
-import aiofiles
 import json
 from datetime import datetime
 from typing import Optional, Dict
@@ -85,14 +82,11 @@ IST = pytz.timezone("Asia/Kolkata")
 import asyncio
 import json
 import struct
-import threading
-from typing import Dict, List, Optional, Callable
+from typing import Dict, List, Optional
 from datetime import datetime
 import logging
 import pandas as pd
-import websocket
 import os
-from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -400,7 +394,9 @@ def last_traded_price(security_id: int):
     Returns:
         float: The last traded price, or None if the request fails or security ID is not found.
     """
-    time.sleep(5)
+    import time
+
+    time.sleep(60)
     # API endpoint and headers
     url = "https://api.dhan.co/v2/marketfeed/ltp"
     headers = {
@@ -411,7 +407,7 @@ def last_traded_price(security_id: int):
     }
 
     # Prepare request body (security IDs can be in NSE_EQ or NSE_FNO)
-    payload = {"NSE_EQ": [security_id]}
+    payload = {"NSE_EQ": [int(security_id)]}
 
     try:
         # Make the POST request
@@ -420,7 +416,7 @@ def last_traded_price(security_id: int):
 
         # Parse the response
         data = response.json()
-
+        logger.info(f"LTP response data: {data}")
         if data.get("status") == "success":
             # Check NSE_EQ
             if str(security_id) in data["data"].get("NSE_EQ", {}):
@@ -523,6 +519,158 @@ def get_order_details_by_order_id(order_id: str) -> Optional[Dict]:
     except sqlite3.Error as e:
         print(f"Database error fetching order details for order_id {order_id}: {e}")
         return None
+
+
+import websockets
+import struct
+import json
+import asyncio
+import os
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+async def fetch_last_traded_price(
+    security_ids: list, exchange_segment: str = "NSE_EQ"
+) -> dict:
+    """
+    Fetch the last traded price (LTP) for a list of security IDs using DhanHQ WebSocket API.
+
+    Args:
+        security_ids (list): List of security IDs to fetch LTP for.
+        exchange_segment (str): Exchange segment (e.g., "NSE_EQ", "NSE_FNO"). Default: "NSE_EQ".
+
+    Returns:
+        dict: Dictionary mapping security IDs to their last traded prices, or None if failed.
+    """
+    # Validate inputs
+    if not security_ids:
+        logger.error("No security IDs provided")
+        return {}
+
+    if len(security_ids) > 100:
+        logger.warning(
+            "API supports up to 100 instruments per subscription. Truncating list."
+        )
+        security_ids = security_ids[:100]
+
+    # Convert security IDs to strings to ensure compatibility
+    security_ids = [str(sid) for sid in security_ids]
+    ltp_results = {sid: None for sid in security_ids}
+
+    # WebSocket URL and credentials
+    access_token = os.getenv("DHAN_ACCESS_TOKEN")
+    client_id = os.getenv("DHAN_CLIENT_ID")
+    if not access_token or not client_id:
+        logger.error(
+            "Missing DHAN_ACCESS_TOKEN or DHAN_CLIENT_ID environment variables"
+        )
+        return ltp_results
+
+    ws_url = f"wss://api-feed.dhan.co?version=2&token={access_token}&clientId={client_id}&authType=2"
+    logger.debug(f"Connecting to WebSocket URL: {ws_url}")
+
+    async def subscribe_instruments(websocket):
+        """Send subscription request for instruments."""
+        subscription_message = {
+            "RequestCode": 15,  # Ticker Packet subscription
+            "InstrumentCount": len(security_ids),
+            "InstrumentList": [
+                {"ExchangeSegment": exchange_segment, "SecurityId": sid}
+                for sid in security_ids
+            ],
+        }
+        logger.debug(f"Sending subscription message: {subscription_message}")
+        await websocket.send(json.dumps(subscription_message))
+        logger.info(f"Subscribed to {len(security_ids)} instruments: {security_ids}")
+
+    async def process_messages(websocket):
+        """Process incoming WebSocket messages and extract LTP."""
+        try:
+            while True:
+                message = await websocket.recv()
+                logger.debug(
+                    f"Received message type: {type(message)}, length: {len(message) if isinstance(message, bytes) else 'N/A'}"
+                )
+
+                if isinstance(message, bytes) and len(message) >= 16:
+                    try:
+                        # Parse Ticker Packet (16 bytes: 8-byte header + 4-byte LTP + 4-byte LTT)
+                        header = message[:8]
+                        response_code, msg_length, exchange_seg, security_id = (
+                            struct.unpack("<BHB4s", header)
+                        )
+                        security_id = str(
+                            struct.unpack("<I", security_id)[0]
+                        )  # Convert to string for consistency
+
+                        logger.debug(
+                            f"Parsed header: response_code={response_code}, msg_length={msg_length}, "
+                            f"exchange_seg={exchange_seg}, security_id={security_id}"
+                        )
+
+                        if response_code == 2 and security_id in ltp_results:
+                            ltp, ltt = struct.unpack(
+                                "<fi", message[8:16]
+                            )  # LTP (float32) + LTT (int32)
+                            ltp_results[security_id] = ltp
+                            logger.info(
+                                f"Received LTP for {security_id}: {ltp} (LTT: {ltt})"
+                            )
+
+                            # Check if all LTPs are received
+                            if all(ltp is not None for ltp in ltp_results.values()):
+                                logger.info(
+                                    "All LTPs received, exiting message processing"
+                                )
+                                return
+                        else:
+                            logger.debug(
+                                f"Ignoring message: response_code={response_code}, security_id={security_id}"
+                            )
+                    except struct.error as e:
+                        logger.error(f"Error unpacking binary message: {e}")
+                else:
+                    logger.debug(f"Received non-binary or invalid message: {message}")
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.error(f"WebSocket connection closed: {e}")
+        except Exception as e:
+            logger.error(f"Error processing WebSocket message: {e}")
+
+    async def attempt_connection():
+        """Attempt WebSocket connection with retry logic."""
+        max_retries = 3
+        retry_delay = 5  # seconds
+        for attempt in range(max_retries):
+            try:
+                logger.info(
+                    f"Attempting WebSocket connection (Attempt {attempt + 1}/{max_retries})"
+                )
+                async with websockets.connect(
+                    ws_url, ping_interval=10, ping_timeout=40
+                ) as websocket:
+                    await subscribe_instruments(websocket)
+                    await asyncio.wait_for(
+                        process_messages(websocket), timeout=60.0
+                    )  # Increased timeout
+                    return ltp_results
+            except websockets.exceptions.WebSocketException as e:
+                logger.error(f"WebSocket error on attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for LTP data")
+                break
+            except Exception as e:
+                logger.error(f"Unexpected error: {e}")
+                break
+        logger.error("Failed to fetch LTP after all retries")
+        return ltp_results
+
+    # Run the connection attempt
+    return await attempt_connection()
 
 
 class PositionManager:
@@ -777,10 +925,10 @@ class PositionManager:
         try:
             results = dhan.get_positions()
             positions = []
-            logger.info(f"Results from get_active_positions:{results["data"]}")
+            # logger.info(f"Results from get_active_positions:{results["data"]}")
             for pos in results["data"]:
                 # If response is dict-like and has 'positionType', filter out CLOSED
-                logger.info(f"active positions values from loop: {pos}")
+                # logger.info(f"active positions values from loop: {pos}")
                 if isinstance(pos, dict):
                     if pos.get("positionType") != "CLOSED":
                         positions.append(pos)
@@ -819,13 +967,17 @@ class PositionManager:
     ) -> float:
         """Calculate profit percentage for a position"""
         logger.info(f"Calculating profit percentage for {position,current_price}")
-        entry_price = position["buyAvg"]
-        if position["direction"] == "BUY":
+        entry_price = (
+            position["costPrice"] if "costPrice" in position else position["buyAvg"]
+        )
+        if position["positionType"] == "LONG":
             return ((current_price - entry_price) / entry_price) * 100
         else:  # SHORT position
             return ((entry_price - current_price) / entry_price) * 100
 
-    async def update_position_to_breakeven(self, order_id: str, position: Dict) -> bool:
+    async def update_position_to_breakeven(
+        self, stoploss_order_id: str, position: Dict
+    ) -> bool:
         """Update stop loss to breakeven (entry price)"""
         try:
             new_stop_loss = position["price"]
@@ -840,38 +992,58 @@ class PositionManager:
                 SET current_stop_loss = ?, breakeven_moved = 1, last_updated = ?
                 WHERE order_id = ?
             """,
-                (new_stop_loss, datetime.now().isoformat(), order_id),
+                (new_stop_loss, datetime.now().isoformat(), stoploss_order_id),
             )
 
             conn.commit()
             conn.close()
 
             # Update actual order via Dhan API (if not simulation)
-            if not SIMULATION_MODE:
-                try:
-                    modify_response = dhan.modify_order(
-                        order_id=order_id,
-                        order_type="STOP_LOSS",
-                        price=new_stop_loss,
-                        quantity=position["quantity"],
+            try:
+                response = requests.put(
+                    url=f"https://api.dhan.co/v2/super/orders/{stoploss_order_id}",
+                    json={
+                        "dhanClientId": position["dhanClientId"],
+                        "orderId": stoploss_order_id,
+                        "legName": "STOP_LOSS_LEG",
+                        "stopLossPrice": new_stop_loss,
+                        "trailingJump": position.get("trailingJump", 0),
+                    },
+                    headers={
+                        "Content-Type": "application/json",
+                        "access-token": os.getenv("DHAN_ACCESS_TOKEN"),
+                    },
+                )
+
+                if response.status_code == 200:
+                    modify_response = response.json()
+                    if modify_response.get("orderStatus"):
+                        logger.info(
+                            f"Modified super order {stoploss_order_id} stop loss to breakeven: ₹{new_stop_loss:.2f}. Response: {modify_response}"
+                        )
+                    else:
+                        logger.error(
+                            f"Failed to modify super order {stoploss_order_id}: {modify_response}"
+                        )
+                        return False
+                else:
+                    logger.error(
+                        f"Failed to modify super order {stoploss_order_id}: HTTP {response.status_code}"
                     )
-                    logger.info(
-                        f"Modified order {order_id} stop loss to breakeven: ₹{new_stop_loss:.2f}. Response:{modify_response}"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to modify order {order_id}: {e}")
                     return False
 
-            # Send Telegram notification
+            except Exception as e:
+                logger.error(f"Failed to modify super order {stoploss_order_id}: {e}")
+                return False
+
             await send_telegram_alert(
                 f"*{position['tradingSymbol']} BREAKEVEN MOVED* 🛡️\n"
-                f"Stop Loss moved to Entry Price: ₹{new_stop_loss:.2f}\n"
+                f"Stop Loss Moved to Entry Price: ₹{new_stop_loss:.2f}\n"
                 f"Position is now risk-free!\n"
                 f"Time: {datetime.now().strftime('%H:%M:%S')}"
             )
-
             logger.info(
-                f"{position['ticker']} moved to breakeven @ ₹{new_stop_loss:.2f}"
+                f"{position['tradingSymbol']} moved to breakeven @ ₹{new_stop_loss:.2f}"
             )
             return True
 
@@ -890,12 +1062,12 @@ class PositionManager:
 
             if remaining_quantity <= 0:
                 logger.warning(
-                    f"Cannot take partial profit for {position['ticker']}: insufficient quantity"
+                    f"Cannot take partial profit for {position['securityId']}: insufficient quantity"
                 )
                 return False
 
             # Determine exit direction
-            exit_direction = "SELL" if position["direction"] == "BUY" else "BUY"
+            exit_direction = "SELL" if position["transactionType"] == "BUY" else "BUY"
 
             # Place market order for partial exit
             exit_order = await place_market_order(
@@ -905,7 +1077,7 @@ class PositionManager:
             if exit_order and exit_order.get("orderId"):
                 # Calculate partial profit
                 entry_price = position["price"]
-                if position["direction"] == "BUY":
+                if position["transactionType"] == "BUY":
                     partial_pnl = (current_price - entry_price) * half_quantity
                 else:
                     partial_pnl = (entry_price - current_price) * half_quantity
@@ -931,7 +1103,7 @@ class PositionManager:
                     self.simulated_pnl += partial_pnl
                     self.simulated_trades.append(
                         {
-                            "ticker": position["ticker"],
+                            "ticker": position["securityId"],
                             "direction": exit_direction,
                             "entry_price": entry_price,
                             "exit_price": current_price,
@@ -952,22 +1124,27 @@ class PositionManager:
                 )
 
                 trade_logger.info(
-                    f"PARTIAL PROFIT | {position['ticker']} | {exit_direction} | "
+                    f"PARTIAL PROFIT | {position['securityId']} | {exit_direction} | "
                     f"Qty: {half_quantity} | Price: ₹{current_price:.2f} | P&L: ₹{partial_pnl:.2f}"
                 )
 
                 logger.info(
-                    f"{position['ticker']} partial profit: {half_quantity} shares @ ₹{current_price:.2f}, "
+                    f"{position['securityId']} partial profit: {half_quantity} shares @ ₹{current_price:.2f}, "
                     f"P&L: ₹{partial_pnl:.2f}, Remaining: {remaining_quantity}"
                 )
 
                 return True
 
             else:
-                logger.error(f"Partial profit order failed for {position['ticker']}")
+                logger.error(
+                    f"Partial profit order failed for {position['securityId']}"
+                )
                 return False
 
         except Exception as e:
+            import traceback
+
+            traceback.print_exec()
             logger.error(f"Error taking partial profit: {e}")
             return False
 
@@ -1044,29 +1221,153 @@ class PositionManager:
             logger.error(f"Error closing position: {e}")
             return False
 
+    # async def monitor_positions(self):
+    #     """Main position monitoring loop with breakeven and partial profit logic"""
+
+    #     logger.info("Starting position monitoring with profit management")
+
+    #     while True:
+    #         try:
+    #             positions = await self.get_active_positions()
+    #             # logger.info(f"Active positions: {positions, type(positions)}")
+    #             if not positions:
+    #                 await asyncio.sleep(30)
+    #                 continue
+    #             order_details = ""
+    #             for position in positions:
+    #                 logger.info(f"Monitoring position: {position}")
+    #                 try:
+    #                     current_price = await fetch_last_traded_price([position["securityId"]])
+    #                     order_details = get_traded_orders(position["securityId"])[0]
+    #                     # current_price = order_details["ltp"]
+
+    #                     logger.info(
+    #                         f"current price from position monitoring: {current_price}, order details: {order_details}"
+    #                     )
+
+    #                     # Calculate profit percentage
+    #                     profit_pct = await self.calculate_profit_percentage(
+    #                         position, current_price
+    #                     )
+
+    #                     # Determine condition for breakeven based on transaction type
+    #                     stop_loss_price = order_details["legDetails"][0]["price"]
+    #                     stoploss_order_id = order_details["legDetails"][0]["orderId"]
+    #                     entry_price = order_details["price"]
+    #                     transaction_type = order_details["transactionType"]
+    #                     logger.info(
+    #                         f"Complete  order details: { get_traded_orders(position["securityId"])} stop_loss_price: {stop_loss_price}, stoploss_order_id: {stoploss_order_id}, entry_price: {entry_price}, transaction_type: {transaction_type}"
+    #                     )
+    #                     breakeven_condition = (
+    #                         transaction_type == "BUY" and stop_loss_price < entry_price
+    #                     ) or (
+    #                         transaction_type == "SELL" and stop_loss_price > entry_price
+    #                     )
+    #                     logger.info(
+    #                         f"breakeven_condition: {breakeven_condition}, profit_pct: {profit_pct}"
+    #                     )
+    #                     # Move to breakeven at 0.15% profit if condition is met
+    #                     if profit_pct >= 0.15 and breakeven_condition:
+    #                         await self.update_position_to_breakeven(
+    #                             order_details["orderId"], order_details, stoploss_order_id
+    #                         )
+    #                         await self.take_partial_profit(
+    #                             order_details["orderId"],
+    #                             order_details,
+    #                             order_details["ltp"],
+    #                         )
+    #                         continue
+
+    #                     # 3. Check stop-loss/take-profit triggers
+    #                     exit_triggered = False
+    #                     reason = ""
+    #                     super_order_details = get_order_details_by_order_id(
+    #                         order_details["orderId"]
+    #                     )
+
+    #                     if super_order_details["direction"] == "BUY":
+    #                         if (
+    #                             current_price
+    #                             <= super_order_details["current_stop_loss"]
+    #                         ):
+    #                             exit_triggered = True
+    #                             reason = "Stop-loss hit"
+    #                         elif current_price >= super_order_details["take_profit"]:
+    #                             exit_triggered = True
+    #                             reason = "Take-profit hit"
+    #                     else:  # SHORT
+    #                         if (
+    #                             current_price
+    #                             >= super_order_details["current_stop_loss"]
+    #                         ):
+    #                             exit_triggered = True
+    #                             reason = "Stop-loss hit"
+    #                         elif current_price <= super_order_details["take_profit"]:
+    #                             exit_triggered = True
+    #                             reason = "Take-profit hit"
+
+    #                     if exit_triggered:
+    #                         # Place exit order
+    #                         exit_direction = (
+    #                             "SELL"
+    #                             if super_order_details["direction"] == "BUY"
+    #                             else "BUY"
+    #                         )
+    #                         exit_order = await place_market_order(
+    #                             super_order_details["security_id"],
+    #                             exit_direction,
+    #                             super_order_details["quantity"],
+    #                         )
+
+    #                         if exit_order:
+    #                             await self.close_position(
+    #                                 super_order_details["order_id"],
+    #                                 current_price,
+    #                                 reason,
+    #                             )
+
+    #                 except Exception as e:
+    #                     logger.error(
+    #                         f"Error monitoring position {super_order_details['security_id']}: {e}"
+    #                     )
+
+    #             await asyncio.sleep(5)  # Check every 5 seconds
+
+    #         except Exception as e:
+    #             import traceback
+
+    #             traceback.print_exc()
+    #             logger.error(f"Position monitoring error: {e}")
+
+    #             await asyncio.sleep(60)
     async def monitor_positions(self):
         """Main position monitoring loop with breakeven and partial profit logic"""
-
         logger.info("Starting position monitoring with profit management")
 
         while True:
             try:
                 positions = await self.get_active_positions()
-                logger.info(f"Active positions: {positions, type(positions)}")
                 if not positions:
                     await asyncio.sleep(30)
                     continue
-                order_details = ""
+
                 for position in positions:
-                    print("FROM monitor position:", position)
                     logger.info(f"Monitoring position: {position}")
                     try:
-                        # current_price =  last_traded_price(position["securityId"])
-                        order_details = get_traded_orders(position["securityId"])[0]
-                        current_price = order_details["ltp"]
+                        ltp_result = await fetch_last_traded_price(
+                            [position["securityId"]]
+                        )
+                        current_price = ltp_result.get(str(position["securityId"]))
 
+                        if current_price is None:
+                            logger.error(
+                                f"Failed to fetch LTP for security {position['securityId']}"
+                            )
+                            continue  # Skip this position if LTP is None
+
+                        order_details = get_traded_orders(position["securityId"])[0]
                         logger.info(
-                            f"current price from position monitoring: {current_price}"
+                            f"Current price: {current_price}, Order details: {order_details}"
                         )
 
                         # Calculate profit percentage
@@ -1074,90 +1375,78 @@ class PositionManager:
                             position, current_price
                         )
 
-                        # Determine condition for breakeven based on transaction type
+                        # Rest of the logic remains the same
                         stop_loss_price = order_details["legDetails"][0]["price"]
+                        stoploss_order_id = order_details["legDetails"][0]["orderId"]
                         entry_price = order_details["price"]
                         transaction_type = order_details["transactionType"]
-
                         breakeven_condition = (
                             transaction_type == "BUY" and stop_loss_price < entry_price
                         ) or (
                             transaction_type == "SELL" and stop_loss_price > entry_price
                         )
-
-                        # Move to breakeven at 0.15% profit if condition is met
-                        if profit_pct >= 0.15 and breakeven_condition:
-                            await self.update_position_to_breakeven(
-                                order_details["orderId"], order_details
-                            )
-                            await self.take_partial_profit(
-                                order_details["orderId"],
-                                order_details,
-                                order_details["ltp"],
-                            )
-                            continue
-
-                        # 3. Check stop-loss/take-profit triggers
-                        exit_triggered = False
-                        reason = ""
-                        super_order_details = get_order_details_by_order_id(
-                            order_details["orderId"]
+                        logger.info(
+                            f"Breakeven condition: {breakeven_condition}, Profit %: {profit_pct}"
                         )
 
-                        if super_order_details["direction"] == "BUY":
-                            if (
-                                current_price
-                                <= super_order_details["current_stop_loss"]
-                            ):
-                                exit_triggered = True
-                                reason = "Stop-loss hit"
-                            elif current_price >= super_order_details["take_profit"]:
-                                exit_triggered = True
-                                reason = "Take-profit hit"
-                        else:  # SHORT
-                            if (
-                                current_price
-                                >= super_order_details["current_stop_loss"]
-                            ):
-                                exit_triggered = True
-                                reason = "Stop-loss hit"
-                            elif current_price <= super_order_details["take_profit"]:
-                                exit_triggered = True
-                                reason = "Take-profit hit"
-
-                        if exit_triggered:
-                            # Place exit order
-                            exit_direction = (
-                                "SELL"
-                                if super_order_details["direction"] == "BUY"
-                                else "BUY"
+                        if profit_pct >= 0.15 and breakeven_condition:
+                            await send_telegram_alert(
+                                f"*{position['tradingSymbol']} BREAKEVEN MOVED* 🛡️\n"
+                                f"Move Stop Loss to Entry Price: ₹{entry_price:.2f}\n"
+                                f"Position is now risk-free!\n"
+                                f"Time: {datetime.now().strftime('%H:%M:%S')}"
                             )
-                            exit_order = await place_market_order(
-                                super_order_details["security_id"],
-                                exit_direction,
-                                super_order_details["quantity"],
+                            await self.update_position_to_breakeven(
+                                stoploss_order_id, order_details
                             )
+                            await self.take_partial_profit(
+                                order_details["orderId"], order_details, current_price
+                            )
+                            # Send Telegram notification
+                            continue
 
-                            if exit_order:
-                                await self.close_position(
-                                    super_order_details["order_id"],
-                                    current_price,
-                                    reason,
-                                )
+                        # Rest of the exit logic
+                        # exit_triggered = False
+                        # reason = ""
+                        # super_order_details = get_order_details_by_order_id(order_details["orderId"])
+                        # logger.info(f"Super order details: {super_order_details}")
+                        # if super_order_details["direction"] == "BUY":
+                        #     if current_price <= super_order_details["current_stop_loss"]:
+                        #         exit_triggered = True
+                        #         reason = "Stop-loss hit"
+                        #     elif current_price >= super_order_details["take_profit"]:
+                        #         exit_triggered = True
+                        #         reason = "Take-profit hit"
+                        # else:  # SHORT
+                        #     if current_price >= super_order_details["current_stop_loss"]:
+                        #         exit_triggered = True
+                        #         reason = "Stop-loss hit"
+                        #     elif current_price <= super_order_details["take_profit"]:
+                        #         exit_triggered = True
+                        #         reason = "Take-profit hit"
+
+                        # if exit_triggered:
+                        #     exit_direction = "SELL" if super_order_details["direction"] == "BUY" else "BUY"
+                        #     exit_order = await place_market_order(
+                        #         super_order_details["security_id"], exit_direction, super_order_details["quantity"]
+                        #     )
+                        #     if exit_order:
+                        #         await self.close_position(
+                        #             super_order_details["order_id"], current_price, reason
+                        #         )
 
                     except Exception as e:
+                        import traceback
+
+                        traceback.print_exc()
                         logger.error(
-                            f"Error monitoring position {position['security_id']}: {e}"
+                            f"Error monitoring position {position['securityId']}: {e}"
                         )
 
                 await asyncio.sleep(5)  # Check every 5 seconds
 
             except Exception as e:
-                import traceback
-
-                traceback.print_exc()
                 logger.error(f"Position monitoring error: {e}")
-
                 await asyncio.sleep(60)
 
     async def get_simulation_report(self) -> Dict:
@@ -1196,8 +1485,21 @@ class PositionManager:
 position_manager = PositionManager(DB_PATH)
 
 
-def round_to_tick_size(price: float, tick_size: float) -> float:
-    """Round a price to the nearest multiple of the tick size."""
+def round_to_tick_size(price: float) -> float:
+    """Round a price to the nearest multiple of the NSE tick size based on price range."""
+    if price <= 250:
+        tick_size = 0.01  # ₹0.01 for stocks <= ₹250
+    elif price <= 1000:
+        tick_size = 0.05  # ₹0.05 for stocks ₹251 - ₹1,000
+    elif price <= 5000:
+        tick_size = 0.10  # ₹0.10 for stocks ₹1,001 - ₹5,000
+    elif price <= 10000:
+        tick_size = 0.50  # ₹0.50 for stocks ₹5,001 - ₹10,000
+    elif price <= 20000:
+        tick_size = 1.00  # ₹1.00 for stocks ₹10,001 - ₹20,000
+    else:
+        tick_size = 5.00  # ₹5.00 for stocks > ₹20,001
+
     return round(price / tick_size) * tick_size
 
 
@@ -1322,7 +1624,7 @@ def is_security_id_in_positions(
             active_orders += 1
         total_orders += 1
 
-    logger.info(f"Today's positions: {positions_list}")
+    # logger.info(f"Today's positions: {positions_list}")
 
     return is_today_trade, total_orders, active_orders
 
@@ -1346,13 +1648,17 @@ async def execute_strategy_signal(
         is_today_trade, total_orders, active_orders = is_security_id_in_positions(
             security_id, todays_positions
         )
-
-        if is_today_trade:
+        pending_orders = fetch_pending_orders()
+        logger.info(
+            f"Pending orders security IDs: {pending_orders}, signal for security id {security_id}"
+        )
+        if is_today_trade or str(security_id) in pending_orders:
             logger.info(
                 f"{ticker} - Already traded today. "
                 f"Total orders: {total_orders}, "
                 f"Active orders: {active_orders}"
             )
+            return False
         if total_orders >= 10:
             dhan.kill_switch()
 
@@ -1435,9 +1741,9 @@ async def execute_strategy_signal(
         tick_size = DEFAULT_TICK_SIZE
 
         # Round prices to the nearest tick size
-        rounded_entry_price = round_to_tick_size(entry_price, tick_size)
-        rounded_stop_loss = round_to_tick_size(risk_params["stop_loss"], tick_size)
-        rounded_take_profit = round_to_tick_size(risk_params["take_profit"], tick_size)
+        rounded_entry_price = round_to_tick_size(entry_price)
+        rounded_stop_loss = round_to_tick_size(risk_params["stop_loss"])
+        rounded_take_profit = round_to_tick_size(risk_params["take_profit"])
 
         # Check available funds
         funds = dhan.get_fund_limits().get("data", {}).get("availabelBalance", 0)
@@ -1582,6 +1888,56 @@ async def cleanup_old_orders(days_to_keep: int = 30):
         logger.error(f"Failed to cleanup old orders: {str(e)}")
 
 
+def fetch_pending_orders() -> List[str]:
+    """
+    Fetch pending orders from Dhan API and return a list of security_ids for orders with PENDING status.
+
+    Args:
+        access_token (str): API access token for authentication
+
+    Returns:
+        List[str]: List of security_ids for pending orders
+
+    Raises:
+        requests.exceptions.RequestException: If the API request fails
+        ValueError: If the response is not valid JSON or contains unexpected data
+    """
+    url = "https://api.dhan.co/v2/super/orders"
+    headers = {
+        "access-token": os.getenv("DHAN_ACCESS_TOKEN"),
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raises an HTTPError for bad responses
+
+        # Parse JSON response
+        try:
+            orders = response.json()
+        except json.JSONDecodeError:
+            raise ValueError("Invalid JSON response from API")
+
+        # Validate response is a list
+        if not isinstance(orders, list):
+            raise ValueError("API response is not a list of orders")
+
+        # Filter for pending orders and extract security_ids
+        security_ids = [
+            order.get("securityId")
+            for order in orders
+            if order.get("orderStatus") == "PENDING"
+        ]
+        logger.info(f"Pending orders fetched: {security_ids}")
+        return security_ids
+
+    except requests.exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(f"API request failed: {str(e)}")
+    except Exception as e:
+        raise Exception(f"Unexpected error: {str(e)}")
+
+
 async def process_stock_with_exit_monitoring(
     ticker: str, security_id: int, strategies: List[Dict]
 ) -> None:
@@ -1697,15 +2053,15 @@ async def process_stock_with_exit_monitoring(
                 (
                     strategy_signal.upper() == "BUY"
                     and (
-                        nifty_signal["signal"].upper() in ["BUY", "BOTH"]
-                        or sector_signal["signal"].upper() in ["BUY", "BOTH"]
+                        nifty_signal["signal"].upper() == "BUY"
+                        or sector_signal["signal"].upper() == "BUY"
                     )
                 )
                 or (
                     strategy_signal.upper() == "SELL"
                     and (
-                        nifty_signal["signal"].upper() in ["BUY", "BOTH"]
-                        or sector_signal["signal"].upper() in ["BUY", "BOTH"]
+                        nifty_signal["signal"].upper() == "SELL"
+                        or sector_signal["signal"].upper() == "SELL"
                     )
                 )
             ):
@@ -1728,7 +2084,11 @@ async def process_stock_with_exit_monitoring(
                 is_today_trade, total_orders, active_orders = (
                     is_security_id_in_positions(security_id, todays_positions)
                 )
-                if not is_today_trade:
+                pending_orders = fetch_pending_orders()
+                logger.info(
+                    f"Pending orders security IDs: {pending_orders}, signal for security id {str(security_id)}"
+                )
+                if not is_today_trade and str(security_id) not in pending_orders:
                     executed = await execute_strategy_signal(
                         ticker,
                         security_id,
@@ -2219,7 +2579,7 @@ async def place_super_order(
             "price": round(current_price, 2),
             "targetPrice": round(take_profit, 2),
             "stopLossPrice": round(stop_loss, 2),
-            "trailingJump": 1 if current_price > 1000 else 0.1,
+            "trailingJump": 1 if current_price > 1000 else 0.2,
         }
 
         session = await api_client.get_session()

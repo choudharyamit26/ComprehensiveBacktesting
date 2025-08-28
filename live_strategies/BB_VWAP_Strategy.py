@@ -315,9 +315,9 @@ class BBVWAPStrategy:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop(0)
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -343,9 +343,9 @@ class BBVWAPStrategy:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

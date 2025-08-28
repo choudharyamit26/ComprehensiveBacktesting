@@ -46,7 +46,7 @@ def get_market_times_cached(day_date=None):
 
     Returns a tuple (open_dt, close_dt, trading_end_dt), each timezone-aware.
     """
-    from live_data_2508 import CONFIG  # Local import to avoid cycles
+    from live_data import CONFIG  # Local import to avoid cycles
 
     if day_date is None:
         day_date = datetime.now(IST).date()
@@ -171,21 +171,175 @@ class APIClient:
             await self.connector.close()
 
 
+# def get_index_signal_dhan_api(
+#     security_id: str, index_name: str = "Index", threshold: float = 0.6
+# ) -> dict:
+#     """
+#     Returns BUY, SELL, or BOTH recommendation for any index using Dhan API's intraday charts.
+
+#     Signal Logic (Percentage-based):
+#     - BUY: if Index moves >= +threshold% (from first candle open to most recent close)
+#     - SELL: if Index moves <= -threshold% (from first candle open to most recent close)
+#     - BOTH: if movement is between -threshold% and +threshold%
+
+#     Parameters:
+#     security_id: str, Dhan API security ID for the index (e.g., "13" for Nifty50, "21" for Nifty Auto)
+#     index_name: str, Name of the index for logging/display purposes
+#     threshold: float, Percentage threshold for signals (default: 0.6%)
+
+#     Returns:
+#     dict: Contains signal, change, and additional info
+#     """
+#     CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
+#     ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
+
+#     try:
+#         ist = timezone("Asia/Kolkata")
+#         current_date = datetime.now(ist)
+#         date_str = current_date.strftime("%Y-%m-%d")
+
+#         logger.info(f"Fetching {index_name} data for date: {date_str}")
+
+#         # API endpoint and payload
+#         url = "https://api.dhan.co/v2/charts/intraday"
+#         headers = {
+#             "client-id": CLIENT_ID,
+#             "access-token": ACCESS_TOKEN,
+#             "Content-Type": "application/json",
+#         }
+#         payload = {
+#             "securityId": security_id,
+#             "exchangeSegment": "IDX_I",
+#             "instrument": "INDEX",
+#             "interval": "15",  # 15-minute intervals
+#             "oi": False,
+#             "fromDate": date_str,
+#             "toDate": date_str,
+#         }
+
+#         # Make API request
+#         response = requests.post(url, headers=headers, json=payload, timeout=30)
+#         response.raise_for_status()
+#         data = response.json()
+#         # print(data)
+#         # Validate API response
+#         required_fields = ["open", "high", "low", "close", "volume", "timestamp"]
+#         if not all(field in data for field in required_fields):
+#             return {
+#                 "signal": "ERROR",
+#                 "message": "Invalid API response structure",
+#                 "change": None,
+#                 "data": data,
+#             }
+
+#         # Check if data arrays are not empty
+#         if not data["open"] or len(data["open"]) == 0:
+#             return {
+#                 "signal": "NO_DATA",
+#                 "message": f"No trading data available for {index_name} on {date_str}",
+#                 "change": None,
+#                 "data": None,
+#             }
+
+#         # Convert to DataFrame for easier manipulation
+#         df = pd.DataFrame(
+#             {
+#                 "open": pd.to_numeric(data["open"], errors="coerce"),
+#                 "high": pd.to_numeric(data["high"], errors="coerce"),
+#                 "low": pd.to_numeric(data["low"], errors="coerce"),
+#                 "close": pd.to_numeric(data["close"], errors="coerce"),
+#                 "volume": pd.to_numeric(data["volume"], errors="coerce"),
+#                 "timestamp": data["timestamp"],
+#             }
+#         )
+
+#         # Remove any rows with NaN values
+#         df = df.dropna()
+
+#         if df.empty:
+#             return {
+#                 "signal": "ERROR",
+#                 "message": "No valid price data after cleaning",
+#                 "change": None,
+#                 "data": None,
+#             }
+
+#         # Calculate day's change (first open to most recent close)
+#         first_candle_open = df["open"].iloc[0]
+#         most_recent_close = df["close"].iloc[-1]
+#         day_high = df["high"].max()
+#         day_low = df["low"].min()
+
+#         # Calculate the main change (first candle open to most recent close)
+#         change_points = round(most_recent_close - first_candle_open, 2)
+#         change_pct = round((change_points / first_candle_open) * 100, 2)
+
+#         # Calculate threshold in points (percentage-based)
+#         threshold_points = first_candle_open * threshold / 100
+
+#         # Generate signal based on percentage change
+#         if change_pct >= threshold:
+#             signal = "BUY"
+#         elif change_pct <= -threshold:
+#             signal = "SELL"
+#         # else:
+#         #     signal = "BOTH"
+
+#         logger.info(
+#             f"{index_name} change: {change_points} points ({change_pct}%) - Signal: {signal}"
+#         )
+
+#         return {
+#             "index_name": index_name,
+#             "security_id": security_id,
+#             "signal": signal,
+#             "change_points": change_points,
+#             "change_percent": change_pct,
+#             "first_candle_open": first_candle_open,
+#             "most_recent_close": most_recent_close,
+#             "day_high": day_high,
+#             "day_low": day_low,
+#             "threshold_percent": threshold,
+#             "threshold_points": threshold_points,
+#             "date": date_str,
+#             "data_points": len(df),
+#             "first_timestamp": df["timestamp"].iloc[0] if len(df) > 0 else None,
+#             "last_timestamp": df["timestamp"].iloc[-1] if len(df) > 0 else None,
+#             "message": f"{index_name} moved {change_points:+.2f} points ({change_pct:+.2f}%) from first candle open",
+#         }
+
+#     except requests.exceptions.Timeout:
+#         return {"signal": "ERROR", "message": "API request timeout", "change": None}
+#     except requests.exceptions.RequestException as e:
+#         return {
+#             "signal": "ERROR",
+#             "message": f"API request failed: {str(e)}",
+#             "change": None,
+#         }
+#     except Exception as e:
+#         logger.error(f"Unexpected error for {index_name}: {str(e)}")
+#         return {
+#             "signal": "ERROR",
+#             "message": f"Unexpected error: {str(e)}",
+#             "change": None,
+#         }
+
+
 def get_index_signal_dhan_api(
-    security_id: str, index_name: str = "Index", threshold: float = 0.6
+    security_id: str, index_name: str = "Index", threshold: float = 0.4
 ) -> dict:
     """
     Returns BUY, SELL, or BOTH recommendation for any index using Dhan API's intraday charts.
 
     Signal Logic (Percentage-based):
-    - BUY: if Index moves >= +threshold% (from first candle open to most recent close)
-    - SELL: if Index moves <= -threshold% (from first candle open to most recent close)
-    - BOTH: if movement is between -threshold% and +threshold%
+    - BUY: if Index moves >= +0.4% (from first candle open to most recent close)
+    - SELL: if Index moves <= -0.4% (from first candle open to most recent close)
+    - BOTH: if movement is between -0.4% and +0.4%
 
     Parameters:
-    security_id: str, Dhan API security ID for the index (e.g., "13" for Nifty50, "21" for Nifty Auto)
+    security_id: str, Dhan API security ID for the index (e.g., "13" for Nifty50)
     index_name: str, Name of the index for logging/display purposes
-    threshold: float, Percentage threshold for signals (default: 0.6%)
+    threshold: float, Percentage threshold for signals (default: 0.4%)
 
     Returns:
     dict: Contains signal, change, and additional info
@@ -194,7 +348,9 @@ def get_index_signal_dhan_api(
     ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 
     try:
-        ist = timezone("Asia/Kolkata")
+        ist = pytz.timezone(
+            "Asia/Kolkata"
+        )  # Fixed: Use pytz.timezone instead of datetime.timezone
         current_date = datetime.now(ist)
         date_str = current_date.strftime("%Y-%m-%d")
 
@@ -221,7 +377,9 @@ def get_index_signal_dhan_api(
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         data = response.json()
-        # print(data)
+        logger.info(
+            f"API response data from nifty signal generator: {data}"
+        )  # Debug log for API response
         # Validate API response
         required_fields = ["open", "high", "low", "close", "volume", "timestamp"]
         if not all(field in data for field in required_fields):
@@ -264,13 +422,15 @@ def get_index_signal_dhan_api(
                 "data": None,
             }
 
-        # Calculate day's change (first open to most recent close)
+        # Fetch first candle (open price of first 15-minute candle, typically 9:15 AM IST)
         first_candle_open = df["open"].iloc[0]
-        most_recent_close = df["close"].iloc[-1]
-        day_high = df["high"].max()
-        day_low = df["low"].min()
+        first_candle_timestamp = df["timestamp"].iloc[0]
 
-        # Calculate the main change (first candle open to most recent close)
+        # Fetch most recent candle (close price of last 15-minute candle, e.g., 10:00 AM IST)
+        most_recent_close = df["close"].iloc[-1]
+        most_recent_timestamp = df["timestamp"].iloc[-1]
+
+        # Calculate day's change (first open to most recent close)
         change_points = round(most_recent_close - first_candle_open, 2)
         change_pct = round((change_points / first_candle_open) * 100, 2)
 
@@ -278,9 +438,9 @@ def get_index_signal_dhan_api(
         threshold_points = first_candle_open * threshold / 100
 
         # Generate signal based on percentage change
-        if change_pct >= threshold:
+        if change_points > 80:
             signal = "BUY"
-        elif change_pct <= -threshold:
+        elif change_points < -80:
             signal = "SELL"
         else:
             signal = "BOTH"
@@ -297,14 +457,14 @@ def get_index_signal_dhan_api(
             "change_percent": change_pct,
             "first_candle_open": first_candle_open,
             "most_recent_close": most_recent_close,
-            "day_high": day_high,
-            "day_low": day_low,
-            "threshold_percent": threshold,
+            "day_high": df["high"].max(),
+            "day_low": df["low"].min(),
+            "threshold_percent": 0.4,
             "threshold_points": threshold_points,
             "date": date_str,
             "data_points": len(df),
-            "first_timestamp": df["timestamp"].iloc[0] if len(df) > 0 else None,
-            "last_timestamp": df["timestamp"].iloc[-1] if len(df) > 0 else None,
+            "first_timestamp": first_candle_timestamp,
+            "last_timestamp": most_recent_timestamp,
             "message": f"{index_name} moved {change_points:+.2f} points ({change_pct:+.2f}%) from first candle open",
         }
 

@@ -203,10 +203,10 @@ class PivotCCI:
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near S1: {self.data.iloc[idx]['near_s1']} | Near S2: {self.data.iloc[idx]['near_s2']}"
+                    # )
                 elif self.data.iloc[idx]["bearish_entry"]:
                     self.order = {
                         "ref": str(uuid4()),
@@ -224,10 +224,10 @@ class PivotCCI:
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"CCI: {self.data.iloc[idx]['cci']:.2f} | Near R1: {self.data.iloc[idx]['near_r1']} | Near R2: {self.data.iloc[idx]['near_r2']}"
+                    # )
                 else:
                     self.last_signal = None
             else:
@@ -239,10 +239,10 @@ class PivotCCI:
                         idx, "Bullish exit condition", "sell", "exit_long"
                     )
                     self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']}"
-                    )
+                    # trade_logger.info(
+                    #     f"EXIT LONG | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] >= self.data.iloc[idx]['pivot']}"
+                    # )
                 elif (
                     self.open_positions[-1]["direction"] == "short"
                     and self.data.iloc[idx]["bearish_exit"]
@@ -251,10 +251,10 @@ class PivotCCI:
                         idx, "Bearish exit condition", "buy", "exit_short"
                     )
                     self.last_signal = None
-                    trade_logger.info(
-                        f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']}"
-                    )
+                    # trade_logger.info(
+                    #     f"EXIT SHORT | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"CCI: {self.data.iloc[idx]['cci']:.2f} | Reached Pivot: {self.data.iloc[idx]['close'] <= self.data.iloc[idx]['pivot']}"
+                    # )
                 else:
                     self.last_signal = None
         return self.last_signal
@@ -275,9 +275,9 @@ class PivotCCI:
                 "direction": "long",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -288,9 +288,9 @@ class PivotCCI:
                 "direction": "short",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -339,9 +339,9 @@ class PivotCCI:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop(0)
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -367,9 +367,9 @@ class PivotCCI:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

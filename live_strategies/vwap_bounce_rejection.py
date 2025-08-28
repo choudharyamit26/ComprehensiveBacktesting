@@ -344,11 +344,11 @@ class VWAPBounceRejection:
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near VWAP: {self.data.iloc[idx]['near_vwap']} | Bullish Pattern: {self.data.iloc[idx]['bullish_pattern']} | "
-                        f"Volume Rising: {self.data.iloc[idx]['volume_rising']} | Below Session Open: {self.data.iloc[idx]['close'] < session_open}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Near VWAP: {self.data.iloc[idx]['near_vwap']} | Bullish Pattern: {self.data.iloc[idx]['bullish_pattern']} | "
+                    #     f"Volume Rising: {self.data.iloc[idx]['volume_rising']} | Below Session Open: {self.data.iloc[idx]['close'] < session_open}"
+                    # )
                 elif bearish_entry:
                     self.order = {
                         "ref": str(uuid4()),
@@ -369,11 +369,11 @@ class VWAPBounceRejection:
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Near VWAP: {self.data.iloc[idx]['near_vwap']} | Bearish Pattern: {self.data.iloc[idx]['bearish_pattern']} | "
-                        f"Volume Rising: {self.data.iloc[idx]['volume_rising']} | Above Session Open: {self.data.iloc[idx]['close'] > session_open}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL | Time: {bar_time_ist} | Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Near VWAP: {self.data.iloc[idx]['near_vwap']} | Bearish Pattern: {self.data.iloc[idx]['bearish_pattern']} | "
+                    #     f"Volume Rising: {self.data.iloc[idx]['volume_rising']} | Above Session Open: {self.data.iloc[idx]['close'] > session_open}"
+                    # )
                 else:
                     self.last_signal = None
             else:
@@ -394,12 +394,12 @@ class VWAPBounceRejection:
                             "exit_long",
                         )
                         self.last_signal = None
-                        trade_logger.info(
-                            f"EXIT LONG | Time: {bar_time_ist} | Price: {current_price:.2f} | "
-                            f"Stop-Loss Hit: {current_price <= position['stop_loss']} | "
-                            f"Profit Target Hit: {current_price >= position['profit_target']} | "
-                            f"VWAP Deviation: {abs(current_price - self.data.iloc[idx]['vwap']) > stop_loss_level}"
-                        )
+                        # trade_logger.info(
+                        #     f"EXIT LONG | Time: {bar_time_ist} | Price: {current_price:.2f} | "
+                        #     f"Stop-Loss Hit: {current_price <= position['stop_loss']} | "
+                        #     f"Profit Target Hit: {current_price >= position['profit_target']} | "
+                        #     f"VWAP Deviation: {abs(current_price - self.data.iloc[idx]['vwap']) > stop_loss_level}"
+                        # )
                 elif position["direction"] == "short":
                     exit_condition = (
                         current_price >= position["stop_loss"]
@@ -415,12 +415,12 @@ class VWAPBounceRejection:
                             "exit_short",
                         )
                         self.last_signal = None
-                        trade_logger.info(
-                            f"EXIT SHORT | Time: {bar_time_ist} | Price: {current_price:.2f} | "
-                            f"Stop-Loss Hit: {current_price >= position['stop_loss']} | "
-                            f"Profit Target Hit: {current_price <= position['profit_target']} | "
-                            f"VWAP Deviation: {abs(current_price - self.data.iloc[idx]['vwap']) > stop_loss_level}"
-                        )
+                        # trade_logger.info(
+                        #     f"EXIT SHORT | Time: {bar_time_ist} | Price: {current_price:.2f} | "
+                        #     f"Stop-Loss Hit: {current_price >= position['stop_loss']} | "
+                        #     f"Profit Target Hit: {current_price <= position['profit_target']} | "
+                        #     f"VWAP Deviation: {abs(current_price - self.data.iloc[idx]['vwap']) > stop_loss_level}"
+                        # )
                 else:
                     self.last_signal = None
         return self.last_signal
@@ -443,10 +443,10 @@ class VWAPBounceRejection:
                 "profit_target": order["profit_target"],
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f} | "
-                f"Stop-Loss: {order['stop_loss']:.2f} | Profit Target: {order['profit_target']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f} | "
+            #     f"Stop-Loss: {order['stop_loss']:.2f} | Profit Target: {order['profit_target']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -459,10 +459,10 @@ class VWAPBounceRejection:
                 "profit_target": order["profit_target"],
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f} | "
-                f"Stop-Loss: {order['stop_loss']:.2f} | Profit Target: {order['profit_target']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f} | "
+            #     f"Stop-Loss: {order['stop_loss']:.2f} | Profit Target: {order['profit_target']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -511,9 +511,9 @@ class VWAPBounceRejection:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop(0)
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -539,9 +539,9 @@ class VWAPBounceRejection:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

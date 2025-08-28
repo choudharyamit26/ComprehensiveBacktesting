@@ -183,11 +183,11 @@ class HeadShouldersConfirmation:
                     self.entry_signals.append(
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
-                    trade_logger.info(
-                        f"BUY SIGNAL (Head & Shoulders) | Time: {bar_time_ist} | "
-                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Target: {target:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Head & Shoulders) | Time: {bar_time_ist} | "
+                    #     f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Target: {target:.2f}"
+                    # )
                 elif (
                     direction == "bearish"
                     and self.data.iloc[idx]["rsi"] < 70
@@ -210,11 +210,11 @@ class HeadShouldersConfirmation:
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"SELL SIGNAL (Head & Shoulders) | Time: {bar_time_ist} | "
-                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Target: {target:.2f}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Head & Shoulders) | Time: {bar_time_ist} | "
+                    #     f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Target: {target:.2f}"
+                    # )
             else:
                 if self.open_positions[-1]["direction"] == "long":
                     # Long Exit
@@ -260,9 +260,9 @@ class HeadShouldersConfirmation:
                 "direction": "long",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Enter Long) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
         elif order["order_type"] == "enter_short" and order["action"] == "sell":
             position_info = {
                 "entry_time": exec_dt,
@@ -273,9 +273,9 @@ class HeadShouldersConfirmation:
                 "direction": "short",
             }
             self.open_positions.append(position_info)
-            trade_logger.info(
-                f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Enter Short) | Ref: {order['ref']} | Price: {order['executed_price']:.2f}"
+            # )
 
         self.order = None
         self.order_type = None
@@ -324,9 +324,9 @@ class HeadShouldersConfirmation:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"SELL EXECUTED (Exit Long) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
         elif order["order_type"] == "exit_short" and order["action"] == "buy":
             entry_info = self.open_positions.pop(0)
             pnl = (entry_info["entry_price"] - order["executed_price"]) * abs(
@@ -352,9 +352,9 @@ class HeadShouldersConfirmation:
             }
             self.completed_trades.append(trade_info)
             self.trade_count += 1
-            trade_logger.info(
-                f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
-            )
+            # trade_logger.info(
+            #     f"BUY EXECUTED (Exit Short) | Ref: {order['ref']} | PnL: {pnl:.2f} | Reason: {reason}"
+            # )
 
         self.order = None
         self.order_type = None

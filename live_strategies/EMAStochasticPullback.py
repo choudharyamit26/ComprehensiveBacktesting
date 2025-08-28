@@ -159,11 +159,11 @@ class EMAStochasticPullback:
                         {"datetime": bar_time_ist, "signal": "BUY"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"BUY SIGNAL (Enter Long) | Time: {bar_time_ist} | "
-                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Stoch_K: {self.data.iloc[idx]['stoch_k']:.2f} < {self.params['stoch_oversold']}"
-                    )
+                    # trade_logger.info(
+                    #     f"BUY SIGNAL (Enter Long) | Time: {bar_time_ist} | "
+                    #     f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Stoch_K: {self.data.iloc[idx]['stoch_k']:.2f} < {self.params['stoch_oversold']}"
+                    # )
                 # Short Entry
                 elif (
                     self.data.iloc[idx]["ema_touch_short"]
@@ -185,11 +185,11 @@ class EMAStochasticPullback:
                         {"datetime": bar_time_ist, "signal": "SELL"}
                     )
                     self._notify_order(idx)
-                    trade_logger.info(
-                        f"SELL SIGNAL (Enter Short) | Time: {bar_time_ist} | "
-                        f"Price: {self.data.iloc[idx]['close']:.2f} | "
-                        f"Stoch_K: {self.data.iloc[idx]['stoch_k']:.2f} > {self.params['stoch_overbought']}"
-                    )
+                    # trade_logger.info(
+                    #     f"SELL SIGNAL (Enter Short) | Time: {bar_time_ist} | "
+                    #     f"Price: {self.data.iloc[idx]['close']:.2f} | "
+                    #     f"Stoch_K: {self.data.iloc[idx]['stoch_k']:.2f} > {self.params['stoch_overbought']}"
+                    # )
             else:
                 if self.open_positions[-1]["direction"] == "long":
                     # Long Exit
