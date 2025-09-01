@@ -205,7 +205,7 @@ SQUARE_OFF_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
 # Trading configuration
 MIN_VOTES = int(os.getenv("MIN_VOTES", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
-MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 5))
+MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
 VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.02))
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 100))
@@ -1221,125 +1221,6 @@ class PositionManager:
             logger.error(f"Error closing position: {e}")
             return False
 
-    # async def monitor_positions(self):
-    #     """Main position monitoring loop with breakeven and partial profit logic"""
-
-    #     logger.info("Starting position monitoring with profit management")
-
-    #     while True:
-    #         try:
-    #             positions = await self.get_active_positions()
-    #             # logger.info(f"Active positions: {positions, type(positions)}")
-    #             if not positions:
-    #                 await asyncio.sleep(30)
-    #                 continue
-    #             order_details = ""
-    #             for position in positions:
-    #                 logger.info(f"Monitoring position: {position}")
-    #                 try:
-    #                     current_price = await fetch_last_traded_price([position["securityId"]])
-    #                     order_details = get_traded_orders(position["securityId"])[0]
-    #                     # current_price = order_details["ltp"]
-
-    #                     logger.info(
-    #                         f"current price from position monitoring: {current_price}, order details: {order_details}"
-    #                     )
-
-    #                     # Calculate profit percentage
-    #                     profit_pct = await self.calculate_profit_percentage(
-    #                         position, current_price
-    #                     )
-
-    #                     # Determine condition for breakeven based on transaction type
-    #                     stop_loss_price = order_details["legDetails"][0]["price"]
-    #                     stoploss_order_id = order_details["legDetails"][0]["orderId"]
-    #                     entry_price = order_details["price"]
-    #                     transaction_type = order_details["transactionType"]
-    #                     logger.info(
-    #                         f"Complete  order details: { get_traded_orders(position["securityId"])} stop_loss_price: {stop_loss_price}, stoploss_order_id: {stoploss_order_id}, entry_price: {entry_price}, transaction_type: {transaction_type}"
-    #                     )
-    #                     breakeven_condition = (
-    #                         transaction_type == "BUY" and stop_loss_price < entry_price
-    #                     ) or (
-    #                         transaction_type == "SELL" and stop_loss_price > entry_price
-    #                     )
-    #                     logger.info(
-    #                         f"breakeven_condition: {breakeven_condition}, profit_pct: {profit_pct}"
-    #                     )
-    #                     # Move to breakeven at 0.15% profit if condition is met
-    #                     if profit_pct >= 0.15 and breakeven_condition:
-    #                         await self.update_position_to_breakeven(
-    #                             order_details["orderId"], order_details, stoploss_order_id
-    #                         )
-    #                         await self.take_partial_profit(
-    #                             order_details["orderId"],
-    #                             order_details,
-    #                             order_details["ltp"],
-    #                         )
-    #                         continue
-
-    #                     # 3. Check stop-loss/take-profit triggers
-    #                     exit_triggered = False
-    #                     reason = ""
-    #                     super_order_details = get_order_details_by_order_id(
-    #                         order_details["orderId"]
-    #                     )
-
-    #                     if super_order_details["direction"] == "BUY":
-    #                         if (
-    #                             current_price
-    #                             <= super_order_details["current_stop_loss"]
-    #                         ):
-    #                             exit_triggered = True
-    #                             reason = "Stop-loss hit"
-    #                         elif current_price >= super_order_details["take_profit"]:
-    #                             exit_triggered = True
-    #                             reason = "Take-profit hit"
-    #                     else:  # SHORT
-    #                         if (
-    #                             current_price
-    #                             >= super_order_details["current_stop_loss"]
-    #                         ):
-    #                             exit_triggered = True
-    #                             reason = "Stop-loss hit"
-    #                         elif current_price <= super_order_details["take_profit"]:
-    #                             exit_triggered = True
-    #                             reason = "Take-profit hit"
-
-    #                     if exit_triggered:
-    #                         # Place exit order
-    #                         exit_direction = (
-    #                             "SELL"
-    #                             if super_order_details["direction"] == "BUY"
-    #                             else "BUY"
-    #                         )
-    #                         exit_order = await place_market_order(
-    #                             super_order_details["security_id"],
-    #                             exit_direction,
-    #                             super_order_details["quantity"],
-    #                         )
-
-    #                         if exit_order:
-    #                             await self.close_position(
-    #                                 super_order_details["order_id"],
-    #                                 current_price,
-    #                                 reason,
-    #                             )
-
-    #                 except Exception as e:
-    #                     logger.error(
-    #                         f"Error monitoring position {super_order_details['security_id']}: {e}"
-    #                     )
-
-    #             await asyncio.sleep(5)  # Check every 5 seconds
-
-    #         except Exception as e:
-    #             import traceback
-
-    #             traceback.print_exc()
-    #             logger.error(f"Position monitoring error: {e}")
-
-    #             await asyncio.sleep(60)
     async def monitor_positions(self):
         """Main position monitoring loop with breakeven and partial profit logic"""
         logger.info("Starting position monitoring with profit management")
@@ -1389,7 +1270,7 @@ class PositionManager:
                             f"Breakeven condition: {breakeven_condition}, Profit %: {profit_pct}"
                         )
 
-                        if profit_pct >= 0.15 and breakeven_condition:
+                        if profit_pct >= 0.5 and breakeven_condition:
                             await send_telegram_alert(
                                 f"*{position['tradingSymbol']} BREAKEVEN MOVED* 🛡️\n"
                                 f"Move Stop Loss to Entry Price: ₹{entry_price:.2f}\n"
@@ -1404,36 +1285,6 @@ class PositionManager:
                             )
                             # Send Telegram notification
                             continue
-
-                        # Rest of the exit logic
-                        # exit_triggered = False
-                        # reason = ""
-                        # super_order_details = get_order_details_by_order_id(order_details["orderId"])
-                        # logger.info(f"Super order details: {super_order_details}")
-                        # if super_order_details["direction"] == "BUY":
-                        #     if current_price <= super_order_details["current_stop_loss"]:
-                        #         exit_triggered = True
-                        #         reason = "Stop-loss hit"
-                        #     elif current_price >= super_order_details["take_profit"]:
-                        #         exit_triggered = True
-                        #         reason = "Take-profit hit"
-                        # else:  # SHORT
-                        #     if current_price >= super_order_details["current_stop_loss"]:
-                        #         exit_triggered = True
-                        #         reason = "Stop-loss hit"
-                        #     elif current_price <= super_order_details["take_profit"]:
-                        #         exit_triggered = True
-                        #         reason = "Take-profit hit"
-
-                        # if exit_triggered:
-                        #     exit_direction = "SELL" if super_order_details["direction"] == "BUY" else "BUY"
-                        #     exit_order = await place_market_order(
-                        #         super_order_details["security_id"], exit_direction, super_order_details["quantity"]
-                        #     )
-                        #     if exit_order:
-                        #         await self.close_position(
-                        #             super_order_details["order_id"], current_price, reason
-                        #         )
 
                     except Exception as e:
                         import traceback
@@ -1579,24 +1430,6 @@ async def check_ticker_traded_today(security_id: int) -> dict:
         }
 
 
-# def is_security_id_in_positions(security_id: int, positions: list[dict]) -> bool:
-#     """Check if the given security_id exists in the list of positions."""
-#     positions = (pos for pos in positions["data"])
-#     is_today_trade = False
-#     active_orders = 0
-#     total_orders = 0
-#     for pos in positions:
-#         for k, v in pos.items():
-#             if k == "securityId" and v == str(security_id):
-#                 is_today_trade = True
-#             if k == "positionType" and v != "CLOSED":
-#                 active_orders += 1
-#         total_orders += 1
-#     logger.info(f"Today's positions :{[positions]}")
-
-#     return is_today_trade, total_orders, active_orders
-
-
 def is_security_id_in_positions(
     security_id: int, positions: dict
 ) -> Tuple[bool, int, int]:
@@ -1713,32 +1546,13 @@ async def execute_strategy_signal(
         vwap = await calculate_vwap(hist_data)
         logger.info(f"Current price for {ticker}: ₹{current_price}")
 
-        # Improved entry price logic
         entry_price = (
-            min(
-                (
-                    current_price["price"]
-                    if isinstance(current_price, dict)
-                    else current_price
-                ),
-                vwap * 0.998,
-            )
-            if signal == "BUY"
-            else max(
-                (
-                    current_price["price"]
-                    if isinstance(current_price, dict)
-                    else current_price
-                ),
-                vwap * 1.002,
-            )
+            current_price["price"] if isinstance(current_price, dict) else current_price
         )
 
         # Calculate risk parameters
         risk_params = calculate_risk_params(regime, atr_value, entry_price, signal)
         now = datetime.now(IST)
-
-        tick_size = DEFAULT_TICK_SIZE
 
         # Round prices to the nearest tick size
         rounded_entry_price = round_to_tick_size(entry_price)
@@ -1938,9 +1752,41 @@ def fetch_pending_orders() -> List[str]:
         raise Exception(f"Unexpected error: {str(e)}")
 
 
-async def process_stock_with_exit_monitoring(
-    ticker: str, security_id: int, strategies: List[Dict]
-) -> None:
+def calculate_rsi(data, period=14):
+    """
+    Calculate RSI (Relative Strength Index) for the given data
+    """
+    if isinstance(data, list):
+        # Convert list of dicts to DataFrame
+        df = pd.DataFrame(data)
+    else:
+        df = data.copy()
+
+    # Ensure we have close prices
+    if "close" not in df.columns:
+        raise ValueError("Data must contain 'close' column")
+
+    close_prices = df["close"].astype(float)
+
+    # Calculate price changes
+    delta = close_prices.diff()
+
+    # Separate gains and losses
+    gains = delta.where(delta > 0, 0)
+    losses = -delta.where(delta < 0, 0)
+
+    # Calculate average gains and losses
+    avg_gains = gains.rolling(window=period, min_periods=period).mean()
+    avg_losses = losses.rolling(window=period, min_periods=period).mean()
+
+    # Calculate RS and RSI
+    rs = avg_gains / avg_losses
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi.iloc[-1]  # Return the latest RSI value
+
+
+async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -> None:
     """Separate entry and exit signal processing with LLM confirmation"""
     async with adaptive_semaphore:
         try:
@@ -1979,7 +1825,14 @@ async def process_stock_with_exit_monitoring(
             logger.debug(
                 f"{ticker} - Regime: {regime} (ADX: {adx_value:.2f}, ATR: {atr_value:.2f})"
             )
-
+            # Calculate RSI for filtering
+            current_rsi = None
+            try:
+                current_rsi = calculate_rsi(combined_data, period=14)
+                logger.debug(f"{ticker} - Current RSI: {current_rsi:.2f}")
+            except Exception as e:
+                logger.error(f"{ticker} - RSI calculation failed: {e}")
+                return
             # Process entry signals from strategies
             signals = []
             strategy_instances = []
@@ -2043,25 +1896,41 @@ async def process_stock_with_exit_monitoring(
                 #     s for s in strategy_instances if s["signal"] == "SELL"
                 # )
 
+            # RSI-based signal filtering
+            if strategy_signal == "BUY" and current_rsi > 70:
+                logger.info(
+                    f"{ticker} - BUY signal filtered out: RSI is overbought ({current_rsi:.2f} > 70)"
+                )
+                return
+            elif strategy_signal == "SELL" and current_rsi < 30:
+                logger.info(
+                    f"{ticker} - SELL signal filtered out: RSI is oversold ({current_rsi:.2f} < 30)"
+                )
+                return
             # If we have a strategy signal, get LLM confirmation
             nifty_signal = get_index_signal_dhan_api("13", "Nifty 50", 0.6)
             sector_security_id, index_name = get_sector_security_id(security_id)
             sector_signal = get_index_signal_dhan_api(
                 sector_security_id, index_name, 0.6
             )
-            if strategy_signal and (
-                (
-                    strategy_signal.upper() == "BUY"
-                    and (
-                        nifty_signal["signal"].upper() == "BUY"
-                        or sector_signal["signal"].upper() == "BUY"
+            if (
+                strategy_signal
+                and nifty_signal != "HOLD"
+                and sector_signal != "HOLD"
+                and (
+                    (
+                        strategy_signal.upper() == "BUY"
+                        and (
+                            nifty_signal["signal"].upper() == "BUY"
+                            or sector_signal["signal"].upper() == "BUY"
+                        )
                     )
-                )
-                or (
-                    strategy_signal.upper() == "SELL"
-                    and (
-                        nifty_signal["signal"].upper() == "SELL"
-                        or sector_signal["signal"].upper() == "SELL"
+                    or (
+                        strategy_signal.upper() == "SELL"
+                        and (
+                            nifty_signal["signal"].upper() == "SELL"
+                            or sector_signal["signal"].upper() == "SELL"
+                        )
                     )
                 )
             ):
@@ -2622,7 +2491,6 @@ async def place_super_order(
         return None
 
 
-# Helper functions for database operations
 async def get_super_order_by_id(order_id: str) -> Optional[Dict]:
     """Retrieve super order by ID from database"""
     try:
@@ -3824,7 +3692,7 @@ async def main_trading_loop_with_cache():
                 for s in batch:
                     task = asyncio.create_task(
                         asyncio.wait_for(
-                            process_stock_with_exit_monitoring(
+                            process_stock(
                                 s["ticker"], s["security_id"], s["strategies"]
                             ),
                             timeout=INDIVIDUAL_TASK_TIMEOUT,
@@ -3970,9 +3838,7 @@ async def main_simulation_loop():
                 batch = stock_universe[i : i + batch_size]
                 tasks = [
                     asyncio.create_task(
-                        process_stock_with_exit_monitoring(
-                            s["ticker"], s["security_id"], s["strategies"]
-                        )
+                        process_stock(s["ticker"], s["security_id"], s["strategies"])
                     )
                     for s in batch
                 ]
@@ -4002,7 +3868,40 @@ async def main_simulation_loop():
         logger.error(traceback.format_exc())
 
 
+def cleanup_folders_if_first_run_today():
+    today_str = date.today().isoformat()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # Create table if not exists
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS run_history (
+            run_date TEXT PRIMARY KEY
+        )
+        """
+    )
+    cursor.execute("SELECT run_date FROM run_history WHERE run_date = ?", (today_str,))
+    result = cursor.fetchone()
+    if not result:
+        # Remove folders
+        for folder in ["combined_data", "cache", "logs"]:
+            folder_path = os.path.join(os.getcwd(), folder)
+            if os.path.exists(folder_path):
+                try:
+                    import shutil
+
+                    shutil.rmtree(folder_path)
+                    print(f"Removed folder: {folder_path}")
+                except Exception as e:
+                    print(f"Failed to remove {folder_path}: {e}")
+        # Add today's date to DB
+        cursor.execute("INSERT INTO run_history (run_date) VALUES (?)", (today_str,))
+        conn.commit()
+    conn.close()
+
+
 if __name__ == "__main__":
+    cleanup_folders_if_first_run_today()
     try:
         # Re-parse arguments for main execution
         parser = argparse.ArgumentParser(description="Intraday Signal Generator")
