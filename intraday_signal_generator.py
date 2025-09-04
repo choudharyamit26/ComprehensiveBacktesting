@@ -1,5 +1,6 @@
 import asyncio
 import pandas as pd
+import math
 import os
 import logging
 from datetime import date, datetime, timedelta, time
@@ -17,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 from cachetools import TTLCache
 from comprehensive_backtesting.data import init_dhan_client
+from get_llm_signal import get_openrouter_llm_signal
 from intraday.utils import get_index_signal_dhan_api, get_sector_security_id
 from live_data import (
     get_combined_data_with_persistent_live,
@@ -205,7 +207,7 @@ SQUARE_OFF_TIME = time.fromisoformat(os.getenv("SQUARE_OFF_TIME", "15:16:00"))
 # Trading configuration
 MIN_VOTES = int(os.getenv("MIN_VOTES", 3))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", 100000))
-MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 2))
+MAX_QUANTITY = int(os.getenv("MAX_QUANTITY", 3))
 MAX_DAILY_LOSS_PERCENT = float(os.getenv("MAX_DAILY_LOSS", 0.02))
 VOLATILITY_THRESHOLD = float(os.getenv("VOLATILITY_THRESHOLD", 0.02))
 API_RATE_LIMIT = int(os.getenv("API_RATE_LIMIT", 100))
@@ -1271,14 +1273,15 @@ class PositionManager:
                         )
 
                         if profit_pct >= 0.5 and breakeven_condition:
+
+                            await self.update_position_to_breakeven(
+                                stoploss_order_id, order_details
+                            )
                             await send_telegram_alert(
                                 f"*{position['tradingSymbol']} BREAKEVEN MOVED* 🛡️\n"
                                 f"Move Stop Loss to Entry Price: ₹{entry_price:.2f}\n"
                                 f"Position is now risk-free!\n"
                                 f"Time: {datetime.now().strftime('%H:%M:%S')}"
-                            )
-                            await self.update_position_to_breakeven(
-                                stoploss_order_id, order_details
                             )
                             await self.take_partial_profit(
                                 order_details["orderId"], order_details, current_price
@@ -1942,13 +1945,13 @@ async def process_stock(ticker: str, security_id: int, strategies: List[Dict]) -
                 # llm_signal = await get_openrouter_llm_signal(ticker, combined_data)
                 # logger.info(f"{ticker} - LLM signal: {llm_signal}")
 
-                # Only proceed if LLM gives a clear BUY/SELL signal
+                # # Only proceed if LLM gives a clear BUY/SELL signal
                 # if llm_signal in ["BUY", "SELL"]:
-                # Compare signals and execute only if they match
-                # if strategy_signal == llm_signal:
-                #     logger.info(
-                #         f"{ticker} - SIGNAL CONFIRMATION: Both strategy and LLM agree on {strategy_signal}"
-                #     )
+                #     # Compare signals and execute only if they match
+                #     if strategy_signal == llm_signal:
+                #         logger.info(
+                #             f"{ticker} - SIGNAL CONFIRMATION: Both strategy and LLM agree on {strategy_signal}"
+                #         )
                 todays_positions = dhan.get_positions()
                 is_today_trade, total_orders, active_orders = (
                     is_security_id_in_positions(security_id, todays_positions)
@@ -3082,29 +3085,46 @@ def calculate_regime(
 
 @lru_cache(maxsize=500)
 def calculate_risk_params_cached(
-    regime: str, atr: float, current_price: float, direction: str, account_size: float
+    regime: str,
+    atr: float,
+    current_price: float,
+    direction: str,
+    account_size: float,
 ) -> Dict[str, float]:
     risk_per_trade = 0.01 * account_size
     if atr <= 0:
         atr = current_price * 0.01
+
+    # Fixed stop loss multiplier for all regimes
+    sl_mult = 1.5
+    stop_loss_distance = atr * sl_mult
+
+    # Calculate position size using risk_factor from regime config
     params_map = {
-        "trending": {"sl_mult": 2.0, "tp_mult": 3.0, "risk_factor": 0.8},
-        "range_bound": {"sl_mult": 1.5, "tp_mult": 2.0, "risk_factor": 1.0},
-        "transitional": {"sl_mult": 1.8, "tp_mult": 2.5, "risk_factor": 0.9},
-        "unknown": {"sl_mult": 1.8, "tp_mult": 2.5, "risk_factor": 0.9},
+        "trending": {"risk_factor": 1.0},
+        "range_bound": {"risk_factor": 1.0},
+        "transitional": {"risk_factor": 0.9},
+        "unknown": {"risk_factor": 0.9},
     }
     cfg = params_map.get(regime, params_map["unknown"])
-    stop_loss_distance = atr * cfg["sl_mult"]
-    position_size = min(
-        MAX_QUANTITY,
-        max(1, int((risk_per_trade / stop_loss_distance) * cfg["risk_factor"])),
-    )
+
+    # position_size = min(
+    #     MAX_QUANTITY,
+    #     max(1, int((risk_per_trade / stop_loss_distance) * cfg["risk_factor"])),
+    # )
+    funds = dhan.get_fund_limits().get("data", {}).get("availabelBalance", 0)
+    position_size = math.ceil((funds * 2.5) / current_price)
+    # Calculate take profit for minimum 1:2 risk-reward ratio
+    min_risk_reward = 2.0
+    take_profit_distance = stop_loss_distance * min_risk_reward
+
     if direction == "BUY":
         stop_loss = current_price - stop_loss_distance
-        take_profit = current_price + (atr * cfg["tp_mult"] * 1.75)
+        take_profit = current_price + take_profit_distance
     else:
         stop_loss = current_price + stop_loss_distance
-        take_profit = current_price - (atr * cfg["tp_mult"] * 1.75)
+        take_profit = current_price - take_profit_distance
+
     return {
         "position_size": position_size,
         "stop_loss": stop_loss,
@@ -3794,6 +3814,8 @@ async def main_trading_loop_with_cache():
 async def main_simulation_loop():
     """Continuous simulation run using offline data files"""
     try:
+        if not os.path.exists("cache"):
+            os.makedirs("cache")
         await telegram_queue.start()
         logger.info("Starting continuous simulation mode")
 
